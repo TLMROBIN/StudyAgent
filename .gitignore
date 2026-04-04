@@ -1,0 +1,13 @@
+.pytest_cache/
+__pycache__/
+.venv/
+node_modules/
+dist/
+data/
+.env
+.claude/
+.codex
+.DS_Store
+*.pyc
+*.pyo
+tests/测试资料/《新概念高中物理读本题解》第一册.pdf
