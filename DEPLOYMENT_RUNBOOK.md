@@ -13,9 +13,9 @@
 
 说明：
 
-- 当前 `docker-compose.yml` 仍偏研发 / 试运行用途
-- 其中 `backend` 使用 `--reload`，前端在 Compose 中改为构建产物由 Nginx 直接托管
-- 适合内网试运行、联调和验收，不等同于最终生产硬化方案
+- 当前基础 `docker-compose.yml` 主要用于联调验收、部署演练和发布前验证
+- 日常开发请优先参考仓库内 `DEVELOPMENT_WORKFLOW.md`
+- 当前方案仍适合内网试运行、联调和验收，不等同于最终生产硬化方案
 
 ## 一、部署前检查
 
@@ -73,6 +73,25 @@ npm run dev
 docker compose up -d --no-deps prometheus grafana
 ```
 
+依赖容器：
+
+```bash
+docker compose up -d redis postgres chromadb
+```
+
+### 方式 A2：容器化热更新开发
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d backend worker redis postgres chromadb frontend-dev
+```
+
+说明：
+
+- 该方式用于开发，不用于发布前最终镜像验证
+- `backend` 在 dev 覆盖层中启用 `--reload`
+- `worker` 使用宿主机代码挂载，任务代码变更后通常只需重启容器
+- 前端开发默认走 `http://127.0.0.1:5173`
+
 ### 方式 B：Compose 试运行
 
 ```bash
@@ -86,6 +105,7 @@ docker compose up -d --build
 - 这样可以避免与开发机上常见的本地 Redis / PostgreSQL / 向量库服务冲突
 - 当前机器上已有其他服务占用 `80` 和 `8000` 时，可直接使用这组默认映射并行运行
 - 当前 Compose 下不再依赖 Vite dev server，局域网访问走 Nginx 静态文件，稳定性更高
+- 这一步用于发布前验证时才值得执行；不要把它当成每次小改后的默认开发命令
 
 查看状态：
 
@@ -310,7 +330,7 @@ bash scripts/post_deploy_check.sh
 
 ## 七、当前已知限制
 
-1. Compose 基线仍偏研发模式，后端仍使用 reload，尚未拆分独立 prod Compose
+1. 当前基础 Compose 主要用于联调验收和发布验证，距离最终生产硬化方案仍有差距
 2. Grafana 默认账号密码仍为 `admin / admin`，正式试运行前应修改
 3. 更高并发压测结果仍需在目标试运行环境补测
 4. 若目标机器存在其他占用 `8000/8001/8080` 的服务，需先调整端口规划
@@ -327,7 +347,7 @@ bash scripts/post_deploy_check.sh
 
 若进入下一轮，可优先考虑：
 
-1. 拆分 dev / prod Compose
-2. 后端去掉 reload，改为多 worker
+1. 继续细化独立的生产硬化编排
+2. 后端改为更明确的多 worker / 进程管理策略
 3. 增加数据备份脚本
 4. 增加正式试运行环境的并发基线报告

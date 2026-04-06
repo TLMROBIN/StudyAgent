@@ -31,6 +31,16 @@ data/         本地数据目录
 
 ## 本地启动
 
+推荐顺序：
+
+1. 日常开发优先使用宿主机本地开发
+2. 需要容器化热更新时，再叠加 `docker-compose.dev.yml`
+3. 需要联调验收或发布验证时，再执行完整 `docker compose up -d --build`
+
+详细说明见：
+
+- `DEVELOPMENT_WORKFLOW.md`
+
 ### 1. 后端
 
 ```bash
@@ -67,6 +77,18 @@ docker compose up --build
 - Compose 试运行模式下，前端会在构建阶段打包，并由 Nginx 直接提供静态文件
 - 默认访问地址为 `http://127.0.0.1:8080/login`
 - 后端健康检查地址为 `http://127.0.0.1:8002/health`
+- 这条命令更适合“发布前验证 / 联调验收”，不建议作为每次小改代码后的默认开发命令
+
+### 5. 容器化热更新开发
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d backend worker redis postgres chromadb frontend-dev
+```
+
+- `backend` 会挂载宿主机代码，并启用 `--reload`
+- `worker` 会挂载宿主机代码，任务代码更新后通常只需 `restart worker`
+- 前端开发地址为 `http://127.0.0.1:5173`
+- 这条命令用于开发，不等同于部署验证
 
 ## 已知取舍
 
@@ -81,13 +103,13 @@ docker compose up --build
 - 应用启动时会优先尝试连接 `REDIS_URL`
 - 若 Redis 不可用，认证会话状态与限流会自动回退到进程内存
 - 本地直接运行后端时，推荐把 `.env` 中的 Redis 地址写为 `redis://127.0.0.1:6379/0`
-- 使用 `docker compose` 时，Compose 文件会自动把后端和 worker 的 Redis 地址改为容器内的 `redis://redis:6379/*`
+- 使用 Compose 时，后端和 worker 会自动改为容器内的 `redis://redis:6379/*`
 - 可通过 `GET /health` 查看当前使用的是 `redis` 还是 `memory`
 
 ## Embedding / ChromaDB 说明
 
 - 默认已支持 ChromaDB 持久化模式，使用 `CHROMADB_PATH`
-- `docker compose` 场景下，后端与 worker 已配置为走独立 ChromaDB HTTP 服务
+- Compose 场景下，后端与 worker 已配置为走独立 ChromaDB HTTP 服务
 - 当前本地默认 embedding 模型已切换为 `BAAI/bge-m3`
 - 若要真正启用 GPU，需要当前 Python 环境下 `torch.cuda.is_available()` 为 `True`
 - 若模型运行时不可用，系统会自动回退到哈希向量，保证研发不中断

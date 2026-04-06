@@ -12,9 +12,7 @@ services:
       CHROMADB_MODE: http
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
-    volumes:
-      - ./:/app
-    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     depends_on:
       - redis
       - postgres
@@ -34,8 +32,6 @@ services:
       CHROMADB_MODE: http
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
-    volumes:
-      - ./:/app
     command: celery -A backend.tasks.celery_app.celery_app worker -l info
     depends_on:
       - redis
