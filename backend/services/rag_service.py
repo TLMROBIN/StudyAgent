@@ -771,21 +771,16 @@ class RagService:
             if question_assets and not asset_refs:
                 asset_refs = question_assets
             prepared_chunks.append(
-                PreparedChunk(
+                self._build_question_bank_chunk(
+                    document,
                     content=finalized_text,
-                    metadata=self._build_chunk_metadata(
-                        document,
-                        extra_metadata={
-                            "chunk_kind": "question_item",
-                            "question_number": number,
-                            "question_text": clean_question_text or finalized_text,
-                            "answer_text": clean_answer_text or None,
-                            "explanation_text": clean_explanation_text or None,
-                            "contains_images": bool(asset_refs),
-                            "asset_refs": asset_refs,
-                            "image_count": len(asset_refs),
-                        },
-                    ),
+                    question_number=number,
+                    question_text=clean_question_text or finalized_text,
+                    answer_text=clean_answer_text or None,
+                    explanation_text=clean_explanation_text or None,
+                    asset_refs=asset_refs,
+                    source_format="docx",
+                    source_locator=f"question:{number}",
                 )
             )
         return prepared_chunks
@@ -1168,15 +1163,44 @@ class RagService:
         )
 
     def _is_question_row(self, row: KnowledgeChunk) -> bool:
+        return self._question_row_tier(row) is not None
+
+    def _question_row_tier(self, row: KnowledgeChunk) -> str | None:
         document = row.document
         if not document:
-            return False
+            return None
         resource_type = document.resource_type or ResourceType.KNOWLEDGE_NOTE.value
         if resource_type not in QUESTION_RESOURCE_TYPES:
-            return False
+            return None
         metadata = row.metadata_json or {}
         chunk_kind = metadata.get("chunk_kind")
-        return chunk_kind in {None, "", "question_item"}
+        if chunk_kind == "question_item":
+            return "preferred"
+        if chunk_kind in {None, ""} and str(metadata.get("question_text") or row.content or "").strip():
+            return "fallback"
+        return None
+
+    def _score_question_rows(
+        self,
+        rows: list[KnowledgeChunk],
+        question: str,
+        student_grade: int | None,
+        query_embedding: list[float],
+        profile: QuestionProfile,
+    ) -> list[tuple[float, KnowledgeChunk]]:
+        if not rows:
+            return []
+        candidate_texts = [self._question_candidate_text(row) for row in rows]
+        candidate_embeddings = self.embedder.embed_texts(candidate_texts)
+        scored_rows: list[tuple[float, KnowledgeChunk]] = []
+        for row, candidate_text, candidate_embedding in zip(rows, candidate_texts, candidate_embeddings):
+            score = self.embedder.cosine_similarity(query_embedding, candidate_embedding)
+            score += sum(1 for char in question[:16] if char and char in candidate_text) / 24.0
+            score += self._metadata_score(row, question, profile, student_grade)
+            score += self._question_recommendation_bonus(row, question)
+            scored_rows.append((score, row))
+        scored_rows.sort(key=lambda item: item[0], reverse=True)
+        return scored_rows
 
     def _question_candidate_text(self, row: KnowledgeChunk) -> str:
         metadata = row.metadata_json or {}
@@ -1193,19 +1217,23 @@ class RagService:
 
     def _question_row_key(self, row: KnowledgeChunk) -> tuple[int, str]:
         metadata = row.metadata_json or {}
-        return row.document_id, str(metadata.get("question_number") or row.chunk_index)
+        return row.document_id, str(metadata.get("question_uid") or metadata.get("source_locator") or metadata.get("question_number") or row.chunk_index)
 
     def _question_recommendation_bonus(self, row: KnowledgeChunk, question: str) -> float:
         metadata = row.metadata_json or {}
         score = 0.0
         if metadata.get("chunk_kind") == "question_item":
             score += 0.22
+        else:
+            score -= 0.05
         if metadata.get("answer_text"):
             score += 0.03
         if metadata.get("explanation_text"):
             score += 0.03
         if metadata.get("contains_images") and any(token in question for token in ["图", "图示", "模型", "装置", "几何体", "受力图", "电路图"]):
             score += 0.16
+        if metadata.get("image_binding_status") == "missing_required":
+            score -= 0.08
         return score
 
     def _format_context(self, rows: list[KnowledgeChunk]) -> str:
