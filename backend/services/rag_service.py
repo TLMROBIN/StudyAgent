@@ -20,6 +20,7 @@ from backend.services.embed_service import EmbedService, embed_service
 from backend.services.mineru_service import mineru_service
 from backend.services.pdf_parse_bridge import PDFParseBridge
 from backend.services.pdf_parse_types import ExtractedAsset, PDFParseResult
+from backend.services.question_bank_post_processor import QuestionBankChunkCandidate, QuestionBankPostProcessor
 from backend.services.vector_store_service import VectorStoreService, vector_store_service
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
@@ -116,11 +117,17 @@ QUESTION_METADATA_PRESERVE_KEYS = {
     "image_count",
     "parser_backend",
     "parser_provenance",
+    "source_format",
+    "source_locator",
     "page_start",
     "page_end",
     "source_pages",
     "source_block_types",
     "structure_path",
+    "image_expectation",
+    "image_binding_status",
+    "quality_flags",
+    "question_uid",
 }
 
 
@@ -178,6 +185,7 @@ class RagService:
         self.vector_store = vector_store or vector_store_service
         self.QUESTION_RESOURCE_TYPES = QUESTION_RESOURCE_TYPES
         self.PreparedChunk = PreparedChunk
+        self.question_bank_post_processor = QuestionBankPostProcessor()
         self.pdf_parse_bridge = PDFParseBridge(self)
 
     def split_text(self, text: str) -> list[str]:
@@ -233,26 +241,30 @@ class RagService:
             .options(selectinload(KnowledgeChunk.document))
             .where(KnowledgeChunk.subject == subject)
         ).all()
-        question_rows = [row for row in rows if self._is_question_row(row)]
-        if not question_rows:
+        preferred_rows = [row for row in rows if self._question_row_tier(row) == "preferred"]
+        if not preferred_rows and not any(self._question_row_tier(row) == "fallback" for row in rows):
             return []
 
         query_embedding = self.embedder.embed_text(question)
-        candidate_texts = [self._question_candidate_text(row) for row in question_rows]
-        candidate_embeddings = self.embedder.embed_texts(candidate_texts)
         profile = self._recommendation_profile(question)
-        scored_rows: list[tuple[float, KnowledgeChunk]] = []
-        for row, candidate_text, candidate_embedding in zip(question_rows, candidate_texts, candidate_embeddings):
-            score = self.embedder.cosine_similarity(query_embedding, candidate_embedding)
-            score += sum(1 for char in question[:16] if char and char in candidate_text) / 24.0
-            score += self._metadata_score(row, question, profile, student_grade)
-            score += self._question_recommendation_bonus(row, question)
-            scored_rows.append((score, row))
-
-        scored_rows.sort(key=lambda item: item[0], reverse=True)
         selected_rows: list[KnowledgeChunk] = []
         seen_keys: set[tuple[int, str]] = set()
-        for _, row in scored_rows:
+        for _, row in self._score_question_rows(preferred_rows, question, student_grade, query_embedding, profile):
+            key = self._question_row_key(row)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected_rows.append(row)
+            if len(selected_rows) >= limit:
+                return selected_rows
+
+        preferred_document_ids = {row.document_id for row in preferred_rows}
+        fallback_rows = [
+            row
+            for row in rows
+            if self._question_row_tier(row) == "fallback" and row.document_id not in preferred_document_ids
+        ]
+        for _, row in self._score_question_rows(fallback_rows, question, student_grade, query_embedding, profile):
             key = self._question_row_key(row)
             if key in seen_keys:
                 continue
@@ -672,6 +684,60 @@ class RagService:
         if extra_metadata:
             metadata.update({key: value for key, value in extra_metadata.items() if value is not None})
         return metadata
+
+    def _build_question_bank_chunk(
+        self,
+        document: KnowledgeDocument,
+        *,
+        content: str,
+        question_number: str,
+        question_text: str,
+        answer_text: str | None = None,
+        explanation_text: str | None = None,
+        asset_refs: list[dict[str, Any]] | None = None,
+        chapter: str | None = None,
+        section: str | None = None,
+        tags: list[str] | None = None,
+        structure_path: list[str] | None = None,
+        source_format: str | None = None,
+        source_locator: str | None = None,
+        parser_backend: str | None = None,
+        parser_provenance: dict[str, Any] | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        source_pages: list[int] | None = None,
+        source_block_types: list[str] | None = None,
+    ) -> PreparedChunk:
+        question_metadata = self.question_bank_post_processor.build_metadata(
+            document,
+            QuestionBankChunkCandidate(
+                question_number=question_number,
+                question_text=question_text,
+                answer_text=answer_text,
+                explanation_text=explanation_text,
+                asset_refs=list(asset_refs or []),
+                source_format=source_format,
+                source_locator=source_locator,
+                parser_backend=parser_backend,
+                parser_provenance=parser_provenance,
+                page_start=page_start,
+                page_end=page_end,
+                source_pages=list(source_pages or []),
+                source_block_types=list(source_block_types or []),
+                structure_path=list(structure_path or []),
+            ),
+        )
+        if tags:
+            question_metadata["tags"] = tags
+        return PreparedChunk(
+            content=content,
+            metadata=self._build_chunk_metadata(
+                document,
+                chapter=chapter,
+                section=section,
+                extra_metadata=question_metadata,
+            ),
+        )
 
     def _prepare_question_chunks(
         self,
