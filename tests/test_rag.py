@@ -305,6 +305,12 @@ def test_pdf_bridge_preserves_answer_explanation_and_asset_refs_when_building_pr
     assert metadata["explanation_text"] == "由受力分析可得。"
     assert metadata["parser_backend"] == "pipeline"
     assert metadata["parser_provenance"]["runtime_artifact"] == "data/tasks/9/mineru-runtime.json"
+    assert metadata["source_format"] == "pdf"
+    assert metadata["source_locator"] == "question:1|page:1"
+    assert metadata["image_expectation"] == "required"
+    assert metadata["image_binding_status"] == "bound"
+    assert metadata["quality_flags"] == []
+    assert metadata["question_uid"].startswith("qb:")
     assert metadata["contains_images"] is True
     assert metadata["image_count"] == 1
     assert metadata["asset_refs"][0]["url"] == "/api/knowledge/documents/21/assets/image-001.png"
@@ -378,6 +384,11 @@ def test_pdf_bridge_uses_block_context_for_question_chunks_and_image_alignment(t
     assert first["page_start"] == 1
     assert first["page_end"] == 1
     assert first["source_pages"] == [1]
+    assert first["source_format"] == "pdf"
+    assert first["source_locator"] == "question:1|page:1"
+    assert first["image_expectation"] == "required"
+    assert first["image_binding_status"] == "bound"
+    assert first["quality_flags"] == []
 
     second = chunks[1].metadata
     assert second["question_number"] == "2"
@@ -388,6 +399,9 @@ def test_pdf_bridge_uses_block_context_for_question_chunks_and_image_alignment(t
     assert second["page_start"] == 2
     assert second["page_end"] == 2
     assert second["source_pages"] == [2]
+    assert second["source_locator"] == "question:2|page:2"
+    assert second["image_expectation"] == "optional"
+    assert second["image_binding_status"] == "optional_unbound"
 
 
 def test_pdf_bridge_adds_structure_and_page_metadata_for_textbook_chunks(tmp_path):
@@ -766,39 +780,97 @@ def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     assert prepared[0].metadata["contains_images"] is True
     assert prepared[0].metadata["asset_refs"][0]["url"] == "/api/knowledge/documents/7/assets/image-001.png"
     assert prepared[0].metadata["source_format"] == "docx"
-    assert prepared[0].metadata["source_locator"]
+    assert prepared[0].metadata["source_locator"] == "question:1"
     assert prepared[0].metadata["image_expectation"] == "required"
     assert prepared[0].metadata["image_binding_status"] == "bound"
-    assert "missing_required_image" not in prepared[0].metadata.get("quality_flags", [])
-    assert prepared[0].metadata["question_uid"]
-    assert "quality_score" not in prepared[0].metadata
+    assert prepared[0].metadata["quality_flags"] == []
     assert "【附图1：斜面示意图】" in prepared[0].content
     assert "答案：" in prepared[0].content
     assert "解析：" in prepared[0].content
     assert prepared[1].metadata["question_number"] == "2"
+    assert prepared[1].metadata["source_format"] == "docx"
+    assert prepared[1].metadata["image_expectation"] == "optional"
+    assert prepared[1].metadata["image_binding_status"] == "optional_unbound"
     assert "位移等于图像与坐标轴围成的面积" in prepared[1].content
 
 
-def test_prepare_question_chunks_marks_missing_required_images_without_quality_score(tmp_path):
+def test_recommend_questions_prefers_question_items_and_uses_legacy_fallback_without_same_document_duplicates(tmp_path):
     rag_service = build_rag_service(tmp_path)
-    document = KnowledgeDocument(
-        id=11,
-        subject="物理",
-        filename="missing-image.docx",
-        file_path=str(tmp_path / "missing-image.docx"),
-        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        size_bytes=12,
-        resource_type=ResourceType.QUESTION_SET.value,
-    )
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        preferred_doc = KnowledgeDocument(
+            subject="物理",
+            filename="preferred.docx",
+            file_path="/tmp/preferred.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=64,
+            resource_type=ResourceType.QUESTION_SET.value,
+        )
+        legacy_doc = KnowledgeDocument(
+            subject="物理",
+            filename="legacy.txt",
+            file_path="/tmp/legacy.txt",
+            mime_type="text/plain",
+            size_bytes=32,
+            resource_type=ResourceType.EXERCISE.value,
+        )
+        session.add_all([preferred_doc, legacy_doc])
+        session.commit()
+        session.refresh(preferred_doc)
+        session.refresh(legacy_doc)
 
-    prepared = rag_service.prepare_document_chunks(document, "1. 如图所示，分析小球在斜面上的受力。")
+        session.add_all(
+            [
+                KnowledgeChunk(
+                    document_id=preferred_doc.id,
+                    subject="物理",
+                    chunk_index=0,
+                    content="第1题\n\n题目：如图所示，分析受力。",
+                    metadata_json={
+                        "document_id": preferred_doc.id,
+                        "resource_type": preferred_doc.resource_type,
+                        "question_text": "如图所示，分析受力。",
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=preferred_doc.id,
+                    subject="物理",
+                    chunk_index=1,
+                    content="第1题\n\n题目：如图所示，分析受力。",
+                    metadata_json={
+                        "document_id": preferred_doc.id,
+                        "resource_type": preferred_doc.resource_type,
+                        "chunk_kind": "question_item",
+                        "question_number": "1",
+                        "question_text": "如图所示，分析受力。",
+                        "source_locator": "question:1",
+                        "question_uid": "qb:preferred-1",
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=legacy_doc.id,
+                    subject="物理",
+                    chunk_index=0,
+                    content="如图所示，分析受力并求加速度。",
+                    metadata_json={
+                        "document_id": legacy_doc.id,
+                        "resource_type": legacy_doc.resource_type,
+                        "question_text": "如图所示，分析受力并求加速度。",
+                    },
+                ),
+            ]
+        )
+        session.commit()
 
-    assert len(prepared) == 1
-    metadata = prepared[0].metadata
-    assert metadata["source_format"] == "docx"
-    assert metadata["source_locator"]
-    assert metadata["image_expectation"] == "required"
-    assert metadata["image_binding_status"] == "missing_required"
-    assert "missing_required_image" in metadata["quality_flags"]
-    assert metadata["question_uid"]
-    assert "quality_score" not in metadata
+        result = rag_service.recommend_questions(session, "物理", "如图所示这类受力分析题还有吗", limit=2)
+
+        assert len(result) == 2
+        assert result[0].document_id == preferred_doc.id
+        assert result[0].metadata_json.get("chunk_kind") == "question_item"
+        assert result[1].document_id == legacy_doc.id
+        assert all(not (row.document_id == preferred_doc.id and row.metadata_json.get("chunk_kind") in {None, ""}) for row in result)
+    finally:
+        session.close()
