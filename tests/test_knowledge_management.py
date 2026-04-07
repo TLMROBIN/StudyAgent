@@ -492,6 +492,12 @@ def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkey
                     "asset_refs": [],
                     "parser_backend": "pipeline",
                     "parser_provenance": {"runtime_artifact": "data/tasks/123/mineru-runtime.json"},
+                    "source_format": "pdf",
+                    "source_locator": "page:1/question:1",
+                    "image_expectation": "required",
+                    "image_binding_status": "missing_required",
+                    "quality_flags": ["missing_required_image"],
+                    "question_uid": f"{document.id}:page:1/question:1",
                 },
             )
         )
@@ -517,6 +523,12 @@ def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkey
         assert row is not None
         assert row.metadata_json.get("parser_backend") == "pipeline"
         assert row.metadata_json.get("parser_provenance", {}).get("runtime_artifact") == "data/tasks/123/mineru-runtime.json"
+        assert row.metadata_json.get("source_format") == "pdf"
+        assert row.metadata_json.get("source_locator") == "page:1/question:1"
+        assert row.metadata_json.get("image_expectation") == "required"
+        assert row.metadata_json.get("image_binding_status") == "missing_required"
+        assert row.metadata_json.get("quality_flags") == ["missing_required_image"]
+        assert row.metadata_json.get("question_uid") == f"{document.id}:page:1/question:1"
     finally:
         session.close()
 
