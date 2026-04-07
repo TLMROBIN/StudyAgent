@@ -100,7 +100,9 @@ class QuestionBankPostProcessor:
             explanation_text=normalized_explanation,
             image_binding_status=image_binding_status,
         )
-        metadata: dict[str, Any] = {
+        question_uid = f"qb:{document.id}:{source_locator or question_number or 'unknown'}"
+
+        return {
             "chunk_kind": "question_item",
             "question_number": question_number,
             "question_text": normalized_question,
@@ -117,7 +119,7 @@ class QuestionBankPostProcessor:
             "image_expectation": image_expectation,
             "image_binding_status": image_binding_status,
             "quality_flags": quality_flags,
-            "question_uid": cls._question_uid(document.id, resolved_source_locator, question_number, normalized_question),
+            "question_uid": question_uid,
         }
         if extra_metadata:
             metadata.update({key: value for key, value in extra_metadata.items() if value is not None})

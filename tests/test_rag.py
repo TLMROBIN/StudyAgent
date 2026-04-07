@@ -310,7 +310,7 @@ def test_pdf_bridge_preserves_answer_explanation_and_asset_refs_when_building_pr
     assert metadata["image_expectation"] == "required"
     assert metadata["image_binding_status"] == "bound"
     assert metadata["quality_flags"] == []
-    assert metadata["question_uid"].startswith("qb:")
+    assert metadata["question_uid"] == "qb:21:question:1|page:1"
     assert metadata["contains_images"] is True
     assert metadata["image_count"] == 1
     assert metadata["asset_refs"][0]["url"] == "/api/knowledge/documents/21/assets/image-001.png"
@@ -386,6 +386,7 @@ def test_pdf_bridge_uses_block_context_for_question_chunks_and_image_alignment(t
     assert first["source_pages"] == [1]
     assert first["source_format"] == "pdf"
     assert first["source_locator"] == "question:1|page:1"
+    assert first["question_uid"] == "qb:31:question:1|page:1"
     assert first["image_expectation"] == "required"
     assert first["image_binding_status"] == "bound"
     assert first["quality_flags"] == []
@@ -400,6 +401,7 @@ def test_pdf_bridge_uses_block_context_for_question_chunks_and_image_alignment(t
     assert second["page_end"] == 2
     assert second["source_pages"] == [2]
     assert second["source_locator"] == "question:2|page:2"
+    assert second["question_uid"] == "qb:31:question:2|page:2"
     assert second["image_expectation"] == "optional"
     assert second["image_binding_status"] == "optional_unbound"
 
@@ -781,6 +783,7 @@ def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     assert prepared[0].metadata["asset_refs"][0]["url"] == "/api/knowledge/documents/7/assets/image-001.png"
     assert prepared[0].metadata["source_format"] == "docx"
     assert prepared[0].metadata["source_locator"] == "question:1"
+    assert prepared[0].metadata["question_uid"] == "qb:7:question:1"
     assert prepared[0].metadata["image_expectation"] == "required"
     assert prepared[0].metadata["image_binding_status"] == "bound"
     assert prepared[0].metadata["quality_flags"] == []
@@ -789,6 +792,7 @@ def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     assert "解析：" in prepared[0].content
     assert prepared[1].metadata["question_number"] == "2"
     assert prepared[1].metadata["source_format"] == "docx"
+    assert prepared[1].metadata["question_uid"] == "qb:7:question:2"
     assert prepared[1].metadata["image_expectation"] == "optional"
     assert prepared[1].metadata["image_binding_status"] == "optional_unbound"
     assert "位移等于图像与坐标轴围成的面积" in prepared[1].content
