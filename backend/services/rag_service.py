@@ -779,7 +779,6 @@ class RagService:
                     answer_text=clean_answer_text or None,
                     explanation_text=clean_explanation_text or None,
                     asset_refs=asset_refs,
-                    source_format="docx",
                     source_locator=f"question:{number}",
                 )
             )

@@ -149,33 +149,29 @@ class PDFParseBridge:
             merged_asset_refs = self._merge_asset_refs(current_question["asset_refs"], question_assets, chunk_asset_refs)
             page_start, page_end, source_pages = self._page_metadata(current_question["pages"])
             prepared.append(
-                self.rag_service.PreparedChunk(
+                self.rag_service._build_question_bank_chunk(
+                    document,
                     content=finalized_text,
-                    metadata=self.rag_service._build_chunk_metadata(
-                        document,
-                        chapter=current_question["chapter"],
-                        section=current_question["section"],
-                        extra_metadata={
-                            "tags": self._chunk_tags(document, current_question["chapter"], current_question["section"]),
-                            "chunk_kind": "question_item",
-                            "question_number": number,
-                            "question_text": clean_question_text or finalized_text,
-                            "answer_text": clean_answer_text or None,
-                            "explanation_text": clean_explanation_text or None,
-                            "contains_images": bool(merged_asset_refs),
-                            "asset_refs": merged_asset_refs,
-                            "image_count": len(merged_asset_refs),
-                            "page_start": page_start,
-                            "page_end": page_end,
-                            "source_pages": source_pages,
-                            "source_block_types": sorted(item for item in current_question["block_types"] if item),
-                            "structure_path": [
-                                item
-                                for item in (current_question["chapter"], current_question["section"])
-                                if str(item or "").strip()
-                            ],
-                        },
-                    ),
+                    question_number=number,
+                    question_text=clean_question_text or finalized_text,
+                    answer_text=clean_answer_text or None,
+                    explanation_text=clean_explanation_text or None,
+                    asset_refs=merged_asset_refs,
+                    chapter=current_question["chapter"],
+                    section=current_question["section"],
+                    tags=self._chunk_tags(document, current_question["chapter"], current_question["section"]),
+                    structure_path=[
+                        item
+                        for item in (current_question["chapter"], current_question["section"])
+                        if str(item or "").strip()
+                    ],
+                    source_format="pdf",
+                    parser_backend=parsed_pdf.parser_backend,
+                    parser_provenance=parsed_pdf.parser_provenance,
+                    page_start=page_start,
+                    page_end=page_end,
+                    source_pages=source_pages,
+                    source_block_types=sorted(item for item in current_question["block_types"] if item),
                 )
             )
             current_question = None
