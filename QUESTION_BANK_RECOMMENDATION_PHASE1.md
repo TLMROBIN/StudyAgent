@@ -18,11 +18,14 @@ Use this file when reviewing or modifying the Phase 1 implementation.
 ## Ownership boundaries
 
 ### Parser / extractor responsibilities stay format-local
+
 - PDF structure + assets remain in `backend/services/pdf_parse_bridge.py`
 - DOCX text / asset extraction remains in `backend/services/rag_service.py`
 
 ### Recommendation-facing semantics stay StudyAgent-owned
+
 The Phase 1 rollout should converge the persisted question-bank metadata contract used by:
+
 - `backend/services/rag_service.py`
 - `backend/routers/chat.py`
 - `backend/routers/knowledge.py`
@@ -34,6 +37,7 @@ Do not couple MinerU or DOCX parsing details to recommendation policy.
 ## Phase 1 metadata contract
 
 ### Core question metadata
+
 These fields define the question-unit contract recommendation code can rely on:
 
 - `chunk_kind`
@@ -49,6 +53,7 @@ These fields define the question-unit contract recommendation code can rely on:
 - `structure_path`
 
 ### Internal diagnostics / provenance metadata
+
 These fields stay internal in Phase 1, but must be preserved during metadata sync if introduced:
 
 - `source_format`
@@ -61,6 +66,7 @@ These fields stay internal in Phase 1, but must be preserved during metadata syn
 - `question_uid`
 
 ### Explicit Phase 1 constraints
+
 - No `quality_score`
 - No textbook recommendation participation
 - No TXT ingestion changes

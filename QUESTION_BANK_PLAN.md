@@ -29,17 +29,17 @@
 
 ## 二、现有项目基础能力映射
 
-| 现有能力 | 代码位置 | 可直接复用 |
-|------|------|------|
-| Word/PDF/TXT 内容提取 | `backend/services/rag_service.py` | 是 |
-| Word 图片抽取与资源访问 | `backend/services/rag_service.py` + `backend/routers/knowledge.py` | 是 |
-| Word 题目拆块、答案/解析配对 | `backend/services/rag_service.py` | 是 |
-| OMML -> LaTeX 转换 | `backend/services/rag_service.py` | 是 |
-| 向量入库与检索 | `backend/services/vector_store_service.py` | 是 |
-| 题目推荐基础逻辑 | `backend/services/rag_service.py` + `backend/routers/chat.py` | 是 |
-| 苏格拉底引导 prompt | `backend/services/socratic_service.py` | 是 |
-| 学生端题目推荐卡片 UI | `frontend/src/views/StudentChat.vue` | 是 |
-| 教师端知识库管理入口 | `frontend/src/views/KnowledgeManage.vue` | 是 |
+| 现有能力                     | 代码位置                                                           | 可直接复用 |
+| ---------------------------- | ------------------------------------------------------------------ | ---------- |
+| Word/PDF/TXT 内容提取        | `backend/services/rag_service.py`                                  | 是         |
+| Word 图片抽取与资源访问      | `backend/services/rag_service.py` + `backend/routers/knowledge.py` | 是         |
+| Word 题目拆块、答案/解析配对 | `backend/services/rag_service.py`                                  | 是         |
+| OMML -> LaTeX 转换           | `backend/services/rag_service.py`                                  | 是         |
+| 向量入库与检索               | `backend/services/vector_store_service.py`                         | 是         |
+| 题目推荐基础逻辑             | `backend/services/rag_service.py` + `backend/routers/chat.py`      | 是         |
+| 苏格拉底引导 prompt          | `backend/services/socratic_service.py`                             | 是         |
+| 学生端题目推荐卡片 UI        | `frontend/src/views/StudentChat.vue`                               | 是         |
+| 教师端知识库管理入口         | `frontend/src/views/KnowledgeManage.vue`                           | 是         |
 
 因此，题库能力的合理做法不是“重写文档导入链路”，而是：
 
@@ -778,14 +778,14 @@ frontend/src/views/QuestionBankManage.vue
 
 ## 十一、风险与应对
 
-| 风险 | 影响 | 应对 |
-|------|------|------|
-| 组卷网 Word 格式不统一 | 拆题失败 | 先用样本建回归测试集，所有解析改动跑回归 |
-| AI 标签漂移 | 知识点不稳定 | 使用受控知识点树，不允许自由发挥标签 |
-| 重复题误判 | 好题被隐藏 | 两级去重 + 灰区转人工审核 |
-| 迁移不稳 | 老库升级失败 | 手写 migration + backfill + SQLite 验证 |
-| 学生提前看到答案 | 影响教学 | 学生接口默认不返回答案全文 |
-| 另起一套导入逻辑 | 维护成本上升 | 强制复用现有 `rag_service` 和 `knowledge` 主链路 |
+| 风险                   | 影响         | 应对                                             |
+| ---------------------- | ------------ | ------------------------------------------------ |
+| 组卷网 Word 格式不统一 | 拆题失败     | 先用样本建回归测试集，所有解析改动跑回归         |
+| AI 标签漂移            | 知识点不稳定 | 使用受控知识点树，不允许自由发挥标签             |
+| 重复题误判             | 好题被隐藏   | 两级去重 + 灰区转人工审核                        |
+| 迁移不稳               | 老库升级失败 | 手写 migration + backfill + SQLite 验证          |
+| 学生提前看到答案       | 影响教学     | 学生接口默认不返回答案全文                       |
+| 另起一套导入逻辑       | 维护成本上升 | 强制复用现有 `rag_service` 和 `knowledge` 主链路 |
 
 ---
 
