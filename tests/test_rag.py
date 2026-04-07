@@ -874,3 +874,27 @@ def test_recommend_questions_prefers_question_items_and_uses_legacy_fallback_wit
         assert all(not (row.document_id == preferred_doc.id and row.metadata_json.get("chunk_kind") in {None, ""}) for row in result)
     finally:
         session.close()
+
+
+def test_prepare_question_chunks_marks_missing_required_images(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=51,
+        subject="物理",
+        filename="missing-image.docx",
+        file_path="/tmp/missing-image.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=32,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "1. 如图所示，判断电流方向。\n参考答案\n1. 答案：向左",
+    )
+
+    assert len(prepared) == 1
+    metadata = prepared[0].metadata
+    assert metadata["image_expectation"] == "required"
+    assert metadata["image_binding_status"] == "missing_required"
+    assert metadata["quality_flags"] == ["missing_required_image"]
