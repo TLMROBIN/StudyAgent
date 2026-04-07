@@ -597,6 +597,100 @@ def test_recommend_questions_prefers_question_chunks_with_matching_grade_and_ima
         session.close()
 
 
+def test_recommend_questions_suppresses_same_document_legacy_fallback_when_question_items_exist(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        preferred_doc = KnowledgeDocument(
+            subject="物理",
+            filename="preferred.docx",
+            file_path="/tmp/preferred.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            grade=2,
+        )
+        fallback_doc = KnowledgeDocument(
+            subject="物理",
+            filename="legacy.docx",
+            file_path="/tmp/legacy.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            grade=2,
+        )
+        session.add_all([preferred_doc, fallback_doc])
+        session.commit()
+        session.refresh(preferred_doc)
+        session.refresh(fallback_doc)
+
+        preferred_row = KnowledgeChunk(
+            document_id=preferred_doc.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：如图所示斜面受力分析，求加速度。",
+            metadata_json={
+                "document_id": preferred_doc.id,
+                "resource_type": preferred_doc.resource_type,
+                "grade": 2,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "如图所示斜面受力分析，求加速度。",
+                "contains_images": True,
+                "image_count": 1,
+                "asset_refs": [
+                    {
+                        "asset_id": "image-001",
+                        "filename": "image-001.png",
+                        "content_type": "image/png",
+                        "url": "/api/knowledge/documents/1/assets/image-001.png",
+                    }
+                ],
+            },
+        )
+        same_doc_legacy_row = KnowledgeChunk(
+            document_id=preferred_doc.id,
+            subject="物理",
+            chunk_index=1,
+            content="如图所示斜面受力分析练习（旧分块）",
+            metadata_json={
+                "document_id": preferred_doc.id,
+                "resource_type": preferred_doc.resource_type,
+                "grade": 2,
+                "chunk_kind": "",
+                "question_text": "如图所示斜面受力分析练习（旧分块）",
+            },
+        )
+        fallback_row = KnowledgeChunk(
+            document_id=fallback_doc.id,
+            subject="物理",
+            chunk_index=0,
+            content="如图所示受力分析题（仅旧分块）",
+            metadata_json={
+                "document_id": fallback_doc.id,
+                "resource_type": fallback_doc.resource_type,
+                "grade": 2,
+                "chunk_kind": "",
+                "question_text": "如图所示受力分析题（仅旧分块）",
+            },
+        )
+        session.add_all([preferred_row, same_doc_legacy_row, fallback_row])
+        session.commit()
+        session.refresh(preferred_row)
+        session.refresh(same_doc_legacy_row)
+        session.refresh(fallback_row)
+
+        result = rag_service.recommend_questions(session, "物理", "如图所示这类斜面受力分析题再来一题", student_grade=2, limit=2)
+
+        assert [row.id for row in result] == [preferred_row.id, fallback_row.id]
+        assert all(row.id != same_doc_legacy_row.id for row in result)
+    finally:
+        session.close()
+
+
 def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     rag_service = build_rag_service(tmp_path)
     source_file = tmp_path / "question_bank.docx"
@@ -671,8 +765,40 @@ def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     assert prepared[0].metadata["question_number"] == "1"
     assert prepared[0].metadata["contains_images"] is True
     assert prepared[0].metadata["asset_refs"][0]["url"] == "/api/knowledge/documents/7/assets/image-001.png"
+    assert prepared[0].metadata["source_format"] == "docx"
+    assert prepared[0].metadata["source_locator"]
+    assert prepared[0].metadata["image_expectation"] == "required"
+    assert prepared[0].metadata["image_binding_status"] == "bound"
+    assert "missing_required_image" not in prepared[0].metadata.get("quality_flags", [])
+    assert prepared[0].metadata["question_uid"]
+    assert "quality_score" not in prepared[0].metadata
     assert "【附图1：斜面示意图】" in prepared[0].content
     assert "答案：" in prepared[0].content
     assert "解析：" in prepared[0].content
     assert prepared[1].metadata["question_number"] == "2"
     assert "位移等于图像与坐标轴围成的面积" in prepared[1].content
+
+
+def test_prepare_question_chunks_marks_missing_required_images_without_quality_score(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=11,
+        subject="物理",
+        filename="missing-image.docx",
+        file_path=str(tmp_path / "missing-image.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(document, "1. 如图所示，分析小球在斜面上的受力。")
+
+    assert len(prepared) == 1
+    metadata = prepared[0].metadata
+    assert metadata["source_format"] == "docx"
+    assert metadata["source_locator"]
+    assert metadata["image_expectation"] == "required"
+    assert metadata["image_binding_status"] == "missing_required"
+    assert "missing_required_image" in metadata["quality_flags"]
+    assert metadata["question_uid"]
+    assert "quality_score" not in metadata
