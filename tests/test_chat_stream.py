@@ -329,6 +329,12 @@ def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monk
                 "explanation_text": "由牛顿第二定律分析。",
                 "contains_images": True,
                 "image_count": 1,
+                "source_format": "docx",
+                "source_locator": "question:1",
+                "image_expectation": "required",
+                "image_binding_status": "bound",
+                "quality_flags": [],
+                "question_uid": "7:question:1",
                 "asset_refs": [
                     {
                         "asset_id": "image-001",
@@ -364,6 +370,24 @@ def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monk
         assert result[0].assets[0].title == "受力图"
         assert result[0].answer_text is None
         assert result[0].explanation_text is None
+        assert set(result[0].model_dump().keys()) == {
+            "chunk_id",
+            "document_id",
+            "document_filename",
+            "subject",
+            "resource_type",
+            "grade",
+            "chapter",
+            "section",
+            "difficulty",
+            "question_number",
+            "question_text",
+            "contains_images",
+            "image_count",
+            "assets",
+            "answer_text",
+            "explanation_text",
+        }
     finally:
         session.close()
 
