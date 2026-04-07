@@ -1,6 +1,8 @@
 # StudyAgent 题库功能扩展计划（修订版）
 
 > 目标：在现有 StudyAgent 工程上增量建设“物理题库”，形成“批量导题 -> AI 标注与去重 -> 教师审核发布 -> 学生推荐练习 -> AI 引导讲解 -> 做题数据回流”的闭环。
+>
+> **Phase 1 rollout note**：当前 question-bank recommendation 实施以 `QUESTION_BANK_RECOMMENDATION_PHASE1.md` 和 `.omx/plans/` 下的 PRD / test spec 为准。该轮只覆盖 `exercise/question_set`、PDF/DOCX 对齐、`question_item` 优先推荐与显式 legacy fallback；`quality_score`、历史 backfill、TXT、教材推荐扩展仍属于后续阶段。
 
 ## 一、评估结论
 
@@ -233,6 +235,8 @@ class PracticeRecord(TimestampMixin, Base):
 
 当前工程仍有 `Base.metadata.create_all()` 和 `apply_runtime_schema_updates()` 的兼容逻辑，因此新增表不能只写一句 `alembic revision --autogenerate` 就结束。
 
+> 注：本节描述的是更完整题库索引层落地路线。当前 Phase 1 recommendation rollout **不要求** 历史 `KnowledgeChunk` 立即 backfill，也不依赖 `QuestionMeta` 先落地才可交付。
+
 建议做法：
 
 1. 新增 `backend/models/question.py`
@@ -413,6 +417,8 @@ class ScoredQuestion(QuestionDraft):
 2. 同步一小部分兼容字段到 `KnowledgeChunk.metadata_json`
 
 兼容字段建议保留：
+
+> Phase 1 说明：下面的 JSON 是长期题库兼容字段示意，不是当前 recommendation rollout 的最小必需集合。当前实现约束请以 `QUESTION_BANK_RECOMMENDATION_PHASE1.md` 为准，尤其是 **不引入 `quality_score`**、并且仅把真正被现有推荐/展示链路消费的字段视为必须字段。
 
 ```json
 {
