@@ -7,6 +7,7 @@
 - 异步任务：Celery + Redis 任务入口，资料导入支持本地回退执行
 - 监控与部署：Prometheus、Nginx、Docker Compose、Locust 压测脚本
 - 测试：话题过滤、苏格拉底引导、RAG 基础检索测试
+- 题库推荐 Phase 1 实施约束与验证口径见 `QUESTION_BANK_RECOMMENDATION_PHASE1.md`
 
 ## 当前实现范围
 
