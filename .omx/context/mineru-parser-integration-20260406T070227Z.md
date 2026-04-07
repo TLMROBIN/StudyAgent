@@ -1,0 +1,29 @@
+# Context Snapshot: MinerU parser integration
+
+- Task statement: User wants MinerU formally deployed on this machine and adopted as StudyAgent's document parser, then to refactor slicing logic and tag recognition around it.
+- Desired outcome: Execution-ready requirements for a production-grade MinerU-backed parsing architecture in StudyAgent.
+- Stated solution: Replace or front the current parser with MinerU and then adapt downstream chunking/tag extraction.
+- Probable intent hypothesis: Improve parsing quality across PDFs/scans/complex layouts while preserving StudyAgent's question-bank-oriented downstream workflow.
+- Known facts/evidence:
+  - Current ingest entrypoint is backend/tasks/ingest.py -> rag_service.extract_content() -> prepare_document_chunks().
+  - Current system explicitly treats OCR as out of scope in the first-phase plan and rejects scanned PDFs.
+  - Current question-bank plan says reuse the existing main pipeline rather than rebuild it.
+  - Prior local validation showed MinerU helps on scanned/complex PDFs, but current StudyAgent logic is still stronger at question-oriented chunk semantics.
+- Constraints:
+  - Do not implement inside deep-interview.
+  - User now prefers formal deployment and parser adoption directionally.
+  - Need to clarify rollout scope, compatibility target, and fallback/risk boundaries before planning.
+- Unknowns/open questions:
+  - Whether MinerU should fully replace or conditionally augment existing parsers.
+  - Whether all formats must be routed to MinerU or only PDF/scan-heavy paths.
+  - Whether backward compatibility with current chunk metadata/contracts is strict.
+  - Expected rollout shape: sidecar service vs in-process adapter vs offline preprocessor.
+  - Performance/SLO tolerance on CPU-only deployment.
+- Decision-boundary unknowns:
+  - What OMX may decide alone on architecture, storage, fallback, and migration.
+  - What user must explicitly approve (e.g. service model, heavy dependencies, parser fallback policy).
+- Likely codebase touchpoints:
+  - backend/tasks/ingest.py
+  - backend/services/rag_service.py
+  - backend/routers/knowledge.py
+  - tests/test_rag.py and ingest/knowledge tests

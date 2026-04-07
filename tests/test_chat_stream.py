@@ -101,6 +101,7 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         "retrieve",
         lambda db, subject, question, **kwargs: RetrievalResult(context="资料片段", chunks=[]),
     )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
 
     session = session_factory()
 
@@ -139,6 +140,7 @@ def test_chat_stream_rewrites_unsafe_output_before_emitting(monkeypatch):
         "retrieve",
         lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
     )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
 
     session = session_factory()
 
@@ -221,6 +223,7 @@ def test_chat_stream_allows_students_marked_for_password_change(monkeypatch):
         "retrieve",
         lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
     )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
 
     session = session_factory()
 
@@ -357,6 +360,8 @@ def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monk
         assert result[0].question_text == "如图所示，分析受力。"
         assert result[0].contains_images is True
         assert result[0].assets[0].filename == "image-001.png"
+        assert result[0].assets[0].url == "/api/knowledge/documents/1/assets/image-001.png"
+        assert result[0].assets[0].title == "受力图"
         assert result[0].answer_text is None
         assert result[0].explanation_text is None
     finally:
@@ -471,5 +476,6 @@ def test_recommend_questions_can_include_solutions_for_teacher(monkeypatch):
         assert len(result) == 1
         assert result[0].answer_text == "先配方"
         assert result[0].explanation_text == "利用二次函数顶点求最值。"
+        assert result[0].assets == []
     finally:
         session.close()

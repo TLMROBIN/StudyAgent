@@ -10,6 +10,7 @@ from backend.database import Base
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.services.embed_service import EmbedService
+from backend.services.pdf_parse_types import ExtractedAsset, PDFBlock, PDFParseResult
 from backend.services.rag_service import RagService
 from backend.services.vector_store_service import VectorStoreService
 
@@ -170,6 +171,7 @@ def test_pdf_normalization_drops_short_noisy_lines(tmp_path):
 
 def test_pdf_without_text_layer_returns_explicit_scan_error(tmp_path, monkeypatch):
     rag_service = build_rag_service(tmp_path)
+    rag_service.settings.pdf_parser_backend = "legacy"
     source_file = tmp_path / "scan.pdf"
     source_file.write_bytes(b"%PDF-1.4")
     monkeypatch.setattr(rag_service, "_pdf_has_text_layer", lambda _: False)
@@ -181,6 +183,258 @@ def test_pdf_without_text_layer_returns_explicit_scan_error(tmp_path, monkeypatc
         assert "无可用文本层" in str(exc)
     else:
         raise AssertionError("expected explicit scan error")
+
+
+def test_extract_content_routes_pdf_to_mineru_when_pdf_parser_backend_is_mineru(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+    rag_service.settings.pdf_parser_backend = "mineru"
+    source_file = tmp_path / "demo.pdf"
+    source_file.write_bytes(b"%PDF-1.4")
+
+    asset = ExtractedAsset(
+        asset_id="image-001",
+        filename="image-001.png",
+        content_type="image/png",
+        storage_path=str(tmp_path / "image-001.png"),
+        public_url="/api/knowledge/documents/7/assets/image-001.png",
+        title="示意图",
+        description="images/example.png",
+    )
+    parsed_pdf = PDFParseResult(
+        text="第1题\n\n题目：已知受力图。\n[[asset:image-001]]\n【答案】A\n【解析】由受力分析可得。",
+        assets=[asset],
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="1. 已知受力图。"),
+            PDFBlock(page_index=0, block_type="image", text="[[asset:image-001]]", asset_id="image-001"),
+            PDFBlock(page_index=0, block_type="paragraph", text="【答案】A"),
+            PDFBlock(page_index=0, block_type="paragraph", text="【解析】由受力分析可得。"),
+        ],
+    )
+
+    calls: list[tuple[str, int, int]] = []
+
+    def fake_parse(file_path: str, *, task_id: int, document_id: int):
+        calls.append((file_path, task_id, document_id))
+        return parsed_pdf
+
+    monkeypatch.setattr("backend.services.rag_service.mineru_service.parse_pdf", fake_parse)
+    monkeypatch.setattr(rag_service, "_extract_pdf_text", lambda _: (_ for _ in ()).throw(AssertionError("legacy path should not run")))
+
+    extracted = rag_service.extract_content(str(source_file), "application/pdf", document_id=7, task_id=9)
+
+    assert calls == [(str(source_file), 9, 7)]
+    assert extracted.text == parsed_pdf.text
+    assert extracted.parsed_pdf is parsed_pdf
+    assert extracted.assets[0].asset_id == "image-001"
+
+
+def test_extract_content_routes_pdf_to_legacy_when_pdf_parser_backend_is_legacy(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+    rag_service.settings.pdf_parser_backend = "legacy"
+    source_file = tmp_path / "demo.pdf"
+    source_file.write_bytes(b"%PDF-1.4")
+
+    monkeypatch.setattr(rag_service, "_extract_pdf_text", lambda _: "legacy pdf text")
+    monkeypatch.setattr("backend.services.rag_service.mineru_service.parse_pdf", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mineru path should not run")))
+
+    extracted = rag_service.extract_content(str(source_file), "application/pdf", document_id=7, task_id=9)
+
+    assert extracted.text == "legacy pdf text"
+    assert extracted.parsed_pdf is None
+
+
+def test_extract_content_docx_and_txt_ignore_pdf_parser_backend(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+    rag_service.settings.pdf_parser_backend = "mineru"
+
+    txt_file = tmp_path / "sample.txt"
+    txt_file.write_text("文本内容", encoding="utf-8")
+    assert rag_service.extract_content(str(txt_file), "text/plain").text == "文本内容"
+
+    docx_file = tmp_path / "sample.docx"
+    with zipfile.ZipFile(docx_file, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            """<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>DOCX内容</w:t></w:r></w:p></w:body></w:document>""",
+        )
+    extracted = rag_service.extract_content(str(docx_file), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    assert "DOCX内容" in extracted.text
+
+
+def test_pdf_bridge_preserves_answer_explanation_and_asset_refs_when_building_prepared_chunks(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=21,
+        subject="物理",
+        filename="questions.pdf",
+        file_path=str(tmp_path / "questions.pdf"),
+        mime_type="application/pdf",
+        size_bytes=128,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="1. 如图所示，分析受力。\n[[asset:image-001]]\n【答案】A\n【解析】由受力分析可得。",
+        assets=[
+            ExtractedAsset(
+                asset_id="image-001",
+                filename="image-001.png",
+                content_type="image/png",
+                storage_path=str(tmp_path / "image-001.png"),
+                public_url="/api/knowledge/documents/21/assets/image-001.png",
+                title="受力图",
+                description="figure-1",
+            )
+        ],
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="1. 如图所示，分析受力。"),
+            PDFBlock(page_index=0, block_type="image", text="[[asset:image-001]]", asset_id="image-001"),
+            PDFBlock(page_index=0, block_type="paragraph", text="【答案】A"),
+            PDFBlock(page_index=0, block_type="paragraph", text="【解析】由受力分析可得。"),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/9/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, assets=parsed_pdf.assets, parsed_pdf=parsed_pdf)
+
+    assert len(chunks) == 1
+    metadata = chunks[0].metadata
+    assert metadata["chunk_kind"] == "question_item"
+    assert metadata["question_number"] == "1"
+    assert metadata["answer_text"] == "A"
+    assert metadata["explanation_text"] == "由受力分析可得。"
+    assert metadata["parser_backend"] == "pipeline"
+    assert metadata["parser_provenance"]["runtime_artifact"] == "data/tasks/9/mineru-runtime.json"
+    assert metadata["contains_images"] is True
+    assert metadata["image_count"] == 1
+    assert metadata["asset_refs"][0]["url"] == "/api/knowledge/documents/21/assets/image-001.png"
+    assert "答案：" in chunks[0].content
+    assert "解析：" in chunks[0].content
+
+
+def test_pdf_bridge_uses_block_context_for_question_chunks_and_image_alignment(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=31,
+        subject="物理",
+        filename="structured-questions.pdf",
+        file_path=str(tmp_path / "structured-questions.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "第一章 力与运动\n"
+            "1.1 受力分析\n"
+            "1. 如图所示，小球沿斜面下滑，求加速度。\n"
+            "[[asset:image-001]]\n"
+            "2. 已知 v-t 图像，求位移。\n"
+            "参考答案\n"
+            "1. 答案：a=g\\sin\\theta\n"
+            "解析：由受力分析可得。\n"
+            "2. 答案：位移等于图像与坐标轴围成的面积。"
+        ),
+        assets=[
+            ExtractedAsset(
+                asset_id="image-001",
+                filename="image-001.png",
+                content_type="image/png",
+                storage_path=str(tmp_path / "image-001.png"),
+                public_url="/api/knowledge/documents/31/assets/image-001.png",
+                title="斜面示意图",
+                description="figure-1",
+            )
+        ],
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="第一章 力与运动"),
+            PDFBlock(page_index=0, block_type="title", text="1.1 受力分析"),
+            PDFBlock(page_index=0, block_type="paragraph", text="1. 如图所示，小球沿斜面下滑，求加速度。"),
+            PDFBlock(page_index=0, block_type="image", text="[[asset:image-001]]", asset_id="image-001"),
+            PDFBlock(page_index=1, block_type="paragraph", text="2. 已知 v-t 图像，求位移。"),
+            PDFBlock(page_index=1, block_type="paragraph", text="参考答案"),
+            PDFBlock(page_index=1, block_type="paragraph", text="1. 答案：a=g\\sin\\theta"),
+            PDFBlock(page_index=1, block_type="paragraph", text="解析：由受力分析可得。"),
+            PDFBlock(page_index=1, block_type="paragraph", text="2. 答案：位移等于图像与坐标轴围成的面积。"),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/31/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, assets=parsed_pdf.assets, parsed_pdf=parsed_pdf)
+
+    assert len(chunks) == 2
+
+    first = chunks[0].metadata
+    assert first["question_number"] == "1"
+    assert first["chapter"] == "第一章 力与运动"
+    assert first["section"] == "1.1 受力分析"
+    assert first["tags"] == ["第一章 力与运动", "1.1 受力分析", "mineru-pdf"]
+    assert first["contains_images"] is True
+    assert first["image_count"] == 1
+    assert first["asset_refs"][0]["url"] == "/api/knowledge/documents/31/assets/image-001.png"
+    assert first["answer_text"] == "a=g\\sin\\theta"
+    assert first["explanation_text"] == "由受力分析可得。"
+    assert first["page_start"] == 1
+    assert first["page_end"] == 1
+    assert first["source_pages"] == [1]
+
+    second = chunks[1].metadata
+    assert second["question_number"] == "2"
+    assert second["chapter"] == "第一章 力与运动"
+    assert second["section"] == "1.1 受力分析"
+    assert second["contains_images"] is False
+    assert second["answer_text"] == "位移等于图像与坐标轴围成的面积。"
+    assert second["page_start"] == 2
+    assert second["page_end"] == 2
+    assert second["source_pages"] == [2]
+
+
+def test_pdf_bridge_adds_structure_and_page_metadata_for_textbook_chunks(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=41,
+        subject="物理",
+        filename="textbook.pdf",
+        file_path=str(tmp_path / "textbook.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+        tags_json=["教材"],
+    )
+    parsed_pdf = PDFParseResult(
+        text="第一章 力与运动\n1.1 牛顿第一定律\n惯性描述物体保持原有运动状态的性质。",
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="第一章 力与运动"),
+            PDFBlock(page_index=0, block_type="title", text="1.1 牛顿第一定律"),
+            PDFBlock(page_index=1, block_type="paragraph", text="惯性描述物体保持原有运动状态的性质。"),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/41/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+
+    assert len(chunks) == 1
+    metadata = chunks[0].metadata
+    assert metadata["chapter"] == "第一章 力与运动"
+    assert metadata["section"] == "1.1 牛顿第一定律"
+    assert metadata["tags"] == ["教材", "第一章 力与运动", "1.1 牛顿第一定律", "mineru-pdf"]
+    assert metadata["page_start"] == 2
+    assert metadata["page_end"] == 2
+    assert metadata["source_pages"] == [2]
+    assert metadata["source_block_types"] == ["paragraph"]
+    assert metadata["structure_path"] == ["第一章 力与运动", "1.1 牛顿第一定律"]
+
+
+def test_extract_heading_context_skips_question_like_lines_for_textbook_chunks(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+
+    result = rag_service._extract_heading_context("(2）当n =9，l=10.0 cm时，磁感应强度是多少？", ResourceType.TEXTBOOK.value)
+    result_with_prompt = rag_service._extract_heading_context("2.写出这段长为ut的导线所受的安培力", ResourceType.TEXTBOOK.value)
+
+    assert result == {"chapter": None, "section": None}
+    assert result_with_prompt == {"chapter": None, "section": None}
 
 
 def test_extract_text_supports_markdown_files(tmp_path):

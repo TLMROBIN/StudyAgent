@@ -15,6 +15,7 @@ from backend.observability import setup_logging
 from backend.routers import admin, agent_config as agent_config_router, auth, chat, knowledge as knowledge_router, stats
 from backend.security import get_password_hash
 from backend.services.auth_service import auth_service
+from backend.services.gpu_runtime import log_gpu_runtime_status
 from backend.services.metrics_service import render_metrics
 from backend.services.rag_service import rag_service
 from backend.services.socratic_service import socratic_service
@@ -64,6 +65,8 @@ async def lifespan(_: FastAPI):
     finally:
         session.close()
     seed_default_agent_config()
+    if settings.pdf_parser_backend == "mineru":
+        log_gpu_runtime_status("backend", requested_device=settings.mineru_device, python_bin=settings.mineru_python_bin)
     warmup_task = asyncio.create_task(asyncio.to_thread(warmup_embedding_model))
     yield
     warmup_task.cancel()

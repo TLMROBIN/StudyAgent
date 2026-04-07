@@ -68,6 +68,35 @@ npm run dev
 celery -A backend.tasks.celery_app.celery_app worker -l info
 ```
 
+### PDF 解析器（本机 MinerU 部署）
+
+- 当前仓库已支持通过环境变量把 **PDF** 解析路径切到 MinerU，`DOCX/TXT` 不受影响
+- 本机正式部署建议在 `.env` 中使用：
+
+```bash
+PDF_PARSER_BACKEND=mineru
+MINERU_PYTHON_BIN=/tmp/mineru-venv/bin/python
+MINERU_BACKEND=pipeline
+MINERU_PARSE_METHOD=auto
+MINERU_DEVICE=cuda
+MINERU_DEVICE_MODE=cuda
+MINERU_MODEL_SOURCE=local
+MINERU_REQUIRE_GPU_PROOF=true
+MINERU_PARSE_TIMEOUT_SECONDS=480
+INGEST_SOFT_TIME_LIMIT_SECONDS=540
+INGEST_HARD_TIME_LIMIT_SECONDS=600
+```
+
+- 回滚到旧 PDF 解析器时，只需要把：
+
+```bash
+PDF_PARSER_BACKEND=legacy
+```
+
+- MinerU 路径会在导入任务目录下写出运行时证明文件：
+  - `data/tasks/<task_id>/mineru-runtime.json`
+- 当 `MINERU_REQUIRE_GPU_PROOF=true` 时，如果真实导入过程中没有检测到 GPU 使用证明，PDF 导入会失败关闭，而不是静默回退到旧解析器
+
 ### 4. 一键容器编排
 
 ```bash

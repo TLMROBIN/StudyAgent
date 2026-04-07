@@ -7,11 +7,15 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend.config import Settings
 from backend.database import Base
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeChunk, KnowledgeDocument
 from backend.models.user import User, UserRole
 from backend.routers import knowledge as knowledge_router
+from backend.services.embed_service import EmbedService
+from backend.services.rag_service import RagService
+from backend.services.vector_store_service import VectorStoreService
 
 
 def build_session():
@@ -23,6 +27,23 @@ def build_session():
 
 def build_request():
     return SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+
+def build_real_rag_service(tmp_path: Path) -> RagService:
+    settings = Settings(
+        CHROMADB_MODE="persistent",
+        CHROMADB_PATH=str(tmp_path / "chromadb"),
+        CHROMADB_COLLECTION_PREFIX="studyagent-knowledge-test",
+        TASK_ARTIFACT_PATH=str(tmp_path / "tasks"),
+        UPLOAD_PATH=str(tmp_path / "uploads"),
+        EMBEDDING_MODEL_NAME="BAAI/bge-m3",
+        EMBEDDING_BACKEND="hash",
+        EMBEDDING_DEVICE="cpu",
+        EMBEDDING_FALLBACK_TO_HASH=True,
+    )
+    embedder = EmbedService(settings)
+    vector_store = VectorStoreService(settings, embedder)
+    return RagService(settings=settings, embedder=embedder, vector_store=vector_store)
 
 
 class FakeRagService:
@@ -274,8 +295,13 @@ def test_list_document_chunks_returns_question_metadata():
 
         assert len(result) == 1
         assert result[0].question_number == "1"
+        assert result[0].answer_text == "A"
+        assert result[0].explanation_text == "由受力分析可得"
         assert result[0].contains_images is True
+        assert result[0].image_count == 1
         assert result[0].assets[0].filename == "image-001.png"
+        assert result[0].assets[0].url == "/api/knowledge/documents/1/assets/image-001.png"
+        assert result[0].assets[0].title == "受力图"
     finally:
         session.close()
 
@@ -421,6 +447,76 @@ def test_bulk_update_documents_updates_multiple_rows_and_preserves_unspecified_f
         assert result[0].chapter == "第二章 电场"
         assert result[1].chapter == "第三章 磁场"
         assert fake_rag_service.synced_documents == [first.id, second.id]
+    finally:
+        session.close()
+
+
+def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        real_rag_service = build_real_rag_service(tmp_path)
+        monkeypatch.setattr(knowledge_router, "rag_service", real_rag_service)
+
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.pdf",
+            file_path=str(tmp_path / "questions.pdf"),
+            mime_type="application/pdf",
+            size_bytes=256,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add(
+            KnowledgeChunk(
+                document_id=document.id,
+                subject=document.subject,
+                chunk_index=0,
+                content="第1题\n\n题目：如图所示...",
+                metadata_json={
+                    "document_id": document.id,
+                    "resource_type": document.resource_type,
+                    "chunk_kind": "question_item",
+                    "question_number": "1",
+                    "question_text": "如图所示...",
+                    "answer_text": "A",
+                    "explanation_text": "由受力分析可得",
+                    "contains_images": False,
+                    "image_count": 0,
+                    "asset_refs": [],
+                    "parser_backend": "pipeline",
+                    "parser_provenance": {"runtime_artifact": "data/tasks/123/mineru-runtime.json"},
+                },
+            )
+        )
+        session.commit()
+
+        payload = knowledge_router.KnowledgeDocumentUpdate(
+            resource_type="question_set",
+            grade=2,
+            chapter="第二章 机械运动",
+            section="2.1 匀变速直线运动",
+            difficulty="advanced",
+            tags=["运动", "速度"],
+        )
+        knowledge_router.update_document(
+            document.id,
+            payload=payload,
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+
+        row = session.scalars(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)).first()
+        assert row is not None
+        assert row.metadata_json.get("parser_backend") == "pipeline"
+        assert row.metadata_json.get("parser_provenance", {}).get("runtime_artifact") == "data/tasks/123/mineru-runtime.json"
     finally:
         session.close()
 

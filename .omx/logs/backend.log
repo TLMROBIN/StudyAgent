@@ -1,0 +1,11 @@
+{"timestamp": "2026-04-06T12:10:53.357Z", "level": "INFO", "logger": "uvicorn.error", "message": "Started server process [263568]"}
+{"timestamp": "2026-04-06T12:10:53.357Z", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application startup."}
+{"timestamp": "2026-04-06T12:10:53.371Z", "level": "INFO", "logger": "uvicorn.error", "message": "Application startup complete."}
+{"timestamp": "2026-04-06T12:10:53.371Z", "level": "INFO", "logger": "uvicorn.error", "message": "Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)"}
+{"timestamp": "2026-04-06T12:10:55.427Z", "level": "INFO", "logger": "sentence_transformers.SentenceTransformer", "message": "Load pretrained SentenceTransformer: BAAI/bge-m3"}
+{"timestamp": "2026-04-06T12:11:01.203Z", "level": "INFO", "logger": "backend.services.embed_service", "message": "Loaded embedding model BAAI/bge-m3 on cuda"}
+{"timestamp": "2026-04-06T12:11:18.826Z", "level": "INFO", "logger": "studyagent.request", "message": "request completed", "request_id": "b74fc929-6000-49ae-935e-38f74048b683", "method": "GET", "path": "/health", "status_code": 200, "duration_ms": 1.18, "client_ip": "127.0.0.1", "user_agent": "curl/8.5.0"}
+{"timestamp": "2026-04-06T12:46:13.105Z", "level": "INFO", "logger": "uvicorn.error", "message": "Shutting down"}
+{"timestamp": "2026-04-06T12:46:13.205Z", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application shutdown."}
+{"timestamp": "2026-04-06T12:46:13.206Z", "level": "INFO", "logger": "uvicorn.error", "message": "Application shutdown complete."}
+{"timestamp": "2026-04-06T12:46:13.206Z", "level": "INFO", "logger": "uvicorn.error", "message": "Finished server process [263568]"}

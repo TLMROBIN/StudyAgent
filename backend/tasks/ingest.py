@@ -7,14 +7,45 @@ from sqlalchemy.orm import Session
 from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeDocument, ResourceType
-from backend.services.rag_service import rag_service
+from backend.services.mineru_service import MineruStartupError, MineruTransientIOError
+from backend.services.pdf_parse_types import PDFParseResult
+from backend.services.rag_service import ExtractionResult, rag_service
 from backend.tasks.celery_app import celery_app
 
 settings = get_settings()
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
+RETRIABLE_INGEST_EXCEPTIONS = (MineruStartupError, MineruTransientIOError)
 
 
-def _build_completion_message(document: KnowledgeDocument, chunks: list) -> str:
+def _parser_provenance_from_chunks(chunks: list) -> dict:
+    for chunk in chunks:
+        metadata = getattr(chunk, "metadata", {}) or {}
+        provenance = metadata.get("parser_provenance") or {}
+        if provenance:
+            return provenance
+    return {}
+
+
+def _parser_runtime_note_from_provenance(provenance: dict | None) -> str | None:
+    if not provenance:
+        return None
+    requested_device = provenance.get("requested_device")
+    effective_device = provenance.get("effective_device") or provenance.get("device")
+    if requested_device == "cuda" and effective_device != "cuda":
+        return "本次解析未使用 GPU，已回退 CPU"
+    return None
+
+
+def _build_extraction_message(extracted: ExtractionResult) -> str:
+    message = f"文本提取完成，共 {len(extracted.text.strip())} 个字符"
+    if extracted.parsed_pdf is not None:
+        note = _parser_runtime_note_from_provenance(extracted.parsed_pdf.parser_provenance)
+        if note:
+            message = f"{message}（{note}）"
+    return message
+
+
+def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_pdf: PDFParseResult | None = None) -> str:
     question_count = 0
     answer_count = 0
     explanation_count = 0
@@ -58,6 +89,9 @@ def _build_completion_message(document: KnowledgeDocument, chunks: list) -> str:
         parts.append(f"识别小节 {len(sections)} 个")
     if image_count:
         parts.append(f"附图 {image_count} 张")
+    parser_note = _parser_runtime_note_from_provenance((parsed_pdf.parser_provenance if parsed_pdf is not None else None) or _parser_provenance_from_chunks(chunks))
+    if parser_note:
+        parts.append(parser_note)
     return "；".join(parts)
 
 def _update_status(
@@ -150,7 +184,12 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             celery_task=celery_task,
         )
         _ensure_not_cancelled(db, task_id, document_id)
-        extracted = rag_service.extract_content(document.file_path, document.mime_type, document_id=document.id)
+        extracted = rag_service.extract_content(
+            document.file_path,
+            document.mime_type,
+            document_id=document.id,
+            task_id=task.id,
+        )
         task, document = _ensure_not_cancelled(db, task_id, document_id)
         _update_status(
             db,
@@ -158,10 +197,15 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             document,
             progress=25,
             status=DocumentStatus.PROCESSING,
-            error=f"文本提取完成，共 {len(extracted.text.strip())} 个字符",
+            error=_build_extraction_message(extracted),
             celery_task=celery_task,
         )
-        chunks = rag_service.prepare_document_chunks(document, extracted.text, assets=extracted.assets)
+        chunks = rag_service.prepare_document_chunks(
+            document,
+            extracted.text,
+            assets=extracted.assets,
+            parsed_pdf=extracted.parsed_pdf,
+        )
         if not chunks:
             raise RuntimeError("文档未提取到可用文本，无法建立索引")
 
@@ -185,7 +229,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             document,
             progress=100,
             status=DocumentStatus.COMPLETED,
-            error=_build_completion_message(document, chunks),
+            error=_build_completion_message(document, chunks, extracted.parsed_pdf),
             celery_task=celery_task,
         )
         db.add(task)
@@ -204,6 +248,21 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                     error="导入超时，请检查文件大小或内容后重试",
                     celery_task=celery_task,
                 )
+    except RETRIABLE_INGEST_EXCEPTIONS as exc:
+        if "db" in locals():
+            task, document = _reload_task_document(db, task_id, document_id)
+            if task and document:
+                rag_service.clear_document_artifacts(document.id)
+                _update_status(
+                    db,
+                    task,
+                    document,
+                    progress=min(task.progress or 0, 99),
+                    status=DocumentStatus.PROCESSING if celery_task is not None else DocumentStatus.FAILED,
+                    error=f"解析器暂时不可用，准备重试：{exc}",
+                    celery_task=celery_task,
+                )
+        raise
     except RuntimeError as exc:
         if str(exc) == "__TASK_CANCELLED__":
             if "db" in locals():
@@ -253,14 +312,16 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
 
 @celery_app.task(
     bind=True,
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    max_retries=3,
     soft_time_limit=settings.ingest_soft_time_limit_seconds,
     time_limit=settings.ingest_hard_time_limit_seconds,
 )
 def ingest_document_task(self, document_id: int, task_id: int) -> None:
-    run_ingest_pipeline(document_id, task_id, celery_task=self)
+    try:
+        run_ingest_pipeline(document_id, task_id, celery_task=self)
+    except RETRIABLE_INGEST_EXCEPTIONS as exc:
+        if self.request.retries < 1:
+            raise self.retry(exc=exc, countdown=5)
+        raise
 
 
 def enqueue_ingest_task(document_id: int, task_id: int) -> str | None:

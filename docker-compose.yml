@@ -12,12 +12,36 @@ services:
       CHROMADB_MODE: http
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
+      MINERU_PYTHON_BIN: /tmp/mineru-venv/bin/python
+      MINERU_MODEL_SOURCE: local
+      MINERU_TOOLS_CONFIG_JSON: /root/mineru.json
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    gpus: all
+    volumes:
+      - ./:/app
+      - /home/binyu/.cache/modelscope:/opt/mineru-modelscope:ro
+      - /home/binyu/.cache/huggingface:/root/.cache/huggingface:ro
+      - ./.omx/mineru-docker.json:/root/mineru.json:ro
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     depends_on:
       - redis
       - postgres
     ports:
       - "8002:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import json,sys,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health')); parser=data.get('rag',{}).get('pdf_parser',{}); ok=data.get('status')=='ok' and ((not parser.get('enabled')) or parser.get('runtime_ready')); sys.exit(0 if ok else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   worker:
     build:
@@ -32,10 +56,34 @@ services:
       CHROMADB_MODE: http
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
+      MINERU_PYTHON_BIN: /tmp/mineru-venv/bin/python
+      MINERU_MODEL_SOURCE: local
+      MINERU_TOOLS_CONFIG_JSON: /root/mineru.json
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /root/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /root/.cache/huggingface/hub
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    gpus: all
+    volumes:
+      - ./:/app
+      - /home/binyu/.cache/modelscope:/opt/mineru-modelscope:ro
+      - /home/binyu/.cache/huggingface:/root/.cache/huggingface:ro
+      - ./.omx/mineru-docker.json:/root/mineru.json:ro
     command: celery -A backend.tasks.celery_app.celery_app worker -l info
     depends_on:
       - redis
       - postgres
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import os,sys; from backend.services.gpu_runtime import collect_cuda_requirement_snapshot; snapshot=collect_cuda_requirement_snapshot(os.getenv('MINERU_DEVICE'), python_bin=os.getenv('MINERU_PYTHON_BIN')); sys.exit(0 if snapshot.get('runtime_ready') else 1)"
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
 
   redis:
     image: redis:7-alpine

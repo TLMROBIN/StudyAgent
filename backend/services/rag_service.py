@@ -17,6 +17,9 @@ from sqlalchemy.orm import Session, selectinload
 from backend.config import Settings, get_settings
 from backend.models.knowledge import DifficultyLevel, KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.services.embed_service import EmbedService, embed_service
+from backend.services.mineru_service import mineru_service
+from backend.services.pdf_parse_bridge import PDFParseBridge
+from backend.services.pdf_parse_types import ExtractedAsset, PDFParseResult
 from backend.services.vector_store_service import VectorStoreService, vector_store_service
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
@@ -34,11 +37,29 @@ CHAPTER_HEADING_PATTERNS = [
     re.compile(r"^(专题[一二三四五六七八九十百零两0-9]+.*)$"),
     re.compile(r"^(Unit\s+\d+.*)$", re.IGNORECASE),
 ]
+DECIMAL_SECTION_HEADING_PATTERN = re.compile(r"^[0-9]{1,2}(?:\.[0-9]{1,2})+\s*\S.*$")
+GENERIC_SINGLE_LEVEL_SECTION_PATTERN = re.compile(r"^[0-9]{1,2}[.．、]\s*\S.*$")
 SECTION_HEADING_PATTERNS = [
-    re.compile(r"^[0-9]{1,2}[.．、]\s*\S.*$"),
+    DECIMAL_SECTION_HEADING_PATTERN,
+    GENERIC_SINGLE_LEVEL_SECTION_PATTERN,
     re.compile(r"^[（(][一二三四五六七八九十百零两0-9]+[)）]\s*\S.*$"),
     re.compile(r"^[A-Za-z][.、]\s*\S.*$"),
 ]
+QUESTION_LIKE_HEADING_HINTS = (
+    "？",
+    "?",
+    "求",
+    "多少",
+    "下列",
+    "正确",
+    "错误",
+    "判断",
+    "计算",
+    "解答",
+    "写出",
+    "指出",
+    "求出",
+)
 PLAIN_TEXT_SPLIT_PATTERN = re.compile(r"(?<=[。！？；;.!?])\s+|\n+")
 CHUNK_BOUNDARY_HINTS = "。！？；;.!?，,"
 ASSET_MARKER_PATTERN = re.compile(r"\[\[asset:([A-Za-z0-9_.-]+)\]\]")
@@ -80,10 +101,10 @@ QUESTION_START_PATTERN = re.compile(
     r"^\s*(?:第\s*(?P<ordinal>\d+)\s*题|(?P<plain>\d{1,3})\s*[.．、:：)]|[（(](?P<wrapped>\d{1,3})[)）])\s*(?P<body>.*)$"
 )
 QUESTION_SECTION_HEADING_PATTERN = re.compile(
-    r"^\s*(?:参考)?(?:答案(?:与解析)?|答案及解析|解答|参考解答|参考解析|解析)\s*$"
+    r"^\s*(?:【)?(?:参考)?(?:答案(?:与解析)?|答案及解析|解答|参考解答|参考解析|解析|详解)(?:】)?\s*$"
 )
-ANSWER_LINE_PATTERN = re.compile(r"^\s*(?:参考)?答案(?:[:：]\s*(?P<body>.*))?$")
-EXPLANATION_LINE_PATTERN = re.compile(r"^\s*(?:解析|解答|思路(?:点拨)?|点拨|说明)(?:[:：]\s*(?P<body>.*))?$")
+ANSWER_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:参考)?答案(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+EXPLANATION_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:解析|详解|解答|思路(?:点拨)?|点拨|说明)(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
 QUESTION_METADATA_PRESERVE_KEYS = {
     "chunk_kind",
     "question_number",
@@ -93,6 +114,13 @@ QUESTION_METADATA_PRESERVE_KEYS = {
     "contains_images",
     "asset_refs",
     "image_count",
+    "parser_backend",
+    "parser_provenance",
+    "page_start",
+    "page_end",
+    "source_pages",
+    "source_block_types",
+    "structure_path",
 }
 
 
@@ -109,20 +137,10 @@ class PDFExtractionCandidate:
 
 
 @dataclass
-class ExtractedAsset:
-    asset_id: str
-    filename: str
-    content_type: str
-    storage_path: str
-    public_url: str
-    title: str | None = None
-    description: str | None = None
-
-
-@dataclass
 class ExtractionResult:
     text: str
     assets: list[ExtractedAsset] = field(default_factory=list)
+    parsed_pdf: PDFParseResult | None = None
 
 
 @dataclass
@@ -158,6 +176,9 @@ class RagService:
         self.settings = settings or get_settings()
         self.embedder = embedder or embed_service
         self.vector_store = vector_store or vector_store_service
+        self.QUESTION_RESOURCE_TYPES = QUESTION_RESOURCE_TYPES
+        self.PreparedChunk = PreparedChunk
+        self.pdf_parse_bridge = PDFParseBridge(self)
 
     def split_text(self, text: str) -> list[str]:
         text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -370,7 +391,10 @@ class RagService:
         text: str,
         *,
         assets: list[ExtractedAsset] | None = None,
+        parsed_pdf: PDFParseResult | None = None,
     ) -> list[PreparedChunk]:
+        if parsed_pdf is not None:
+            return self.pdf_parse_bridge.prepare_chunks(document, parsed_pdf)
         asset_map = {asset.asset_id: asset for asset in assets or []}
         if (document.resource_type or ResourceType.KNOWLEDGE_NOTE.value) in QUESTION_RESOURCE_TYPES:
             prepared_questions = self._prepare_question_chunks(document, text, asset_map)
@@ -409,6 +433,7 @@ class RagService:
         mime_type: str | None = None,
         *,
         document_id: int | None = None,
+        task_id: int | None = None,
     ) -> ExtractionResult:
         mime = (mime_type or mimetypes.guess_type(file_path)[0] or "").lower()
         suffix = Path(file_path).suffix.lower()
@@ -416,6 +441,11 @@ class RagService:
             return ExtractionResult(text=Path(file_path).read_text(encoding="utf-8", errors="ignore"))
 
         if suffix == ".pdf":
+            if self.settings.pdf_parser_backend == "mineru":
+                if document_id is None or task_id is None:
+                    raise RuntimeError("MinerU PDF parsing requires document_id and task_id")
+                parsed_pdf = mineru_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
+                return ExtractionResult(text=parsed_pdf.text, assets=parsed_pdf.assets, parsed_pdf=parsed_pdf)
             return ExtractionResult(text=self._extract_pdf_text(file_path))
 
         if suffix == ".docx" or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
@@ -423,10 +453,11 @@ class RagService:
 
         raise RuntimeError(f"暂不支持解析文件类型：{suffix}")
 
-    def health_snapshot(self) -> dict[str, dict]:
+    def health_snapshot(self) -> dict[str, dict | str | bool]:
         return {
             "embedding": self.embedder.health_snapshot(),
             "vector_store": self.vector_store.health_snapshot(),
+            "pdf_parser": mineru_service.health_snapshot(),
         }
 
     def document_asset_dir(self, document_id: int) -> Path:
@@ -924,16 +955,33 @@ class RagService:
     def _extract_heading_context(self, text: str, resource_type: str | None) -> dict[str, str | None]:
         if resource_type not in CHAPTER_AWARE_RESOURCE_TYPES:
             return {"chapter": None, "section": None}
+        section_patterns = [DECIMAL_SECTION_HEADING_PATTERN] if resource_type == ResourceType.TEXTBOOK.value else SECTION_HEADING_PATTERNS
         for line in [item.strip() for item in text.split("\n") if item.strip()][:3]:
             if line.endswith("。") or len(line) > 48:
                 continue
             for pattern in CHAPTER_HEADING_PATTERNS:
                 if pattern.match(line):
                     return {"chapter": line[:255], "section": None}
-            for pattern in SECTION_HEADING_PATTERNS:
+            if self._looks_like_question_heading(line):
+                continue
+            if resource_type == ResourceType.TEXTBOOK.value and self._is_ambiguous_textbook_section_heading(line):
+                continue
+            for pattern in section_patterns:
                 if pattern.match(line):
                     return {"chapter": None, "section": line[:255]}
         return {"chapter": None, "section": None}
+
+    def _looks_like_question_heading(self, line: str) -> bool:
+        normalized = str(line or "").strip()
+        if not normalized:
+            return False
+        return any(token in normalized for token in QUESTION_LIKE_HEADING_HINTS)
+
+    def _is_ambiguous_textbook_section_heading(self, line: str) -> bool:
+        normalized = str(line or "").strip()
+        return bool(GENERIC_SINGLE_LEVEL_SECTION_PATTERN.match(normalized)) and not bool(
+            DECIMAL_SECTION_HEADING_PATTERN.match(normalized)
+        )
 
     def _infer_question_profile(self, question: str) -> QuestionProfile:
         lowered = question.strip()
@@ -1066,7 +1114,16 @@ class RagService:
 
     def _question_candidate_text(self, row: KnowledgeChunk) -> str:
         metadata = row.metadata_json or {}
-        return str(metadata.get("question_text") or row.content)
+        parts = [str(metadata.get("question_text") or row.content)]
+        chapter = str(metadata.get("chapter") or "").strip()
+        section = str(metadata.get("section") or "").strip()
+        if chapter:
+            parts.append(chapter)
+        if section:
+            parts.append(section)
+        if metadata.get("contains_images"):
+            parts.append("含图题")
+        return "\n".join(part for part in parts if part).strip()
 
     def _question_row_key(self, row: KnowledgeChunk) -> tuple[int, str]:
         metadata = row.metadata_json or {}
@@ -1113,6 +1170,10 @@ class RagService:
             labels.append(f"难度:{self._difficulty_label(str(difficulty))}")
         if question_number:
             labels.append(f"第{question_number}题")
+        page_start = metadata.get("page_start")
+        page_end = metadata.get("page_end")
+        if page_start and page_end:
+            labels.append(f"p{page_start}" if page_start == page_end else f"p{page_start}-{page_end}")
         if metadata.get("contains_images"):
             labels.append("含图片")
         return labels

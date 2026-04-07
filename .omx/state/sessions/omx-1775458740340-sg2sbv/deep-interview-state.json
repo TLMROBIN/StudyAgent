@@ -1,0 +1,88 @@
+{
+  "active": true,
+  "current_phase": "deep-interview",
+  "iteration": 4,
+  "max_iterations": 12,
+  "started_at": "2026-04-06T07:02:27Z",
+  "task_description": "Clarify requirements for formally deploying MinerU on this machine as StudyAgent's document parser and refactoring chunking/tag recognition around it.",
+  "interview_id": "deep-interview-mineru-parser-integration-20260406T070227Z",
+  "profile": "standard",
+  "type": "brownfield",
+  "initial_idea": "Formally deploy MinerU locally, adopt it as StudyAgent's document parser, then refactor chunking logic and tag recognition around it.",
+  "rounds": [
+    {
+      "round": 1,
+      "question": "你希望正式上线后的目标到底是什么：MinerU 从首日就成为所有文档类型的统一唯一解析入口，还是先只接管 PDF（尤其扫描版/复杂版面），把 DOCX/TXT 暂时留在现有链路，等题库语义和切片质量补齐后再统一？为什么？",
+      "answer": "先只接管 pdf 然后再统一对解析后的内容进行切片 标签化 图片管理 ，再推荐题目时可以给出准确的题目和对应图片。识别的教材也要有结构，有标签，方便 rag 检索",
+      "target_dimension": "scope",
+      "scores_after": {
+        "intent": 0.55,
+        "outcome": 0.72,
+        "scope": 0.78,
+        "constraints": 0.45,
+        "success": 0.58,
+        "context": 0.8
+      },
+      "ambiguity_after": 0.3945,
+      "readiness_gates": {
+        "non_goals_explicit": false,
+        "decision_boundaries_explicit": false,
+        "pressure_pass_complete": false
+      }
+    },
+    {
+      "round": 2,
+      "question": "首期里，哪些事情你明确不要一起做，即使它们看起来顺手？请你直接说首期不做的清单。",
+      "answer": "Docx/txt改造、已入库文档重跑、前端交互大改、MinerU接管切题，这些不做。",
+      "target_dimension": "non-goals",
+      "scores_after": {
+        "intent": 0.6,
+        "outcome": 0.75,
+        "scope": 0.82,
+        "constraints": 0.52,
+        "success": 0.62,
+        "context": 0.8
+      },
+      "ambiguity_after": 0.316,
+      "readiness_gates": {
+        "non_goals_explicit": true,
+        "decision_boundaries_explicit": false,
+        "pressure_pass_complete": false
+      }
+    }
+  ],
+  "current_ambiguity": 0.316,
+  "threshold": 0.2,
+  "max_rounds": 12,
+  "challenge_modes_used": [],
+  "codebase_context": {
+    "ingest_entrypoint": "backend/tasks/ingest.py:153-164",
+    "extract_entrypoint": "backend/services/rag_service.py:406-422",
+    "question_chunking": "backend/services/rag_service.py:645-694",
+    "docx_extraction": "backend/services/rag_service.py:1142-1352",
+    "pdf_scan_handling": "backend/services/rag_service.py:1532-1679",
+    "plan_constraint": "DEVELOPMENT_PLAN.md:237-239",
+    "question_plan": "QUESTION_BANK_PLAN.md:7-24,28-46"
+  },
+  "current_stage": "intent-first",
+  "current_focus": "decision-boundaries",
+  "context_snapshot_path": ".omx/context/mineru-parser-integration-20260406T070227Z.md",
+  "readiness_gates": {
+    "non_goals_explicit": true,
+    "decision_boundaries_explicit": false,
+    "pressure_pass_complete": false
+  },
+  "dimension_scores": {
+    "intent": 0.6,
+    "outcome": 0.75,
+    "scope": 0.82,
+    "constraints": 0.52,
+    "success": 0.62,
+    "context": 0.8
+  },
+  "notes": [
+    "User clarified PDF-only parser takeover first; downstream unified chunk/tag/image pipeline later.",
+    "Non-goals now explicit."
+  ],
+  "last_turn_at": "2026-04-06T07:40:01.302Z"
+}

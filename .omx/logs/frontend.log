@@ -1,0 +1,10 @@
+
+> studyagent-frontend@0.1.0 dev
+> vite --host 127.0.0.1
+
+
+  VITE v7.3.1  ready in 139 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+8:11:19 PM [vite] (client) ✨ new dependencies optimized: element-plus/es, element-plus/es/components/base/style/css, element-plus/es/components/input/style/css, element-plus/es/components/form/style/css, element-plus/es/components/form-item/style/css, element-plus/es/components/segmented/style/css, element-plus/es/components/upload/style/css, element-plus/es/components/select/style/css, element-plus/es/components/option/style/css, element-plus/es/components/dialog/style/css, element-plus/es/components/progress/style/css
+8:11:19 PM [vite] (client) ✨ optimized dependencies changed. reloading

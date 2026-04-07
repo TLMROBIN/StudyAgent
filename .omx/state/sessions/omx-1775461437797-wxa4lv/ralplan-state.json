@@ -1,0 +1,24 @@
+{
+  "active": false,
+  "current_phase": "complete",
+  "started_at": "2026-04-06T08:00:00Z",
+  "iteration": 5,
+  "max_iterations": 5,
+  "task_description": "Consensus planning for MinerU PDF parser integration based on .omx/specs/deep-interview-mineru-parser-integration.md",
+  "slug": "mineru-parser-integration",
+  "input_spec": ".omx/specs/deep-interview-mineru-parser-integration.md",
+  "context_snapshot": ".omx/context/mineru-parser-integration-20260406T070227Z.md",
+  "consensus_iterations": 2,
+  "last_turn_at": "2026-04-06T08:16:19.375Z",
+  "completed_at": "2026-04-06T08:05:00Z",
+  "stop_reason": "max_iterations_reached",
+  "planner_drafts": [
+    ".omx/plans/ralplan-mineru-parser-integration-initial.md",
+    ".omx/plans/ralplan-mineru-parser-integration-v2.md",
+    ".omx/plans/ralplan-mineru-parser-integration-v3.md"
+  ],
+  "final_plan": ".omx/plans/ralplan-mineru-parser-integration-v3.md",
+  "prd": ".omx/plans/prd-mineru-parser-integration.md",
+  "test_spec": ".omx/plans/test-spec-mineru-parser-integration.md",
+  "critic_verdict": "APPROVE"
+}
