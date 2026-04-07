@@ -1,13 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from hashlib import sha1
 import re
 from typing import Any
 
 from backend.models.knowledge import KnowledgeDocument
 
-REQUIRED_IMAGE_HINTS = (
+QUESTION_BANK_METADATA_PRESERVE_KEYS = {
+    "chunk_kind",
+    "question_number",
+    "question_text",
+    "answer_text",
+    "explanation_text",
+    "contains_images",
+    "asset_refs",
+    "image_count",
+    "parser_backend",
+    "parser_provenance",
+    "page_start",
+    "page_end",
+    "source_pages",
+    "source_block_types",
+    "structure_path",
+    "source_format",
+    "source_locator",
+    "image_expectation",
+    "image_binding_status",
+    "quality_flags",
+    "question_uid",
+}
+
+QUESTION_IMAGE_REQUIRED_HINTS = (
     "如图",
     "下图",
     "图示",
@@ -19,149 +42,134 @@ REQUIRED_IMAGE_HINTS = (
     "几何图形",
     "装置图",
 )
-OPTIONAL_IMAGE_HINTS = (
-    "图像",
-    "示意图",
-    "函数图像",
-    "坐标图",
-    "统计图",
+QUESTION_IMAGE_OPTIONAL_HINTS = ("示意图", "图表", "表格", "装置", "模型", "实验图")
+QUESTION_START_PATTERN = re.compile(
+    r"^\s*(?:第\s*\d+\s*题|\d{1,3}\s*[.．、:：)]|[（(]\d{1,3}[)）])\s*",
+    re.MULTILINE,
 )
-INLINE_QUESTION_MARKER_PATTERN = re.compile(
-    r"(?:^|\n)\s*(?:第\s*\d+\s*题|\d{1,3}\s*[.．、:：)]|[（(]\d{1,3}[)）])\s*"
-)
-ANSWER_PAIRING_SUSPECT_PATTERN = re.compile(r"(?:^|\n)\s*\d{1,3}\s*[.．、:：)]\s*答案")
-
-
-@dataclass(slots=True)
-class QuestionBankChunkCandidate:
-    question_number: str
-    question_text: str
-    answer_text: str | None = None
-    explanation_text: str | None = None
-    asset_refs: list[dict[str, Any]] = field(default_factory=list)
-    source_format: str | None = None
-    source_locator: str | None = None
-    parser_backend: str | None = None
-    parser_provenance: dict[str, Any] | None = None
-    page_start: int | None = None
-    page_end: int | None = None
-    source_pages: list[int] = field(default_factory=list)
-    source_block_types: list[str] = field(default_factory=list)
-    structure_path: list[str] = field(default_factory=list)
 
 
 class QuestionBankPostProcessor:
-    def build_metadata(
-        self,
+    @staticmethod
+    def compose_question_chunk_text(
+        *,
+        number: str,
+        question_text: str,
+        answer_text: str | None,
+        explanation_text: str | None,
+    ) -> str:
+        parts = [f"第{number}题", f"题目：\n{str(question_text or '').strip()}"]
+        if answer_text:
+            parts.append(f"答案：\n{str(answer_text).strip()}")
+        if explanation_text:
+            parts.append(f"解析：\n{str(explanation_text).strip()}")
+        return "\n\n".join(part for part in parts if part.strip()).strip()
+
+    @classmethod
+    def build_question_metadata(
+        cls,
         document: KnowledgeDocument,
-        candidate: QuestionBankChunkCandidate,
+        *,
+        question_number: str,
+        question_text: str,
+        answer_text: str | None,
+        explanation_text: str | None,
+        asset_refs: list[dict[str, Any]] | None,
+        chapter: str | None = None,
+        section: str | None = None,
+        structure_path: list[str] | None = None,
+        source_format: str | None = None,
+        source_locator: str | None = None,
+        parser_backend: str | None = None,
+        parser_provenance: dict[str, Any] | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        question_number = str(candidate.question_number or "").strip()
-        question_text = str(candidate.question_text or "").strip()
-        answer_text = self._clean_optional_text(candidate.answer_text)
-        explanation_text = self._clean_optional_text(candidate.explanation_text)
-        asset_refs = self._dedupe_asset_refs(candidate.asset_refs)
-        structure_path = [str(item).strip() for item in candidate.structure_path if str(item or "").strip()]
-        source_pages = sorted({int(page) for page in candidate.source_pages if page})
-        source_block_types = sorted({str(item).strip() for item in candidate.source_block_types if str(item or "").strip()})
-        source_format = str(candidate.source_format or self._source_format(document)).strip() or "unknown"
-        source_locator = self._source_locator(candidate, question_number, question_text, source_pages)
-        image_expectation = self._image_expectation(question_text)
-        image_binding_status = self._image_binding_status(image_expectation, asset_refs)
-        quality_flags = self._quality_flags(
-            question_text=question_text,
-            answer_text=answer_text,
-            explanation_text=explanation_text,
+        normalized_question = str(question_text or "").strip()
+        normalized_answer = str(answer_text or "").strip() or None
+        normalized_explanation = str(explanation_text or "").strip() or None
+        normalized_assets = [dict(item) for item in (asset_refs or [])]
+        normalized_structure = cls._normalize_structure_path(structure_path, chapter, section)
+        resolved_source_format = cls._resolve_source_format(source_format, document.filename)
+        resolved_source_locator = str(source_locator or "").strip() or cls._default_source_locator(question_number)
+        image_expectation = cls._image_expectation(normalized_question)
+        image_binding_status = cls._image_binding_status(image_expectation, normalized_assets)
+        quality_flags = cls._quality_flags(
+            question_number=question_number,
+            question_text=normalized_question,
+            answer_text=normalized_answer,
+            explanation_text=normalized_explanation,
             image_binding_status=image_binding_status,
         )
-        question_uid_seed = f"{document.id}:{source_locator or question_number or question_text}"
-
-        return {
+        metadata: dict[str, Any] = {
             "chunk_kind": "question_item",
-            "question_number": question_number or None,
-            "question_text": question_text or None,
-            "answer_text": answer_text,
-            "explanation_text": explanation_text,
-            "contains_images": bool(asset_refs),
-            "asset_refs": asset_refs,
-            "image_count": len(asset_refs),
-            "structure_path": structure_path,
-            "source_format": source_format,
-            "source_locator": source_locator,
-            "parser_backend": self._clean_optional_text(candidate.parser_backend),
-            "parser_provenance": candidate.parser_provenance or None,
-            "page_start": candidate.page_start,
-            "page_end": candidate.page_end,
-            "source_pages": source_pages or None,
-            "source_block_types": source_block_types or None,
+            "question_number": question_number,
+            "question_text": normalized_question,
+            "answer_text": normalized_answer,
+            "explanation_text": normalized_explanation,
+            "contains_images": bool(normalized_assets),
+            "asset_refs": normalized_assets,
+            "image_count": len(normalized_assets),
+            "structure_path": normalized_structure,
+            "source_format": resolved_source_format,
+            "source_locator": resolved_source_locator,
+            "parser_backend": parser_backend,
+            "parser_provenance": parser_provenance,
             "image_expectation": image_expectation,
             "image_binding_status": image_binding_status,
             "quality_flags": quality_flags,
-            "question_uid": f"qb:{sha1(question_uid_seed.encode('utf-8')).hexdigest()[:16]}",
+            "question_uid": cls._question_uid(document.id, resolved_source_locator, question_number, normalized_question),
         }
+        if extra_metadata:
+            metadata.update({key: value for key, value in extra_metadata.items() if value is not None})
+        return metadata
 
-    def _clean_optional_text(self, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = str(value).strip()
-        return cleaned or None
+    @staticmethod
+    def _normalize_structure_path(
+        structure_path: list[str] | None,
+        chapter: str | None,
+        section: str | None,
+    ) -> list[str]:
+        raw_items = structure_path if structure_path is not None else [chapter, section]
+        return [str(item).strip() for item in raw_items if str(item or "").strip()]
 
-    def _source_format(self, document: KnowledgeDocument) -> str:
-        mime_type = str(document.mime_type or "").lower()
-        if "pdf" in mime_type:
-            return "pdf"
-        if "wordprocessingml.document" in mime_type:
-            return "docx"
-        if "text/" in mime_type:
-            return "txt"
-        return "unknown"
+    @staticmethod
+    def _resolve_source_format(source_format: str | None, filename: str | None) -> str:
+        normalized = str(source_format or "").strip().lower()
+        if normalized:
+            return normalized
+        suffix = str(filename or "").rsplit(".", 1)
+        if len(suffix) == 2 and suffix[-1]:
+            return suffix[-1].lower()
+        return "document"
 
-    def _source_locator(
-        self,
-        candidate: QuestionBankChunkCandidate,
-        question_number: str,
-        question_text: str,
-        source_pages: list[int],
-    ) -> str:
-        if candidate.source_locator:
-            return str(candidate.source_locator).strip()
-        parts: list[str] = []
-        if question_number:
-            parts.append(f"question:{question_number}")
-        if candidate.page_start and candidate.page_end:
-            if candidate.page_start == candidate.page_end:
-                parts.append(f"page:{candidate.page_start}")
-            else:
-                parts.append(f"pages:{candidate.page_start}-{candidate.page_end}")
-        elif source_pages:
-            if len(source_pages) == 1:
-                parts.append(f"page:{source_pages[0]}")
-            else:
-                parts.append(f"pages:{source_pages[0]}-{source_pages[-1]}")
-        if parts:
-            return "|".join(parts)
-        text_fingerprint = sha1(question_text.encode("utf-8")).hexdigest()[:12] if question_text else "empty"
-        return f"question:{question_number or text_fingerprint}"
+    @staticmethod
+    def _default_source_locator(question_number: str) -> str:
+        normalized = str(question_number or "").strip()
+        return f"question:{normalized}" if normalized else "question:unknown"
 
-    def _image_expectation(self, question_text: str) -> str:
-        if any(token in question_text for token in REQUIRED_IMAGE_HINTS):
+    @classmethod
+    def _image_expectation(cls, question_text: str) -> str:
+        normalized = str(question_text or "").strip()
+        if any(token in normalized for token in QUESTION_IMAGE_REQUIRED_HINTS):
             return "required"
-        if any(token in question_text for token in OPTIONAL_IMAGE_HINTS):
+        if any(token in normalized for token in QUESTION_IMAGE_OPTIONAL_HINTS):
             return "optional"
         return "not_needed"
 
-    def _image_binding_status(self, image_expectation: str, asset_refs: list[dict[str, Any]]) -> str:
-        if asset_refs:
-            return "bound"
+    @staticmethod
+    def _image_binding_status(image_expectation: str, asset_refs: list[dict[str, Any]]) -> str:
+        has_assets = bool(asset_refs)
         if image_expectation == "required":
-            return "missing_required"
+            return "bound" if has_assets else "missing_required"
         if image_expectation == "optional":
-            return "optional_unbound"
+            return "bound" if has_assets else "optional_unbound"
         return "none_needed"
 
+    @classmethod
     def _quality_flags(
-        self,
+        cls,
         *,
+        question_number: str,
         question_text: str,
         answer_text: str | None,
         explanation_text: str | None,
@@ -172,37 +180,35 @@ class QuestionBankPostProcessor:
             flags.append("empty_question_text")
         if image_binding_status == "missing_required":
             flags.append("missing_required_image")
-        if self._looks_like_multi_question(question_text):
-            flags.append("multi_question_suspected")
-        if self._looks_like_answer_pairing_issue(answer_text, explanation_text):
+        if explanation_text and not answer_text:
             flags.append("answer_pairing_suspected")
+        if cls._contains_multiple_questions(question_number, question_text):
+            flags.append("multi_question_suspected")
         return flags
 
-    def _looks_like_multi_question(self, question_text: str) -> bool:
-        stripped = question_text.strip()
-        if not stripped:
+    @staticmethod
+    def _contains_multiple_questions(question_number: str, question_text: str) -> bool:
+        matches = [match.group(0) for match in QUESTION_START_PATTERN.finditer(str(question_text or ""))]
+        if not matches:
             return False
-        matches = list(INLINE_QUESTION_MARKER_PATTERN.finditer(stripped))
-        return len(matches) > 1 or bool(INLINE_QUESTION_MARKER_PATTERN.search(f"\n{stripped[1:]}"))
+        normalized_number = str(question_number or "").strip()
+        if len(matches) >= 2:
+            return True
+        if normalized_number and not matches[0].strip().startswith(f"第{normalized_number}题"):
+            first_line = str(question_text or "").splitlines()[0].strip() if question_text else ""
+            return bool(first_line) and first_line.startswith(tuple("0123456789（("))
+        return False
 
-    def _looks_like_answer_pairing_issue(self, answer_text: str | None, explanation_text: str | None) -> bool:
-        answer = str(answer_text or "").strip()
-        explanation = str(explanation_text or "").strip()
-        return bool(ANSWER_PAIRING_SUSPECT_PATTERN.search(answer) or ANSWER_PAIRING_SUSPECT_PATTERN.search(explanation))
-
-    def _dedupe_asset_refs(self, asset_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        deduped: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str]] = set()
-        for asset in asset_refs:
-            if not isinstance(asset, dict):
-                continue
-            key = (
-                str(asset.get("asset_id") or ""),
-                str(asset.get("filename") or ""),
-                str(asset.get("url") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(asset)
-        return deduped
+    @staticmethod
+    def _question_uid(
+        document_id: int | None,
+        source_locator: str,
+        question_number: str,
+        question_text: str,
+    ) -> str:
+        normalized_document_id = document_id if document_id is not None else "unknown"
+        normalized_locator = str(source_locator or "").strip()
+        if not normalized_locator:
+            normalized_locator = f"question:{str(question_number or '').strip() or 'unknown'}"
+        digest = sha1(question_text.encode("utf-8")).hexdigest()[:10] if question_text else "empty"
+        return f"{normalized_document_id}:{normalized_locator}:{digest}"
