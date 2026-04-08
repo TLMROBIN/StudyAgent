@@ -443,6 +443,148 @@ def test_pdf_bridge_adds_structure_and_page_metadata_for_textbook_chunks(tmp_pat
     assert metadata["structure_path"] == ["第一章 力与运动", "1.1 牛顿第一定律"]
 
 
+def test_pdf_bridge_recovers_textbook_structure_from_toc_pages(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=42,
+        subject="物理",
+        filename="toc-textbook.pdf",
+        file_path=str(tmp_path / "toc-textbook.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+        tags_json=["教材"],
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "目录\n第一章运动的描述 ........ 3\n1.质点参考系 ........ 4\n"
+            "第一章 运动的描述\n质点是用来描述物体大小可忽略的理想模型。\n"
+            "参考系用于描述物体的位置和运动。"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="目录"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第一章运动的描述 ........ 3"),
+            PDFBlock(page_index=0, block_type="paragraph", text="1.质点参考系 ........ 4"),
+            PDFBlock(page_index=1, block_type="title", text="第一章 运动的描述"),
+            PDFBlock(page_index=1, block_type="paragraph", text="质点是用来描述物体大小可忽略的理想模型。"),
+            PDFBlock(page_index=2, block_type="paragraph", text="参考系用于描述物体的位置和运动。"),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/42/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+
+    assert len(chunks) == 2
+    second = chunks[1].metadata
+    assert second["chapter"] == "第一章运动的描述"
+    assert second["section"] == "1.质点参考系"
+    assert second["structure_path"] == ["第一章运动的描述", "1.质点参考系"]
+    assert second["structure_source"] == "toc_page_map"
+    assert second["structure_confidence"] == "medium"
+    assert second["page_start"] == 3
+    assert second["page_end"] == 3
+    assert second["source_pages"] == [3]
+    assert second["retrieval_metadata"]["chapter_key"] == "第一章运动的描述"
+    assert second["retrieval_metadata"]["section_key"] == "1质点参考系"
+    assert second["diagnostic_metadata"]["parser_backend"] == "pipeline"
+    assert second["ingestion_metadata"]["toc_page_offset"] == -1
+    assert second["page_start"] == 3
+    assert second["page_end"] == 3
+    assert second["source_pages"] == [3]
+
+
+def test_extract_heading_context_supports_compact_textbook_titles_and_single_level_sections(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+
+    chapter = rag_service._extract_heading_context("第一章运动的描述", ResourceType.TEXTBOOK.value)
+    section = rag_service._extract_heading_context("1.质点参考系", ResourceType.TEXTBOOK.value)
+
+    assert chapter == {"chapter": "第一章运动的描述", "section": None}
+    assert section == {"chapter": None, "section": "1.质点参考系"}
+
+
+def test_extract_heading_context_rejects_sentence_like_textbook_steps(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+
+    assert rag_service._extract_heading_context("（2）“您这么早就来啦，抱歉！让您等了这么久。”", ResourceType.TEXTBOOK.value) == {
+        "chapter": None,
+        "section": None,
+    }
+    assert rag_service._extract_heading_context("（3）汽车在哪段时间驶离出发点，在哪段", ResourceType.TEXTBOOK.value) == {
+        "chapter": None,
+        "section": None,
+    }
+    assert rag_service._extract_heading_context("2.测量各计数点到起始点0的距离x，记录在表1中；", ResourceType.TEXTBOOK.value) == {
+        "chapter": None,
+        "section": None,
+    }
+    assert rag_service._extract_heading_context("4.根据 ", ResourceType.TEXTBOOK.value) == {
+        "chapter": None,
+        "section": None,
+    }
+
+
+def test_pdf_bridge_maps_back_matter_pages_to_back_matter_headings(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=43,
+        subject="物理",
+        filename="back-matter.pdf",
+        file_path=str(tmp_path / "back-matter.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+        tags_json=["教材"],
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "目录\n"
+            "6.超重和失重 ........ 109\n"
+            "课题研究 ........ 116\n"
+            "学生实验 ........ 121\n"
+            "索引 ........ 125\n"
+            "超重和失重\n"
+            "课题研究\n"
+            "请同学们根据兴趣自行选择研究课题。\n"
+            "学生实验\n"
+            "实验在中学物理中占有非常重要的地位。\n"
+            "索引\n"
+            "超重 110\n"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="目录"),
+            PDFBlock(page_index=0, block_type="paragraph", text="6.超重和失重 ........ 109"),
+            PDFBlock(page_index=0, block_type="paragraph", text="课题研究 ........ 116"),
+            PDFBlock(page_index=0, block_type="paragraph", text="学生实验 ........ 121"),
+            PDFBlock(page_index=0, block_type="paragraph", text="索引 ........ 125"),
+            PDFBlock(page_index=1, block_type="title", text="超重和失重"),
+            PDFBlock(page_index=7, block_type="title", text="课题研究"),
+            PDFBlock(page_index=7, block_type="paragraph", text="请同学们根据兴趣自行选择研究课题。"),
+            PDFBlock(page_index=12, block_type="title", text="学生实验"),
+            PDFBlock(page_index=12, block_type="paragraph", text="实验在中学物理中占有非常重要的地位。"),
+            PDFBlock(page_index=16, block_type="title", text="索引"),
+            PDFBlock(page_index=16, block_type="paragraph", text="超重 110"),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/43/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+
+    research_chunk = next(chunk for chunk in chunks if "自行选择研究课题" in chunk.content)
+    experiment_chunk = next(chunk for chunk in chunks if "实验在中学物理中占有非常重要的地位" in chunk.content)
+    index_chunk = next(chunk for chunk in chunks if "超重 110" in chunk.content)
+
+    assert research_chunk.metadata["chapter"] == "课题研究"
+    assert research_chunk.metadata["section"] is None
+    assert research_chunk.metadata["structure_source"] == "body_heading"
+    assert experiment_chunk.metadata["chapter"] == "学生实验"
+    assert experiment_chunk.metadata["section"] is None
+    assert index_chunk.metadata["chapter"] == "索引"
+    assert index_chunk.metadata["section"] is None
+
+
 def test_extract_heading_context_skips_question_like_lines_for_textbook_chunks(tmp_path):
     rag_service = build_rag_service(tmp_path)
 
@@ -451,6 +593,68 @@ def test_extract_heading_context_skips_question_like_lines_for_textbook_chunks(t
 
     assert result == {"chapter": None, "section": None}
     assert result_with_prompt == {"chapter": None, "section": None}
+
+
+def test_rerank_rows_prefers_chunk_level_structure_match_over_wrong_chapter(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    question = "第一章运动的描述里，1.质点参考系的定义是什么？"
+    profile = rag_service._infer_question_profile(question)
+
+    wrong_document = KnowledgeDocument(
+        id=101,
+        subject="物理",
+        filename="wrong.pdf",
+        file_path="/tmp/wrong.pdf",
+        mime_type="application/pdf",
+        size_bytes=12,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    matching_document = KnowledgeDocument(
+        id=102,
+        subject="物理",
+        filename="matching.pdf",
+        file_path="/tmp/matching.pdf",
+        mime_type="application/pdf",
+        size_bytes=12,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    wrong_row = KnowledgeChunk(
+        document_id=wrong_document.id,
+        subject="物理",
+        chunk_index=0,
+        content="质点是用来描述物体运动的理想模型。",
+        metadata_json={
+            "document_id": wrong_document.id,
+            "resource_type": ResourceType.TEXTBOOK.value,
+            "chapter": "第二章 匀变速直线运动",
+            "section": "1.速度变化快慢的描述",
+            "structure_path": ["第二章 匀变速直线运动", "1.速度变化快慢的描述"],
+        },
+    )
+    matching_row = KnowledgeChunk(
+        document_id=matching_document.id,
+        subject="物理",
+        chunk_index=0,
+        content="质点是用来描述物体运动的理想模型。",
+        metadata_json={
+            "document_id": matching_document.id,
+            "resource_type": ResourceType.TEXTBOOK.value,
+            "chapter": "第一章运动的描述",
+            "section": "1.质点参考系",
+            "structure_path": ["第一章运动的描述", "1.质点参考系"],
+        },
+    )
+    wrong_row.document = wrong_document
+    matching_row.document = matching_document
+
+    ordered = rag_service._rerank_rows(
+        question=question,
+        profile=profile,
+        scored_rows=[(1.0, wrong_row), (1.0, matching_row)],
+        student_grade=None,
+    )
+
+    assert [row.document_id for row in ordered[:2]] == [matching_document.id, wrong_document.id]
 
 
 def test_extract_text_supports_markdown_files(tmp_path):
@@ -822,3 +1026,111 @@ def test_prepare_question_chunks_marks_missing_required_images_without_quality_s
     assert "missing_required_image" in metadata["quality_flags"]
     assert metadata["question_uid"]
     assert "quality_score" not in metadata
+
+
+def test_vector_store_metadata_whitelists_structure_retrieval_fields(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    row = KnowledgeChunk(
+        id=9,
+        document_id=7,
+        subject="物理",
+        chunk_index=0,
+        content="参考系用于描述物体的位置。",
+        metadata_json={
+            "resource_type": ResourceType.TEXTBOOK.value,
+            "chapter": "第一章运动的描述",
+            "section": "1.质点参考系",
+            "structure_source": "toc_page_map",
+            "parser_provenance": {"runtime_artifact": "data/tasks/42/mineru-runtime.json"},
+            "retrieval_metadata": {
+                "chapter_key": "第一章运动的描述",
+                "section_key": "1质点参考系",
+                "page_start": 3,
+                "page_end": 3,
+                "structure_path": ["第一章运动的描述", "1.质点参考系"],
+            },
+            "diagnostic_metadata": {"parser_backend": "pipeline"},
+        },
+    )
+
+    metadata = rag_service.vector_store._build_metadata(row)
+
+    assert metadata["chapter"] == "第一章运动的描述"
+    assert metadata["section"] == "1.质点参考系"
+    assert metadata["chapter_key"] == "第一章运动的描述"
+    assert metadata["section_key"] == "1质点参考系"
+    assert metadata["page_start"] == 3
+    assert metadata["structure_path_text"] == "第一章运动的描述 > 1.质点参考系"
+    assert "parser_provenance" not in metadata
+    assert "diagnostic_metadata" not in metadata
+
+
+def test_retrieve_prefers_chunk_with_matching_chunk_level_structure(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        doc = KnowledgeDocument(
+            subject="物理",
+            filename="textbook.txt",
+            file_path="/tmp/textbook.txt",
+            mime_type="text/plain",
+            size_bytes=12,
+            resource_type=ResourceType.TEXTBOOK.value,
+        )
+        session.add(doc)
+        session.commit()
+        session.refresh(doc)
+
+        matching = KnowledgeChunk(
+            document_id=doc.id,
+            subject="物理",
+            chunk_index=0,
+            content="参考系用于描述物体的位置和运动。",
+            metadata_json={
+                "resource_type": ResourceType.TEXTBOOK.value,
+                "chapter": "第一章运动的描述",
+                "section": "1.质点参考系",
+                "retrieval_metadata": {
+                    "chapter": "第一章运动的描述",
+                    "section": "1.质点参考系",
+                    "chapter_key": "第一章运动的描述",
+                    "section_key": "1质点参考系",
+                    "structure_path": ["第一章运动的描述", "1.质点参考系"],
+                    "structure_source": "toc_page_map",
+                },
+            },
+        )
+        other = KnowledgeChunk(
+            document_id=doc.id,
+            subject="物理",
+            chunk_index=1,
+            content="参考系用于描述物体的位置和运动。",
+            metadata_json={
+                "resource_type": ResourceType.TEXTBOOK.value,
+                "chapter": "第二章匀变速直线运动的研究",
+                "section": "1.速度变化快慢的描述",
+                "retrieval_metadata": {
+                    "chapter": "第二章匀变速直线运动的研究",
+                    "section": "1.速度变化快慢的描述",
+                    "chapter_key": "第二章匀变速直线运动的研究",
+                    "section_key": "1速度变化快慢的描述",
+                    "structure_path": ["第二章匀变速直线运动的研究", "1.速度变化快慢的描述"],
+                    "structure_source": "toc_page_map",
+                },
+            },
+        )
+        session.add_all([matching, other])
+        session.commit()
+        session.refresh(matching)
+        session.refresh(other)
+        rag_service.vector_store.upsert_chunks("物理", [matching, other])
+
+        result = rag_service.retrieve(session, "物理", "第一章运动的描述里1.质点参考系讲什么")
+
+        assert result.chunks
+        assert result.chunks[0].id == matching.id
+    finally:
+        session.close()

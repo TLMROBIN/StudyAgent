@@ -34,7 +34,7 @@ CHAPTER_AWARE_RESOURCE_TYPES = {
     ResourceType.QUESTION_SET.value,
 }
 CHAPTER_HEADING_PATTERNS = [
-    re.compile(r"^第[一二三四五六七八九十百零两0-9]+[章节单元编部分课](?:[:：\s-].*)?$"),
+    re.compile(r"^(第[一二三四五六七八九十百零两0-9]+[章节单元编部分课])(?:\s*[-—－:：]?\s*\S.*)?$"),
     re.compile(r"^(专题[一二三四五六七八九十百零两0-9]+.*)$"),
     re.compile(r"^(Unit\s+\d+.*)$", re.IGNORECASE),
 ]
@@ -61,6 +61,14 @@ QUESTION_LIKE_HEADING_HINTS = (
     "指出",
     "求出",
 )
+TEXTBOOK_BACK_MATTER_HEADINGS = {
+    "课题研究",
+    "学生实验",
+    "索引",
+    "后记",
+    "附录",
+}
+TEXTBOOK_SENTENCE_PUNCTUATION = ("，", "；", "。", "！", "？", ",", ";", "!", "?")
 PLAIN_TEXT_SPLIT_PATTERN = re.compile(r"(?<=[。！？；;.!?])\s+|\n+")
 CHUNK_BOUNDARY_HINTS = "。！？；;.!?，,"
 ASSET_MARKER_PATTERN = re.compile(r"\[\[asset:([A-Za-z0-9_.-]+)\]\]")
@@ -128,6 +136,13 @@ QUESTION_METADATA_PRESERVE_KEYS = {
     "image_binding_status",
     "quality_flags",
     "question_uid",
+    "chapter_key",
+    "section_key",
+    "structure_source",
+    "structure_confidence",
+    "retrieval_metadata",
+    "diagnostic_metadata",
+    "ingestion_metadata",
 }
 
 
@@ -683,6 +698,80 @@ class RagService:
         }
         if extra_metadata:
             metadata.update({key: value for key, value in extra_metadata.items() if value is not None})
+        return self._apply_metadata_layers(metadata)
+
+    def _apply_metadata_layers(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        chapter = str(metadata.get("chapter") or "").strip() or None
+        section = str(metadata.get("section") or "").strip() or None
+        structure_path = metadata.get("structure_path")
+        if not isinstance(structure_path, list):
+            structure_path = [item for item in (chapter, section) if item]
+        else:
+            structure_path = [str(item).strip() for item in structure_path if str(item).strip()]
+        chapter_key = self._structure_key(chapter)
+        section_key = self._structure_key(section)
+
+        retrieval_metadata = dict(metadata.get("retrieval_metadata") or {})
+        retrieval_metadata.update(
+            {
+                key: value
+                for key, value in {
+                    "chapter": chapter,
+                    "section": section,
+                    "chapter_key": chapter_key,
+                    "section_key": section_key,
+                    "structure_path": structure_path,
+                    "structure_source": metadata.get("structure_source"),
+                    "structure_confidence": metadata.get("structure_confidence"),
+                    "page_start": metadata.get("page_start"),
+                    "page_end": metadata.get("page_end"),
+                    "source_pages": metadata.get("source_pages"),
+                }.items()
+                if value not in (None, "", [])
+            }
+        )
+
+        diagnostic_metadata = dict(metadata.get("diagnostic_metadata") or {})
+        diagnostic_metadata.update(
+            {
+                key: value
+                for key, value in {
+                    "chapter": chapter,
+                    "section": section,
+                    "structure_path": structure_path,
+                    "structure_source": metadata.get("structure_source"),
+                    "structure_confidence": metadata.get("structure_confidence"),
+                    "parser_backend": metadata.get("parser_backend"),
+                    "parser_provenance": metadata.get("parser_provenance"),
+                }.items()
+                if value not in (None, "", [])
+            }
+        )
+
+        ingestion_metadata = dict(metadata.get("ingestion_metadata") or {})
+        ingestion_metadata.update(
+            {
+                key: value
+                for key, value in {
+                    "chapter_key": chapter_key,
+                    "section_key": section_key,
+                    "toc_page_offset": metadata.get("toc_page_offset"),
+                }.items()
+                if value not in (None, "", [])
+            }
+        )
+
+        metadata["structure_path"] = structure_path
+        if chapter_key:
+            metadata["chapter_key"] = chapter_key
+        if section_key:
+            metadata["section_key"] = section_key
+        if retrieval_metadata:
+            metadata["retrieval_metadata"] = retrieval_metadata
+        if diagnostic_metadata:
+            metadata["diagnostic_metadata"] = diagnostic_metadata
+        if ingestion_metadata:
+            metadata["ingestion_metadata"] = ingestion_metadata
         return metadata
 
     def _build_question_bank_chunk(
@@ -1015,16 +1104,18 @@ class RagService:
     def _extract_heading_context(self, text: str, resource_type: str | None) -> dict[str, str | None]:
         if resource_type not in CHAPTER_AWARE_RESOURCE_TYPES:
             return {"chapter": None, "section": None}
-        section_patterns = [DECIMAL_SECTION_HEADING_PATTERN] if resource_type == ResourceType.TEXTBOOK.value else SECTION_HEADING_PATTERNS
+        section_patterns = SECTION_HEADING_PATTERNS
         for line in [item.strip() for item in text.split("\n") if item.strip()][:3]:
             if line.endswith("。") or len(line) > 48:
                 continue
+            if resource_type == ResourceType.TEXTBOOK.value and line in TEXTBOOK_BACK_MATTER_HEADINGS:
+                return {"chapter": line[:255], "section": None}
             for pattern in CHAPTER_HEADING_PATTERNS:
                 if pattern.match(line):
                     return {"chapter": line[:255], "section": None}
             if self._looks_like_question_heading(line):
                 continue
-            if resource_type == ResourceType.TEXTBOOK.value and self._is_ambiguous_textbook_section_heading(line):
+            if resource_type == ResourceType.TEXTBOOK.value and self._looks_like_sentence_style_textbook_line(line):
                 continue
             for pattern in section_patterns:
                 if pattern.match(line):
@@ -1037,11 +1128,72 @@ class RagService:
             return False
         return any(token in normalized for token in QUESTION_LIKE_HEADING_HINTS)
 
+    def _looks_like_sentence_style_textbook_line(self, line: str) -> bool:
+        normalized = str(line or "").strip()
+        if not normalized:
+            return False
+        if any(token in normalized for token in TEXTBOOK_SENTENCE_PUNCTUATION):
+            return True
+        if any(token in normalized for token in ("“", "”", "\"", "‘", "’")):
+            return True
+        body = re.sub(r"^\s*(?:[（(]?\d+[)）]?|第\s*\d+\s*题|\d+\s*[.．、:：)])\s*", "", normalized)
+        if len(body.strip()) <= 3:
+            return True
+        return False
+
     def _is_ambiguous_textbook_section_heading(self, line: str) -> bool:
         normalized = str(line or "").strip()
         return bool(GENERIC_SINGLE_LEVEL_SECTION_PATTERN.match(normalized)) and not bool(
             DECIMAL_SECTION_HEADING_PATTERN.match(normalized)
         )
+
+    def _structure_key(self, text: str | None) -> str | None:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return None
+        normalized = (
+            normalized.replace("（", "(")
+            .replace("）", ")")
+            .replace("：", ":")
+            .replace("－", "-")
+            .replace("—", "-")
+            .replace("–", "-")
+            .replace("．", ".")
+            .replace("、", ".")
+            .replace("　", " ")
+        )
+        key = re.sub(r"[\s\-\.:：·•⋯…()（）【】\[\]<>《》]+", "", normalized)
+        return key or None
+
+    def _retrieval_structure(self, metadata: dict[str, Any], document: KnowledgeDocument | None = None) -> dict[str, Any]:
+        retrieval = metadata.get("retrieval_metadata")
+        retrieval_metadata = dict(retrieval) if isinstance(retrieval, dict) else {}
+        if document is not None:
+            if not retrieval_metadata.get("chapter") and document.chapter:
+                retrieval_metadata["chapter"] = document.chapter
+            if not retrieval_metadata.get("section") and document.section:
+                retrieval_metadata["section"] = document.section
+        if not retrieval_metadata.get("chapter") and metadata.get("chapter"):
+            retrieval_metadata["chapter"] = metadata.get("chapter")
+        if not retrieval_metadata.get("section") and metadata.get("section"):
+            retrieval_metadata["section"] = metadata.get("section")
+        structure_path = retrieval_metadata.get("structure_path")
+        if not isinstance(structure_path, list):
+            structure_path = metadata.get("structure_path")
+        if not isinstance(structure_path, list):
+            structure_path = [
+                item for item in (retrieval_metadata.get("chapter"), retrieval_metadata.get("section")) if str(item or "").strip()
+            ]
+        retrieval_metadata["structure_path"] = [str(item).strip() for item in structure_path if str(item).strip()]
+        if not retrieval_metadata.get("chapter_key"):
+            retrieval_metadata["chapter_key"] = metadata.get("chapter_key") or self._structure_key(retrieval_metadata.get("chapter"))
+        if not retrieval_metadata.get("section_key"):
+            retrieval_metadata["section_key"] = metadata.get("section_key") or self._structure_key(retrieval_metadata.get("section"))
+        if not retrieval_metadata.get("structure_source") and metadata.get("structure_source"):
+            retrieval_metadata["structure_source"] = metadata.get("structure_source")
+        if not retrieval_metadata.get("structure_confidence") and metadata.get("structure_confidence"):
+            retrieval_metadata["structure_confidence"] = metadata.get("structure_confidence")
+        return retrieval_metadata
 
     def _infer_question_profile(self, question: str) -> QuestionProfile:
         lowered = question.strip()
@@ -1142,11 +1294,30 @@ class RagService:
             } <= {DifficultyLevel.BASIC.value, DifficultyLevel.STANDARD.value}:
                 score += 0.06
 
+        metadata = row.metadata_json or {}
+        retrieval_metadata = self._retrieval_structure(metadata, document)
         question_lowered = question.lower()
-        if document.chapter and document.chapter.lower() in question_lowered:
-            score += 0.18
-        if document.section and document.section.lower() in question_lowered:
-            score += 0.12
+        question_key = self._structure_key(question_lowered) or ""
+        chapter = str(retrieval_metadata.get("chapter") or "").strip()
+        section = str(retrieval_metadata.get("section") or "").strip()
+        chapter_key = str(retrieval_metadata.get("chapter_key") or "").strip()
+        section_key = str(retrieval_metadata.get("section_key") or "").strip()
+        structure_path = [str(item).strip() for item in retrieval_metadata.get("structure_path") or [] if str(item).strip()]
+
+        if chapter and chapter.lower() in question_lowered:
+            score += 0.22
+        elif chapter_key and chapter_key in question_key:
+            score += 0.22
+        if section and section.lower() in question_lowered:
+            score += 0.16
+        elif section_key and section_key in question_key:
+            score += 0.16
+        if len(structure_path) >= 2 and all(self._structure_key(item) and self._structure_key(item) in question_key for item in structure_path[:2]):
+            score += 0.06
+        if retrieval_metadata.get("structure_source") == "body_heading_normalized":
+            score += 0.03
+        elif retrieval_metadata.get("structure_source") == "toc_page_map":
+            score += 0.01
         for tag in document.tags[:5]:
             if tag.lower() in question_lowered:
                 score += 0.08
@@ -1204,12 +1375,16 @@ class RagService:
     def _question_candidate_text(self, row: KnowledgeChunk) -> str:
         metadata = row.metadata_json or {}
         parts = [str(metadata.get("question_text") or row.content)]
-        chapter = str(metadata.get("chapter") or "").strip()
-        section = str(metadata.get("section") or "").strip()
+        retrieval_metadata = self._retrieval_structure(metadata, row.document)
+        chapter = str(retrieval_metadata.get("chapter") or "").strip()
+        section = str(retrieval_metadata.get("section") or "").strip()
         if chapter:
             parts.append(chapter)
         if section:
             parts.append(section)
+        structure_path = [str(item).strip() for item in retrieval_metadata.get("structure_path") or [] if str(item).strip()]
+        if structure_path:
+            parts.append(" > ".join(structure_path[:3]))
         if metadata.get("contains_images"):
             parts.append("含图题")
         return "\n".join(part for part in parts if part).strip()
@@ -1247,10 +1422,11 @@ class RagService:
 
     def _chunk_labels(self, document: KnowledgeDocument, row: KnowledgeChunk) -> list[str]:
         metadata = row.metadata_json or {}
+        retrieval_metadata = self._retrieval_structure(metadata, document)
         labels = [self._resource_type_label(document.resource_type or ResourceType.KNOWLEDGE_NOTE.value)]
         grade = metadata.get("grade") or document.grade
-        chapter = metadata.get("chapter") or document.chapter
-        section = metadata.get("section") or document.section
+        chapter = retrieval_metadata.get("chapter") or document.chapter
+        section = retrieval_metadata.get("section") or document.section
         difficulty = metadata.get("difficulty") or document.difficulty
         question_number = metadata.get("question_number")
         if grade:

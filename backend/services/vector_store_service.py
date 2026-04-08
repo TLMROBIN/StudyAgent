@@ -129,12 +129,33 @@ class VectorStoreService:
             "chunk_index": chunk.chunk_index,
         }
         source = chunk.metadata_json or {}
-        scalar_keys = ("resource_type", "grade", "chapter", "section", "difficulty", "chunk_kind", "question_number")
+        retrieval = source.get("retrieval_metadata")
+        retrieval_metadata = dict(retrieval) if isinstance(retrieval, dict) else {}
+        scalar_keys = (
+            "resource_type",
+            "grade",
+            "chapter",
+            "section",
+            "difficulty",
+            "chunk_kind",
+            "question_number",
+            "chapter_key",
+            "section_key",
+            "page_start",
+            "page_end",
+            "structure_source",
+            "structure_confidence",
+        )
         for key in scalar_keys:
-            value = source.get(key)
+            value = retrieval_metadata.get(key)
+            if value in (None, ""):
+                value = source.get(key)
             if value is None or value == "":
                 continue
             metadata[key] = value
+        structure_path = retrieval_metadata.get("structure_path") or source.get("structure_path") or []
+        if isinstance(structure_path, list) and structure_path:
+            metadata["structure_path_text"] = " > ".join(str(item) for item in structure_path[:3] if str(item).strip())
         tags = source.get("tags") or []
         if isinstance(tags, list) and tags:
             metadata["tags_text"] = ",".join(str(item) for item in tags[:8])

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import json
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -8,7 +10,7 @@ from backend.database import Base
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeChunk, KnowledgeDocument
 from backend.services.embed_service import EmbedService
-from backend.services.mineru_service import GPUProofFailedError
+from backend.services.mineru_service import GPUProofFailedError, MineruGpuPreflightError
 from backend.services.pdf_parse_types import ExtractedAsset, PDFBlock, PDFParseResult
 from backend.services.rag_service import ExtractionResult, RagService
 from backend.services.vector_store_service import VectorStoreService
@@ -169,7 +171,53 @@ def test_run_ingest_pipeline_fails_closed_when_mineru_gpu_proof_is_required_and_
     assert refreshed_task is not None and refreshed_document is not None
     assert refreshed_task.status == DocumentStatus.FAILED
     assert refreshed_document.status == DocumentStatus.FAILED
+    assert "PDF 解析要求使用 GPU" in (refreshed_task.error_message or "")
+    assert "有效 GPU 运行凭证" in (refreshed_task.error_message or "")
     assert "gpu proof missing" in (refreshed_task.error_message or "")
+    verify.close()
+
+
+def test_run_ingest_pipeline_fails_closed_when_mineru_gpu_preflight_is_not_ready(tmp_path, monkeypatch):
+    testing_session = setup_testing_db()
+    monkeypatch.setattr(ingest_module, "SessionLocal", testing_session)
+    rag_service = build_rag_service(tmp_path)
+    rag_service.settings.pdf_parser_backend = "mineru"
+    monkeypatch.setattr(ingest_module, "rag_service", rag_service)
+
+    source_file = tmp_path / "preflight.pdf"
+    source_file.write_bytes(b"%PDF-1.4")
+
+    def fake_extract_content(*args, **kwargs):
+        raise MineruGpuPreflightError("Torch 未检测到可用 CUDA")
+
+    monkeypatch.setattr(rag_service, "extract_content", fake_extract_content)
+
+    session = testing_session()
+    document = KnowledgeDocument(
+        subject="物理",
+        filename="preflight.pdf",
+        file_path=str(source_file),
+        mime_type="application/pdf",
+        size_bytes=source_file.stat().st_size,
+        status=DocumentStatus.PENDING,
+    )
+    session.add(document)
+    session.commit()
+    session.refresh(document)
+    task = ImportTask(document_id=document.id, status=DocumentStatus.PENDING, progress=0)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    session.close()
+
+    ingest_module.run_ingest_pipeline(document.id, task.id)
+
+    verify = testing_session()
+    refreshed_task = verify.get(ImportTask, task.id)
+    assert refreshed_task is not None
+    assert refreshed_task.status == DocumentStatus.FAILED
+    assert "当前 GPU 环境未就绪" in (refreshed_task.error_message or "")
+    assert "Torch 未检测到可用 CUDA" in (refreshed_task.error_message or "")
     verify.close()
 
 
@@ -182,6 +230,21 @@ def test_run_ingest_pipeline_completes_when_mineru_gpu_proof_artifact_passes_gat
 
     source_file = tmp_path / "questions.pdf"
     source_file.write_bytes(b"%PDF-1.4")
+
+    runtime_artifact = tmp_path / "tasks" / "1" / "mineru-runtime.json"
+    runtime_artifact.parent.mkdir(parents=True, exist_ok=True)
+    runtime_artifact.write_text(
+        json.dumps(
+            {
+                "requested_device": "cuda",
+                "effective_device": "cuda",
+                "selected_device": "cuda",
+                "gpu_proof_passed": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     parsed_pdf = PDFParseResult(
         text="1. 如图所示，分析受力。\n[[asset:image-001]]\n【答案】A\n【解析】由受力分析可得。",
@@ -202,7 +265,12 @@ def test_run_ingest_pipeline_completes_when_mineru_gpu_proof_artifact_passes_gat
             PDFBlock(page_index=0, block_type="paragraph", text="【答案】A"),
             PDFBlock(page_index=0, block_type="paragraph", text="【解析】由受力分析可得。"),
         ],
-        parser_provenance={"runtime_artifact": str(tmp_path / "tasks" / "1" / "mineru-runtime.json")},
+        parser_provenance={
+            "runtime_artifact": str(runtime_artifact),
+            "requested_device": "cuda",
+            "effective_device": "cuda",
+            "device": "cuda",
+        },
     )
 
     def fake_extract_content(*args, **kwargs):
@@ -240,6 +308,7 @@ def test_run_ingest_pipeline_completes_when_mineru_gpu_proof_artifact_passes_gat
     rows = verify.scalars(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)).all()
     assert refreshed_task is not None
     assert refreshed_task.status == DocumentStatus.COMPLETED
+    assert "本次解析未使用 GPU，已回退 CPU" not in (refreshed_task.error_message or "")
     assert rows
     assert rows[0].metadata_json.get("answer_text") == "A"
     assert rows[0].metadata_json.get("explanation_text") == "由受力分析可得。"
@@ -247,7 +316,7 @@ def test_run_ingest_pipeline_completes_when_mineru_gpu_proof_artifact_passes_gat
     verify.close()
 
 
-def test_run_ingest_pipeline_completion_message_flags_cpu_fallback(tmp_path, monkeypatch):
+def test_run_ingest_pipeline_fails_closed_when_parser_provenance_shows_cpu_fallback(tmp_path, monkeypatch):
     testing_session = setup_testing_db()
     monkeypatch.setattr(ingest_module, "SessionLocal", testing_session)
     rag_service = build_rag_service(tmp_path)
@@ -296,7 +365,15 @@ def test_run_ingest_pipeline_completion_message_flags_cpu_fallback(tmp_path, mon
 
     verify = testing_session()
     refreshed_task = verify.get(ImportTask, task.id)
+    refreshed_document = verify.get(KnowledgeDocument, document.id)
+    rows = verify.scalars(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)).all()
     assert refreshed_task is not None
-    assert refreshed_task.status == DocumentStatus.COMPLETED
-    assert "本次解析未使用 GPU，已回退 CPU" in (refreshed_task.error_message or "")
+    assert refreshed_task.status == DocumentStatus.FAILED
+    assert refreshed_document is not None
+    assert refreshed_document.status == DocumentStatus.FAILED
+    assert not rows
+    message = refreshed_task.error_message or ""
+    assert "PDF 解析要求使用 GPU" in message
+    assert "未实际使用 GPU" in message
+    assert "回退 CPU" not in message
     verify.close()

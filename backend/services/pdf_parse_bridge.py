@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+import re
 from typing import TYPE_CHECKING, Any
 
 from backend.models.knowledge import KnowledgeDocument, ResourceType
@@ -39,8 +41,11 @@ class PDFParseBridge:
         parsed_pdf: PDFParseResult,
         asset_map: dict[str, ExtractedAsset],
     ) -> list["PreparedChunk"]:
+        structure_catalog = self._build_structure_catalog(document, parsed_pdf)
         current_chapter = document.chapter
         current_section = document.section
+        current_structure_source = "document_metadata" if current_chapter or current_section else None
+        current_structure_confidence = "low" if current_structure_source else None
         current_entries: list[dict[str, Any]] = []
         prepared: list[PreparedChunk] = []
 
@@ -71,8 +76,11 @@ class PDFParseBridge:
                                 "source_pages": source_pages,
                                 "source_block_types": sorted(item for item in chunk_entry["block_types"] if item),
                                 "structure_path": [item for item in (current_chapter, current_section) if str(item or "").strip()],
+                                "structure_source": current_structure_source,
+                                "structure_confidence": current_structure_confidence,
                                 "parser_backend": parsed_pdf.parser_backend,
                                 "parser_provenance": parsed_pdf.parser_provenance,
+                                "toc_page_offset": structure_catalog.get("page_offset"),
                             },
                         ),
                     )
@@ -83,15 +91,38 @@ class PDFParseBridge:
             block_text = (block.text or "").strip()
             if not block_text and not block.asset_id:
                 continue
-            heading_context = self.rag_service._extract_heading_context(block_text, document.resource_type)
+            page_number = block.page_index + 1
+            if page_number in structure_catalog["toc_pages"]:
+                continue
+
+            page_structure = self._page_structure_context(structure_catalog, page_number)
+            if page_structure and (
+                page_structure.get("chapter") != current_chapter or page_structure.get("section") != current_section
+            ):
+                flush_segment()
+                current_chapter = page_structure.get("chapter")
+                current_section = page_structure.get("section")
+                current_structure_source = str(page_structure.get("structure_source") or "toc_page_map")
+                current_structure_confidence = str(page_structure.get("structure_confidence") or "medium")
+
+            heading_context = self._resolve_heading_context(
+                document,
+                structure_catalog,
+                block_text,
+                str(block.block_type or ""),
+            )
             if heading_context["chapter"]:
                 flush_segment()
                 current_chapter = heading_context["chapter"]
                 current_section = None
+                current_structure_source = str(heading_context.get("structure_source") or "body_heading")
+                current_structure_confidence = str(heading_context.get("structure_confidence") or "high")
                 continue
             if heading_context["section"]:
                 flush_segment()
                 current_section = heading_context["section"]
+                current_structure_source = str(heading_context.get("structure_source") or "body_heading")
+                current_structure_confidence = str(heading_context.get("structure_confidence") or "high")
                 continue
             asset_refs: list[dict[str, Any]] = []
             if block.asset_id and block.asset_id in asset_map:
@@ -257,6 +288,169 @@ class PDFParseBridge:
             for item in group or []:
                 self._append_asset_ref(merged, item)
         return merged
+
+    def _build_structure_catalog(self, document: KnowledgeDocument, parsed_pdf: PDFParseResult) -> dict[str, Any]:
+        resource_type = document.resource_type or ResourceType.KNOWLEDGE_NOTE.value
+        if resource_type != ResourceType.TEXTBOOK.value:
+            return {"toc_pages": set(), "entries": [], "page_offset": None}
+
+        page_texts: dict[int, list[str]] = {}
+        for block in parsed_pdf.blocks:
+            page_number = block.page_index + 1
+            block_text = str(block.text or "").strip()
+            if not block_text:
+                continue
+            page_texts.setdefault(page_number, []).extend(line.strip() for line in block_text.splitlines() if line.strip())
+
+        toc_pages = {
+            page_number
+            for page_number, lines in page_texts.items()
+            if self._looks_like_toc_page(lines, resource_type)
+        }
+
+        entries: list[dict[str, Any]] = []
+        for page_number in sorted(toc_pages):
+            for line in page_texts.get(page_number, []):
+                entry = self._parse_toc_entry(line, resource_type)
+                if entry:
+                    entries.append(entry)
+
+        page_offset = self._infer_toc_page_offset(entries, parsed_pdf, toc_pages, resource_type)
+        if page_offset is not None:
+            for entry in entries:
+                entry["pdf_page"] = entry["printed_page"] + page_offset
+
+        return {"toc_pages": toc_pages, "entries": entries, "page_offset": page_offset}
+
+    def _looks_like_toc_page(self, lines: list[str], resource_type: str) -> bool:
+        if any(line in {"目录", "目 录"} for line in lines):
+            return True
+        toc_like_entries = sum(1 for line in lines if self._parse_toc_entry(line, resource_type))
+        return toc_like_entries >= 2
+
+    def _parse_toc_entry(self, line: str, resource_type: str) -> dict[str, Any] | None:
+        stripped = str(line or "").strip()
+        if not stripped or stripped in {"目录", "目 录"}:
+            return None
+        match = re.match(r"^(?P<title>.+?)(?:[\s.．·•⋯…_-]{2,}|\s+)(?P<page>\d{1,4})$", stripped)
+        if not match:
+            return None
+        title = self._strip_toc_page_marker(str(match.group("title") or "").strip())
+        heading_context = self.rag_service._extract_heading_context(title, resource_type)
+        resolved_title = heading_context["chapter"] or heading_context["section"]
+        if not resolved_title:
+            return None
+        return {
+            "kind": "chapter" if heading_context["chapter"] else "section",
+            "title": resolved_title,
+            "key": self.rag_service._structure_key(resolved_title),
+            "printed_page": int(match.group("page")),
+        }
+
+    def _strip_toc_page_marker(self, text: str) -> str:
+        return re.sub(r"[\s.．·•⋯…_-]+$", "", str(text or "").strip())
+
+    def _infer_toc_page_offset(
+        self,
+        entries: list[dict[str, Any]],
+        parsed_pdf: PDFParseResult,
+        toc_pages: set[int],
+        resource_type: str,
+    ) -> int | None:
+        if not entries:
+            return None
+        entry_map = {
+            str(entry.get("key")): entry
+            for entry in entries
+            if str(entry.get("key") or "").strip()
+        }
+        offsets: list[int] = []
+        for block in parsed_pdf.blocks:
+            page_number = block.page_index + 1
+            if page_number in toc_pages:
+                continue
+            heading_context = self.rag_service._extract_heading_context(block.text or "", resource_type)
+            for title in (heading_context.get("chapter"), heading_context.get("section")):
+                key = self.rag_service._structure_key(str(title or ""))
+                if not key or key not in entry_map:
+                    continue
+                offsets.append(page_number - int(entry_map[key]["printed_page"]))
+        if not offsets:
+            return None
+        return Counter(offsets).most_common(1)[0][0]
+
+    def _resolve_heading_context(
+        self,
+        document: KnowledgeDocument,
+        structure_catalog: dict[str, Any],
+        block_text: str,
+        block_type: str,
+    ) -> dict[str, Any]:
+        heading_context = self.rag_service._extract_heading_context(block_text, document.resource_type)
+        if heading_context["chapter"]:
+            normalized = self._normalize_heading_from_catalog(structure_catalog, str(heading_context["chapter"]))
+            return {
+                "chapter": normalized,
+                "section": None,
+                "structure_source": "body_heading_normalized" if normalized != heading_context["chapter"] else "body_heading",
+                "structure_confidence": "high",
+            }
+        if heading_context["section"]:
+            section_title = str(heading_context["section"])
+            section_key = self.rag_service._structure_key(section_title)
+            catalog_keys = {
+                str(entry.get("key"))
+                for entry in structure_catalog.get("entries", [])
+                if entry.get("kind") == "section" and str(entry.get("key") or "").strip()
+            }
+            if (
+                (document.resource_type or ResourceType.KNOWLEDGE_NOTE.value) == ResourceType.TEXTBOOK.value
+                and block_type != "title"
+                and section_key not in catalog_keys
+            ):
+                return {"chapter": None, "section": None}
+            normalized = self._normalize_heading_from_catalog(structure_catalog, str(heading_context["section"]))
+            return {
+                "chapter": None,
+                "section": normalized,
+                "structure_source": "body_heading_normalized" if normalized != heading_context["section"] else "body_heading",
+                "structure_confidence": "high",
+            }
+        return {"chapter": None, "section": None}
+
+    def _normalize_heading_from_catalog(self, structure_catalog: dict[str, Any], title: str) -> str:
+        title_key = self.rag_service._structure_key(title)
+        if not title_key:
+            return title
+        for entry in structure_catalog.get("entries", []):
+            if entry.get("key") == title_key and entry.get("title"):
+                return str(entry["title"])
+        return title
+
+    def _page_structure_context(self, structure_catalog: dict[str, Any], page_number: int) -> dict[str, Any] | None:
+        entries = [
+            entry
+            for entry in structure_catalog.get("entries", [])
+            if isinstance(entry.get("pdf_page"), int) and int(entry["pdf_page"]) <= page_number
+        ]
+        if not entries:
+            return None
+        chapter: str | None = None
+        section: str | None = None
+        for entry in sorted(entries, key=lambda item: (int(item["pdf_page"]), 0 if item["kind"] == "chapter" else 1)):
+            if entry["kind"] == "chapter":
+                chapter = str(entry["title"])
+                section = None
+            else:
+                section = str(entry["title"])
+        if not chapter and not section:
+            return None
+        return {
+            "chapter": chapter,
+            "section": section,
+            "structure_source": "toc_page_map",
+            "structure_confidence": "medium",
+        }
 
     def _page_metadata(self, pages: set[int]) -> tuple[int | None, int | None, list[int]]:
         source_pages = sorted(page for page in pages if isinstance(page, int) and page > 0)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.result import AsyncResult
 from sqlalchemy.orm import Session
@@ -7,7 +10,13 @@ from sqlalchemy.orm import Session
 from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeDocument, ResourceType
-from backend.services.mineru_service import MineruStartupError, MineruTransientIOError
+from backend.services.mineru_service import (
+    GPUProofFailedError,
+    MineruGpuPreflightError,
+    MineruGpuRuntimeError,
+    MineruStartupError,
+    MineruTransientIOError,
+)
 from backend.services.pdf_parse_types import PDFParseResult
 from backend.services.rag_service import ExtractionResult, rag_service
 from backend.tasks.celery_app import celery_app
@@ -17,32 +26,8 @@ QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SE
 RETRIABLE_INGEST_EXCEPTIONS = (MineruStartupError, MineruTransientIOError)
 
 
-def _parser_provenance_from_chunks(chunks: list) -> dict:
-    for chunk in chunks:
-        metadata = getattr(chunk, "metadata", {}) or {}
-        provenance = metadata.get("parser_provenance") or {}
-        if provenance:
-            return provenance
-    return {}
-
-
-def _parser_runtime_note_from_provenance(provenance: dict | None) -> str | None:
-    if not provenance:
-        return None
-    requested_device = provenance.get("requested_device")
-    effective_device = provenance.get("effective_device") or provenance.get("device")
-    if requested_device == "cuda" and effective_device != "cuda":
-        return "本次解析未使用 GPU，已回退 CPU"
-    return None
-
-
 def _build_extraction_message(extracted: ExtractionResult) -> str:
-    message = f"文本提取完成，共 {len(extracted.text.strip())} 个字符"
-    if extracted.parsed_pdf is not None:
-        note = _parser_runtime_note_from_provenance(extracted.parsed_pdf.parser_provenance)
-        if note:
-            message = f"{message}（{note}）"
-    return message
+    return f"文本提取完成，共 {len(extracted.text.strip())} 个字符"
 
 
 def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_pdf: PDFParseResult | None = None) -> str:
@@ -89,10 +74,66 @@ def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_
         parts.append(f"识别小节 {len(sections)} 个")
     if image_count:
         parts.append(f"附图 {image_count} 张")
-    parser_note = _parser_runtime_note_from_provenance((parsed_pdf.parser_provenance if parsed_pdf is not None else None) or _parser_provenance_from_chunks(chunks))
-    if parser_note:
-        parts.append(parser_note)
     return "；".join(parts)
+
+
+def _gpu_required_for_ingest(parsed_pdf: PDFParseResult | None) -> bool:
+    if parsed_pdf is None:
+        return False
+    service_settings = getattr(rag_service, "settings", settings)
+    return (
+        getattr(service_settings, "pdf_parser_backend", None) == "mineru"
+        and getattr(service_settings, "mineru_device", None) == "cuda"
+    )
+
+
+def _read_runtime_artifact(path: str) -> dict:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise GPUProofFailedError("MinerU GPU 运行凭证缺失") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GPUProofFailedError("MinerU GPU 运行凭证不可读") from exc
+
+
+def _ensure_gpu_requirement_satisfied(extracted: ExtractionResult) -> None:
+    parsed_pdf = extracted.parsed_pdf
+    if not _gpu_required_for_ingest(parsed_pdf):
+        return
+
+    provenance = parsed_pdf.parser_provenance or {}
+    effective_device = provenance.get("effective_device") or provenance.get("device")
+    if effective_device != "cuda":
+        raise GPUProofFailedError("MinerU 解析结果显示未实际使用 GPU")
+
+    service_settings = getattr(rag_service, "settings", settings)
+    if not getattr(service_settings, "mineru_require_gpu_proof", False):
+        return
+
+    runtime_artifact = str(provenance.get("runtime_artifact") or "").strip()
+    if not runtime_artifact:
+        raise GPUProofFailedError("MinerU GPU 运行凭证缺失")
+
+    artifact = _read_runtime_artifact(runtime_artifact)
+    artifact_device = artifact.get("effective_device") or artifact.get("selected_device") or artifact.get("device")
+    if artifact_device != "cuda":
+        raise GPUProofFailedError("MinerU GPU 运行凭证显示解析未使用 GPU")
+    if not artifact.get("gpu_proof_passed"):
+        raise GPUProofFailedError("MinerU GPU 运行凭证未通过校验")
+
+
+def _build_gpu_failure_message(exc: Exception) -> str:
+    if isinstance(exc, MineruGpuPreflightError):
+        prefix = "PDF 解析要求使用 GPU，但当前 GPU 环境未就绪，请检查 CUDA、驱动、MinerU 安装和 nvidia-smi 后重试"
+    elif isinstance(exc, MineruGpuRuntimeError):
+        prefix = "PDF 解析要求使用 GPU，但 MinerU 运行时未能成功使用 CUDA，请检查 GPU 状态后重试"
+    else:
+        prefix = "PDF 解析要求使用 GPU，但本次任务未保留有效 GPU 运行凭证，请检查 mineru-runtime.json 和 GPU 环境后重试"
+    detail = str(exc).strip()
+    if detail:
+        return f"{prefix}（详情：{detail}）"
+    return prefix
+
 
 def _update_status(
     db: Session,
@@ -190,6 +231,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             document_id=document.id,
             task_id=task.id,
         )
+        _ensure_gpu_requirement_satisfied(extracted)
         task, document = _ensure_not_cancelled(db, task_id, document_id)
         _update_status(
             db,
@@ -263,6 +305,20 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                     celery_task=celery_task,
                 )
         raise
+    except (MineruGpuPreflightError, MineruGpuRuntimeError, GPUProofFailedError) as exc:
+        if "db" in locals():
+            task, document = _reload_task_document(db, task_id, document_id)
+            if task and document:
+                rag_service.clear_document_artifacts(document.id)
+                _update_status(
+                    db,
+                    task,
+                    document,
+                    progress=100,
+                    status=DocumentStatus.FAILED,
+                    error=_build_gpu_failure_message(exc),
+                    celery_task=celery_task,
+                )
     except RuntimeError as exc:
         if str(exc) == "__TASK_CANCELLED__":
             if "db" in locals():

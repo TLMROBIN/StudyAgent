@@ -32,6 +32,14 @@ class MineruTimeoutError(MineruError):
     pass
 
 
+class MineruGpuPreflightError(MineruError):
+    pass
+
+
+class MineruGpuRuntimeError(MineruError):
+    pass
+
+
 class GPUProofFailedError(MineruError):
     pass
 
@@ -100,7 +108,6 @@ class MineruService:
 
         requested_device = self.settings.mineru_device
         runtime_device = self._resolve_runtime_device(requested_device)
-        fallback_reason = None if runtime_device == requested_device else "cuda_unavailable"
 
         command = [
             self.settings.mineru_python_bin,
@@ -118,19 +125,13 @@ class MineruService:
 
         run = self._run_parse_command(command, env, runtime_artifact, runtime_device=runtime_device, requested_device=requested_device)
 
-        if run["returncode"] != 0 and runtime_device == "cuda" and self._is_cuda_unavailable_error(run["stderr"]):
-            shutil.rmtree(mineru_dir, ignore_errors=True)
-            output_root.mkdir(parents=True, exist_ok=True)
-            runtime_device = "cpu"
-            fallback_reason = "cuda_runtime_error"
-            env = self._build_runtime_env(runtime_device)
-            run = self._run_parse_command(command, env, runtime_artifact, runtime_device=runtime_device, requested_device=requested_device)
-
         stdout = run["stdout"]
         stderr = run["stderr"]
         ended_at = run["ended_at"]
 
         if run["returncode"] != 0:
+            if runtime_device == "cuda" and self._is_cuda_unavailable_error(stderr):
+                raise MineruGpuRuntimeError(stderr.strip() or "MinerU CUDA runtime is unavailable")
             lowered = (stderr or "").lower()
             if "permission denied" in lowered or "operation not permitted" in lowered:
                 raise MineruTransientIOError(stderr.strip() or "MinerU runtime IO failed")
@@ -204,7 +205,6 @@ class MineruService:
                 "runtime_artifact": str(runtime_artifact),
                 "requested_device": requested_device,
                 "effective_device": runtime_device,
-                "device_fallback_reason": fallback_reason,
                 "device": runtime_device,
                 "parse_seconds": round(ended_at - run["started_at"], 2),
                 "warn_threshold_seconds": self.settings.mineru_parse_warn_seconds,
@@ -298,19 +298,39 @@ class MineruService:
     def _resolve_runtime_device(self, requested_device: str) -> str:
         if requested_device != "cuda":
             return requested_device
-        return "cuda" if self._cuda_is_available() else "cpu"
+        snapshot = self._collect_cuda_requirement_snapshot(requested_device)
+        if snapshot.get("ready"):
+            return "cuda"
+        raise MineruGpuPreflightError(self._format_cuda_requirement_error(snapshot))
 
-    def _cuda_is_available(self) -> bool:
-        probe = [
-            self.settings.mineru_python_bin,
-            "-c",
-            "import torch; print('1' if torch.cuda.is_available() else '0')",
-        ]
-        try:
-            result = subprocess.run(probe, capture_output=True, text=True, timeout=20, check=False)
-        except Exception:
-            return False
-        return result.returncode == 0 and result.stdout.strip().endswith("1")
+    def _collect_cuda_requirement_snapshot(self, requested_device: str) -> dict[str, Any]:
+        return collect_cuda_requirement_snapshot(requested_device, python_bin=self.settings.mineru_python_bin)
+
+    def _format_cuda_requirement_error(self, snapshot: dict[str, Any]) -> str:
+        reasons: list[str] = []
+        python_ok = bool(snapshot.get("python", {}).get("ok", True))
+        mineru_installed = bool(snapshot.get("mineru", {}).get("installed"))
+        torch_cuda = bool(snapshot.get("torch", {}).get("cuda_available"))
+        nvidia_smi_ok = bool(snapshot.get("nvidia_smi", {}).get("ok"))
+
+        if not python_ok:
+            reasons.append("MinerU Python 运行环境不可用")
+        if not mineru_installed:
+            reasons.append("MinerU 未安装")
+        if not torch_cuda:
+            reasons.append("Torch 未检测到可用 CUDA")
+        if not nvidia_smi_ok:
+            reasons.append("nvidia-smi 不可用")
+
+        detail = (
+            snapshot.get("nvidia_smi", {}).get("error")
+            or snapshot.get("torch", {}).get("error")
+            or snapshot.get("mineru", {}).get("error")
+        )
+        reason_text = "；".join(reasons) if reasons else "GPU 运行环境未就绪"
+        if detail:
+            return f"{reason_text}（{detail}）"
+        return reason_text
 
     def _run_parse_command(
         self,
