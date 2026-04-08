@@ -236,14 +236,41 @@ class MineruService:
             if isinstance(title_content, dict):
                 level = title_content.get("level")
             level = level or content.get("level")
+        content_roles = self._content_roles(content)
         return PDFBlock(
             page_index=page_index,
             block_type=block_type,
             text=text.strip(),
             level=int(level) if isinstance(level, int) else None,
             asset_id=asset_id,
-            metadata={"raw_type": block_type},
+            metadata={"raw_type": block_type, "content_roles": content_roles},
         )
+
+    def _content_roles(self, content: Any) -> list[str]:
+        if not isinstance(content, dict):
+            return []
+        ordered_keys = [
+            "title_content",
+            "paragraph_content",
+            "table_caption",
+            "table_body",
+            "table_footnote",
+            "image_caption",
+            "image_footnote",
+            "algorithm_caption",
+            "algorithm_content",
+            "algorithm_footnote",
+            "list_items",
+            "page_footer_content",
+        ]
+        roles: list[str] = []
+        for key in ordered_keys:
+            if key not in content:
+                continue
+            flattened = self._flatten_content(content.get(key))
+            if flattened:
+                roles.append(key)
+        return roles
 
     def _flatten_content(self, value: Any) -> str:
         if value is None:

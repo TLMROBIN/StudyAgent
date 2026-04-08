@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,7 @@ class PDFParseBridge:
         self.rag_service = rag_service
 
     def prepare_chunks(self, document: KnowledgeDocument, parsed_pdf: PDFParseResult) -> list["PreparedChunk"]:
+        parsed_pdf = self._clean_pdf_parse_result(document, parsed_pdf)
         asset_map = {asset.asset_id: asset for asset in parsed_pdf.assets}
         if (document.resource_type or ResourceType.KNOWLEDGE_NOTE.value) in self.rag_service.QUESTION_RESOURCE_TYPES:
             prepared_questions = self._prepare_question_chunks_from_blocks(document, parsed_pdf, asset_map)
@@ -133,6 +135,7 @@ class PDFParseBridge:
                     "asset_refs": asset_refs,
                     "page": block.page_index + 1,
                     "block_type": str(block.block_type or ""),
+                    "metadata": dict(block.metadata or {}),
                 }
             )
 
@@ -260,6 +263,89 @@ class PDFParseBridge:
 
         flush_question()
         return prepared
+
+    def _clean_pdf_parse_result(self, document: KnowledgeDocument, parsed_pdf: PDFParseResult) -> PDFParseResult:
+        normalized_blocks = [replace(block, text=self._normalize_markup_text(block.text), metadata=dict(block.metadata or {})) for block in parsed_pdf.blocks]
+        suppressed = self._boilerplate_suppression_keys(document, normalized_blocks)
+        cleaned_blocks: list[PDFBlock] = []
+        for block in normalized_blocks:
+            block_text = str(block.text or "").strip()
+            if not block_text:
+                continue
+            if self._boilerplate_key(block_text) in suppressed and not self._is_protected_pdf_block(document, block):
+                continue
+            cleaned_blocks.append(replace(block, text=block_text))
+        cleaned_text = "\n\n".join(block.text.strip() for block in cleaned_blocks if block.text.strip()).strip()
+        return replace(parsed_pdf, text=cleaned_text, blocks=cleaned_blocks)
+
+    def _normalize_markup_text(self, text: str) -> str:
+        raw_text = str(text or "").strip()
+        if "<table" not in raw_text.lower() and "<tr" not in raw_text.lower() and "<td" not in raw_text.lower() and "<th" not in raw_text.lower():
+            return raw_text
+        normalized = re.sub(r"(?i)</tr\s*>", "\n", raw_text)
+        normalized = re.sub(r"(?i)<tr\b[^>]*>", "", normalized)
+        normalized = re.sub(r"(?i)</t[dh]\s*>", "\t", normalized)
+        normalized = re.sub(r"(?i)<t[dh]\b[^>]*>", "", normalized)
+        normalized = re.sub(r"(?i)</?table\b[^>]*>", "", normalized)
+        normalized = re.sub(r"(?i)<br\s*/?>", "\n", normalized)
+        normalized = re.sub(r"<[^>]+>", "", normalized)
+        lines: list[str] = []
+        for raw_line in normalized.splitlines():
+            cells = [cell.strip() for cell in raw_line.split("\t")]
+            if not any(cells):
+                continue
+            non_empty = [cell for cell in cells if cell]
+            lines.append(" | ".join(non_empty) if non_empty else "")
+        return "\n".join(line for line in lines if line).strip()
+
+    def _boilerplate_suppression_keys(self, document: KnowledgeDocument, blocks: list[PDFBlock]) -> set[str]:
+        page_blocks: dict[int, list[PDFBlock]] = {}
+        for block in blocks:
+            block_text = str(block.text or "").strip()
+            if not block_text:
+                continue
+            page_blocks.setdefault(block.page_index + 1, []).append(block)
+        if not page_blocks:
+            return set()
+
+        candidate_pages: dict[str, set[int]] = {}
+        for page_number, page_items in page_blocks.items():
+            edge_indexes = {0, max(len(page_items) - 1, 0)}
+            for index, block in enumerate(page_items):
+                if index not in edge_indexes and not self._block_has_footer_signal(block):
+                    continue
+                if self._is_protected_pdf_block(document, block):
+                    continue
+                key = self._boilerplate_key(block.text)
+                if not key:
+                    continue
+                candidate_pages.setdefault(key, set()).add(page_number)
+
+        total_pages = len(page_blocks)
+        required_count = max(2, total_pages if total_pages <= 3 else max(3, (total_pages + 1) // 2))
+        return {key for key, pages in candidate_pages.items() if len(pages) >= required_count}
+
+    def _block_has_footer_signal(self, block: PDFBlock) -> bool:
+        roles = {str(item).strip() for item in (block.metadata or {}).get("content_roles", []) if str(item).strip()}
+        return "page_footer_content" in roles
+
+    def _is_protected_pdf_block(self, document: KnowledgeDocument | None, block: PDFBlock) -> bool:
+        if str(block.block_type or "") == "title":
+            return True
+        roles = {str(item).strip() for item in (block.metadata or {}).get("content_roles", []) if str(item).strip()}
+        if roles.intersection({"table_caption", "image_caption", "image_footnote", "algorithm_caption", "algorithm_footnote"}):
+            return True
+        resource_type = document.resource_type if document is not None else None
+        heading_context = self.rag_service._extract_heading_context(str(block.text or ""), resource_type)
+        return bool(heading_context.get("chapter") or heading_context.get("section"))
+
+    def _boilerplate_key(self, text: str) -> str | None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return None
+        normalized = re.sub(r"\s+", "", normalized)
+        normalized = re.sub(r"[·•⋯…_\-–—=]+", "", normalized)
+        return normalized or None
 
     def _chunk_tags(
         self,

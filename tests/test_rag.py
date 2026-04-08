@@ -585,6 +585,142 @@ def test_pdf_bridge_maps_back_matter_pages_to_back_matter_headings(tmp_path):
     assert index_chunk.metadata["section"] is None
 
 
+def test_pdf_bridge_normalizes_html_table_markup_and_suppresses_repeated_footer_noise(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=44,
+        subject="物理",
+        filename="table-noise.pdf",
+        file_path=str(tmp_path / "table-noise.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    table_markup = (
+        "<table><tr><td rowspan=1 colspan=1>传感器名称</td><td rowspan=1 colspan=1>输入的物理量</td>"
+        "<td rowspan=1 colspan=1>输出的物理量</td></tr>"
+        "<tr><td rowspan=1 colspan=1>光敏电阻</td><td rowspan=1 colspan=1>光照强度</td>"
+        "<td rowspan=1 colspan=1>电阻变化</td></tr></table>"
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "第一章 传感器\n"
+            f"{table_markup}\n"
+            "人民教育出版社\n"
+            "表格说明\n"
+            "人民教育出版社\n"
+            "热敏电阻用于测温。\n"
+            "人民教育出版社\n"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="第一章 传感器"),
+            PDFBlock(page_index=0, block_type="paragraph", text=table_markup, metadata={"content_roles": ["table_body"]}),
+            PDFBlock(page_index=0, block_type="paragraph", text="人民教育出版社", metadata={"content_roles": ["page_footer_content"]}),
+            PDFBlock(page_index=1, block_type="paragraph", text="表格说明", metadata={"content_roles": ["table_caption"]}),
+            PDFBlock(page_index=1, block_type="paragraph", text="人民教育出版社", metadata={"content_roles": ["page_footer_content"]}),
+            PDFBlock(page_index=2, block_type="paragraph", text="热敏电阻用于测温。"),
+            PDFBlock(page_index=2, block_type="paragraph", text="人民教育出版社", metadata={"content_roles": ["page_footer_content"]}),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/44/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "<table" not in combined
+    assert "<td" not in combined
+    assert "传感器名称 | 输入的物理量 | 输出的物理量" in combined
+    assert "光敏电阻 | 光照强度 | 电阻变化" in combined
+    assert "人民教育出版社" not in combined
+    assert "表格说明" in combined
+    assert any(chunk.metadata["chapter"] == "第一章 传感器" for chunk in chunks)
+
+
+def test_pdf_bridge_keeps_repeated_text_when_not_at_page_edge(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=45,
+        subject="物理",
+        filename="middle-repeat.pdf",
+        file_path=str(tmp_path / "middle-repeat.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    repeated = "人民教育出版社"
+    parsed_pdf = PDFParseResult(
+        text="".join(
+            f"第一页起始\n甲内容\n{repeated}\n乙内容\n第一页结尾\n"
+            f"第二页起始\n丙内容\n{repeated}\n丁内容\n第二页结尾\n"
+            f"第三页起始\n戊内容\n{repeated}\n己内容\n第三页结尾\n"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="第一页起始"),
+            PDFBlock(page_index=0, block_type="paragraph", text="甲内容"),
+            PDFBlock(page_index=0, block_type="paragraph", text=repeated),
+            PDFBlock(page_index=0, block_type="paragraph", text="乙内容"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第一页结尾"),
+            PDFBlock(page_index=1, block_type="paragraph", text="第二页起始"),
+            PDFBlock(page_index=1, block_type="paragraph", text="丙内容"),
+            PDFBlock(page_index=1, block_type="paragraph", text=repeated),
+            PDFBlock(page_index=1, block_type="paragraph", text="丁内容"),
+            PDFBlock(page_index=1, block_type="paragraph", text="第二页结尾"),
+            PDFBlock(page_index=2, block_type="paragraph", text="第三页起始"),
+            PDFBlock(page_index=2, block_type="paragraph", text="戊内容"),
+            PDFBlock(page_index=2, block_type="paragraph", text=repeated),
+            PDFBlock(page_index=2, block_type="paragraph", text="己内容"),
+            PDFBlock(page_index=2, block_type="paragraph", text="第三页结尾"),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/45/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "人民教育出版社" in combined
+
+
+def test_pdf_bridge_preserves_uncertain_footer_when_frequency_is_insufficient(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=46,
+        subject="物理",
+        filename="uncertain-footer.pdf",
+        file_path=str(tmp_path / "uncertain-footer.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    repeated = "人民教育出版社"
+    parsed_pdf = PDFParseResult(
+        text="".join(
+            f"第一页正文\n{repeated}\n"
+            f"第二页正文\n{repeated}\n"
+            "第三页正文\n不同页脚\n"
+            "第四页正文\n另一个页脚\n"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="第一页正文"),
+            PDFBlock(page_index=0, block_type="paragraph", text=repeated, metadata={"content_roles": ["page_footer_content"]}),
+            PDFBlock(page_index=1, block_type="paragraph", text="第二页正文"),
+            PDFBlock(page_index=1, block_type="paragraph", text=repeated, metadata={"content_roles": ["page_footer_content"]}),
+            PDFBlock(page_index=2, block_type="paragraph", text="第三页正文"),
+            PDFBlock(page_index=2, block_type="paragraph", text="不同页脚", metadata={"content_roles": ["page_footer_content"]}),
+            PDFBlock(page_index=3, block_type="paragraph", text="第四页正文"),
+            PDFBlock(page_index=3, block_type="paragraph", text="另一个页脚", metadata={"content_roles": ["page_footer_content"]}),
+        ],
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/46/mineru-runtime.json"},
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "人民教育出版社" in combined
+
+
 def test_extract_heading_context_skips_question_like_lines_for_textbook_chunks(tmp_path):
     rag_service = build_rag_service(tmp_path)
 
