@@ -332,6 +332,10 @@ class PDFParseBridge:
                     normalized_lines.append(self._wrap_formula_text(next_line, display_mode=display_mode))
                     index += 2
                     continue
+                if next_line and self._looks_like_symbolic_inline_label(next_line):
+                    normalized_lines.append(self._repair_formula_spacing(next_line))
+                    index += 2
+                    continue
                 normalized_lines.append(line)
                 index += 1
                 continue
@@ -426,6 +430,15 @@ class PDFParseBridge:
         if re.search(r"\\[A-Za-z]+", candidate) and not re.search(r"[\u4e00-\u9fff]{2,}", candidate):
             return True
         return False
+
+    def _looks_like_symbolic_inline_label(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate or re.search(r"[\u4e00-\u9fff]", candidate):
+            return False
+        tokens = [token for token in re.split(r"\s+", candidate) if token]
+        if len(tokens) < 2 or len(tokens) > 3:
+            return False
+        return all(re.fullmatch(r"[A-Za-z0-9]{1,2}", token) for token in tokens)
 
     def _looks_like_formula_payload(self, text: str) -> bool:
         candidate = str(text or "").strip()

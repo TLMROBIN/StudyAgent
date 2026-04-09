@@ -958,6 +958,33 @@ def test_pdf_bridge_removes_bare_image_path_when_asset_is_already_bound(tmp_path
     assert chunks[0].metadata["image_count"] == 1
 
 
+def test_pdf_bridge_drops_equation_inline_marker_for_symbolic_segment_labels(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=56,
+        subject="物理",
+        filename="formula-symbolic-label.pdf",
+        file_path=str(tmp_path / "formula-symbolic-label.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="通过\nequation_inline\na P\n段电阻丝的电流是多大？",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="通过\nequation_inline\na P\n段电阻丝的电流是多大？"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" not in combined
+    assert "\na P\n" in f"\n{combined}\n"
+    assert "$a P$" not in combined
+
+
 def test_pdf_bridge_preserves_uncertain_formula_like_text_when_signal_is_weak(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
