@@ -1,5 +1,6 @@
 import asyncio
 import io
+from datetime import datetime
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -9,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from backend.database import Base
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
+from backend.models.schemas import StudentPortrait
 from backend.models.user import Classroom, User, UserRole
 from backend.routers import admin as admin_router
 from backend.routers import stats as stats_router
@@ -243,5 +245,21 @@ def test_stats_export_supports_xlsx():
         assert workbook["概览"]["A2"].value == "累计提问"
         assert workbook["概览"]["B2"].value == 1
         assert workbook["学科分布"]["A2"].value == "数学"
+        assert str(workbook["学生画像"]["H2"].value).endswith("+08:00")
     finally:
         session.close()
+
+
+def test_student_portrait_serializes_naive_utc_to_beijing():
+    portrait = StudentPortrait(
+        student_id=1,
+        student_name="张三",
+        total_conversations=1,
+        resolved_rate=1.0,
+        fallback_ratio=0.0,
+        last_active_at=datetime(2026, 4, 9, 10, 15, 0),
+    )
+
+    payload = portrait.model_dump(mode="json")
+
+    assert payload["last_active_at"] == "2026-04-09T18:15:00+08:00"

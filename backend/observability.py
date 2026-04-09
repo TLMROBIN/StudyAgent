@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from datetime import UTC, datetime
 import json
 import logging
 from logging.config import dictConfig
+
+from backend.time_utils import now_utc, serialize_datetime_for_api
 
 _request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -24,7 +25,7 @@ def get_request_id() -> str | None:
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
-            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "timestamp": serialize_datetime_for_api(now_utc(), timespec="milliseconds"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),

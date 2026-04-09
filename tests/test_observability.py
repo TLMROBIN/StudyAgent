@@ -23,6 +23,7 @@ def test_json_formatter_serializes_structured_fields():
     assert payload["path"] == "/health"
     assert payload["status_code"] == 200
     assert payload["duration_ms"] == 12.5
+    assert payload["timestamp"].endswith("+08:00")
 
 
 def test_request_context_middleware_sets_request_id_header():

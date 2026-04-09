@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 import mimetypes
 from pathlib import Path
 from uuid import uuid4
@@ -23,6 +22,7 @@ from backend.services.audit_service import audit_service
 from backend.services.rag_service import rag_service
 from backend.tasks.celery_app import celery_app
 from backend.tasks.ingest import enqueue_ingest_task, run_ingest_pipeline, sync_task_state
+from backend.time_utils import now_beijing
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 settings = get_settings()
@@ -226,7 +226,7 @@ async def upload_document(
     if len(content) > settings.upload_max_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File too large")
 
-    saved_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex}{Path(file.filename or '').suffix.lower()}"
+    saved_name = f"{now_beijing().strftime('%Y%m%d%H%M%S')}_{uuid4().hex}{Path(file.filename or '').suffix.lower()}"
     target_path = Path(settings.upload_path) / saved_name
     target_path.write_bytes(content)
 

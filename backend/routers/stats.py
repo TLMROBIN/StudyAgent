@@ -9,6 +9,7 @@ from backend.dependencies import CurrentUser, DbSession
 from backend.models.schemas import ClassroomStat, StatsOverview, StudentPortrait, StudentProfile
 from backend.models.user import UserRole
 from backend.services.stats_service import stats_service
+from backend.time_utils import serialize_datetime_for_api
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -96,7 +97,7 @@ def _build_xlsx_export(overview: dict, class_rows: list[dict], portrait_rows: li
                 row["resolved_rate"],
                 row["focus_subject"],
                 row["fallback_ratio"],
-                row["last_active_at"].isoformat() if row["last_active_at"] else None,
+                serialize_datetime_for_api(row["last_active_at"]) if row["last_active_at"] else None,
             ]
         )
 

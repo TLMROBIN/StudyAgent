@@ -1,11 +1,20 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
 from backend.models.user import UserRole
+from backend.time_utils import serialize_datetime_for_api
+
+
+class BaseModel(PydanticBaseModel):
+    @field_serializer("*", when_used="json", check_fields=False)
+    def serialize_datetime_fields(self, value: Any) -> Any:
+        if isinstance(value, datetime):
+            return serialize_datetime_for_api(value)
+        return value
 
 
 class TokenResponse(BaseModel):

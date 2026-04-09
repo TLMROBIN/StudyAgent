@@ -51,6 +51,7 @@ function formatTime(value?: string | null) {
     return '-'
   }
   return new Date(value).toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

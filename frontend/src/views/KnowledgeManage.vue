@@ -306,6 +306,7 @@ function formatDateTime(value?: string | null) {
     return '-'
   }
   return new Date(value).toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

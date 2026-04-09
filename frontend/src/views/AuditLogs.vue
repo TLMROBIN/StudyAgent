@@ -52,7 +52,7 @@ function formatDetail(detail: Record<string, unknown>) {
 }
 
 function formatTime(value: string) {
-  return new Date(value).toLocaleString('zh-CN')
+  return new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
 }
 
 onMounted(loadLogs)
