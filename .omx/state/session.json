@@ -1,9 +1,0 @@
-{
-  "session_id": "omx-1775532114528-4tywa0",
-  "started_at": "2026-04-07T03:21:54.558Z",
-  "cwd": "/home/binyu/文档/trae_projects/StudyAgent",
-  "pid": 1529414,
-  "platform": "linux",
-  "pid_start_ticks": 13294335,
-  "pid_cmdline": "node /home/binyu/.npm-global/bin/omx --madmax --high"
-}
