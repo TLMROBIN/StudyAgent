@@ -101,8 +101,10 @@ export const useAuthStore = defineStore('auth', {
     },
     async logout() {
       try {
-        if (this.refreshToken && this.accessToken) {
-          await api.post('/auth/logout', { refresh_token: this.refreshToken }, { skipAuthRedirect: true })
+        const accessToken = getStoredAccessToken()
+        const refreshToken = getStoredRefreshToken()
+        if (refreshToken && accessToken) {
+          await api.post('/auth/logout', { refresh_token: refreshToken }, { skipAuthRedirect: true })
         }
       } catch {
         // The session may already be invalidated on the server.

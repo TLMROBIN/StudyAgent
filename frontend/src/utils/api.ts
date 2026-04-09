@@ -1,13 +1,20 @@
 import axios from 'axios'
 
-import { getStoredAccessToken, notifySessionExpired } from './authSession'
+import {
+  getStoredAccessToken,
+  getStoredRefreshToken,
+  notifySessionExpired,
+  storeAuthTokens,
+} from './authSession'
 
 declare module 'axios' {
   interface AxiosRequestConfig<D = any> {
+    _retryAuthRefresh?: boolean
     skipAuthRedirect?: boolean
   }
 
   interface InternalAxiosRequestConfig<D = any> {
+    _retryAuthRefresh?: boolean
     skipAuthRedirect?: boolean
   }
 }
@@ -66,6 +73,48 @@ export const api = axios.create({
   baseURL: apiBase,
 })
 
+interface TokenRefreshResponse {
+  access_token: string
+  refresh_token: string
+}
+
+let refreshPromise: Promise<string> | null = null
+
+function isAuthBypassRequest(requestUrl: string): boolean {
+  return requestUrl.endsWith('/auth/student/login')
+    || requestUrl.endsWith('/auth/staff/login')
+    || requestUrl.endsWith('/auth/refresh')
+}
+
+async function refreshAccessToken(): Promise<string> {
+  const refreshToken = getStoredRefreshToken()
+  if (!refreshToken) {
+    notifySessionExpired()
+    throw createSessionExpiredError()
+  }
+
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const { data } = await axios.post<TokenRefreshResponse>(
+          `${apiBase}/auth/refresh`,
+          { refresh_token: refreshToken },
+          { skipAuthRedirect: true },
+        )
+        storeAuthTokens(data.access_token, data.refresh_token)
+        return data.access_token
+      } catch {
+        notifySessionExpired()
+        throw createSessionExpiredError()
+      } finally {
+        refreshPromise = null
+      }
+    })()
+  }
+
+  return refreshPromise
+}
+
 api.interceptors.request.use((config) => {
   const token = getStoredAccessToken()
   if (token) {
@@ -76,12 +125,24 @@ api.interceptors.request.use((config) => {
 
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     if (axios.isAxiosError(error) && error.response?.status === 401) {
-      const requestUrl = error.config?.url || ''
-      const skipAuthRedirect = error.config?.skipAuthRedirect
-        || requestUrl.endsWith('/auth/student/login')
-        || requestUrl.endsWith('/auth/staff/login')
+      const requestConfig = error.config
+      const requestUrl = requestConfig?.url || ''
+      const skipAuthRedirect = requestConfig?.skipAuthRedirect || isAuthBypassRequest(requestUrl)
+
+      if (requestConfig && !requestConfig._retryAuthRefresh && !isAuthBypassRequest(requestUrl)) {
+        try {
+          const nextAccessToken = await refreshAccessToken()
+          requestConfig._retryAuthRefresh = true
+          requestConfig.headers = requestConfig.headers ?? {}
+          requestConfig.headers.Authorization = `Bearer ${nextAccessToken}`
+          return api(requestConfig)
+        } catch (refreshError) {
+          return Promise.reject(refreshError)
+        }
+      }
+
       if (!skipAuthRedirect) {
         notifySessionExpired()
       }
@@ -177,8 +238,12 @@ export async function streamChat(
 
       if (!response.ok || !response.body) {
         if (response.status === 401) {
-          notifySessionExpired()
-          throw createSessionExpiredError()
+          try {
+            await refreshAccessToken()
+            continue
+          } catch {
+            throw createSessionExpiredError()
+          }
         }
         const detail = await response.text().catch(() => '')
         throw new Error(extractResponseDetail(detail, response.status))
