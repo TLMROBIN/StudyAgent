@@ -443,6 +443,7 @@ class PDFParseBridge:
             normalized_lines.append(line)
             index += 1
 
+        normalized_lines = self._repair_split_symbolic_label_lines(normalized_lines)
         collapsed: list[str] = []
         previous_blank = False
         for line in normalized_lines:
@@ -582,12 +583,257 @@ class PDFParseBridge:
             normalized,
         )
         normalized = re.sub(r"\\\\\s*\{\{\s*\\\s*\}\}\s*\\\\", r"\\\\", normalized)
+        normalized = re.sub(r"\\\\\s*\{\s*\\\s*\}\s*\\\\", r"\\\\", normalized)
+        normalized = re.sub(r"\\\\\s*\{\s*\}\s*\\\\", r"\\\\", normalized)
         if normalized.startswith(r"\mathrm{(") and normalized.count("(") > normalized.count(")"):
             missing = normalized.count("(") - normalized.count(")")
             if missing > 0 and normalized.endswith("}"):
                 normalized = normalized[:-1] + (")" * missing) + "}"
         normalized = re.sub(r"\\scriptscriptstyle\s+", r"\\scriptscriptstyle ", normalized)
         return normalized.strip()
+
+    def _repair_split_symbolic_label_lines(self, lines: list[str]) -> list[str]:
+        repaired: list[str] = []
+        index = 0
+        while index < len(lines):
+            current = str(lines[index] or "").strip()
+            if not current:
+                repaired.append("")
+                index += 1
+                continue
+
+            block_end, block_lines, label_count, has_symbol_index_pair = self._collect_symbolic_label_block(lines, index)
+            if block_lines and len(block_lines) >= 2 and (label_count >= 2 or has_symbol_index_pair):
+                merged_block = self._coalesce_symbolic_label_block(block_lines)
+                if repaired and repaired[-1] and not self._line_ends_with_hard_stop(repaired[-1]):
+                    repaired[-1] = self._join_inline_text(repaired[-1], merged_block)
+                else:
+                    repaired.append(merged_block)
+                index = block_end
+                continue
+
+            current_kind = self._symbolic_label_fragment_kind(current)
+            if (
+                current_kind == "label"
+                and repaired
+                and repaired[-1]
+                and not self._line_ends_with_hard_stop(repaired[-1])
+                and index + 1 < len(lines)
+                and str(lines[index + 1] or "").strip()
+            ):
+                repaired[-1] = self._join_inline_text(repaired[-1], current)
+                index += 1
+                continue
+
+            next_line = str(lines[index + 1] or "").strip() if index + 1 < len(lines) else ""
+            next_kind = self._symbolic_label_fragment_kind(next_line) if next_line else None
+            if (
+                current_kind == "symbol"
+                and repaired
+                and repaired[-1]
+                and not self._line_ends_with_hard_stop(repaired[-1])
+                and not self._is_standalone_symbolic_fragment_line(repaired[-1])
+                and next_line
+                and next_kind not in {"symbol", "index", "label"}
+                and self._starts_inline_continuation_text(next_line)
+            ):
+                repaired[-1] = self._join_inline_text(repaired[-1], current)
+                index += 1
+                continue
+
+            if (
+                self._is_attachable_inline_formula(current)
+                and repaired
+                and repaired[-1]
+                and not self._line_ends_with_hard_stop(repaired[-1])
+                and next_line
+                and self._starts_inline_continuation_text(next_line)
+            ):
+                repaired[-1] = self._join_inline_text(repaired[-1], current)
+                index += 1
+                continue
+
+            if (
+                repaired
+                and repaired[-1]
+                and self._line_ends_with_symbolic_label(repaired[-1])
+                and not self._is_standalone_symbolic_fragment_line(repaired[-1])
+                and current_kind not in {"symbol", "index", "label"}
+                and (current_kind == "connector" or self._starts_inline_continuation_text(current))
+            ):
+                repaired[-1] = self._join_inline_text(repaired[-1], current)
+            elif repaired and repaired[-1] and self._line_ends_with_attachable_inline_formula(repaired[-1]) and self._starts_inline_continuation_text(current):
+                repaired[-1] = self._join_inline_text(repaired[-1], current)
+            else:
+                repaired.append(current)
+            index += 1
+        return repaired
+
+    def _collect_symbolic_label_block(
+        self,
+        lines: list[str],
+        start: int,
+    ) -> tuple[int, list[str], int, bool]:
+        block_lines: list[str] = []
+        label_count = 0
+        has_symbol_index_pair = False
+        saw_symbol = False
+        cursor = start
+        while cursor < len(lines):
+            candidate = str(lines[cursor] or "").strip()
+            if not candidate:
+                break
+            kind = self._symbolic_label_fragment_kind(candidate)
+            if kind is None:
+                break
+            block_lines.append(candidate)
+            if kind == "label":
+                label_count += 1
+                saw_symbol = False
+                cursor += 1
+                continue
+            if kind == "symbol":
+                saw_symbol = True
+                cursor += 1
+                continue
+            if kind == "index" and saw_symbol:
+                has_symbol_index_pair = True
+            saw_symbol = False
+            cursor += 1
+        return cursor, block_lines, label_count, has_symbol_index_pair
+
+    def _coalesce_symbolic_label_block(self, lines: list[str]) -> str:
+        tokens: list[str] = []
+        index = 0
+        while index < len(lines):
+            current = str(lines[index] or "").strip()
+            kind = self._symbolic_label_fragment_kind(current)
+            next_line = str(lines[index + 1] or "").strip() if index + 1 < len(lines) else ""
+            next_kind = self._symbolic_label_fragment_kind(next_line) if next_line else None
+            if kind == "symbol" and next_kind == "index":
+                tokens.append(self._wrap_symbolic_label(current, next_line))
+                index += 2
+                continue
+            if kind == "label":
+                tokens.append(self._normalize_symbolic_label(current))
+            else:
+                tokens.append(current)
+            index += 1
+        return " ".join(token for token in tokens if token).strip()
+
+    def _symbolic_label_fragment_kind(self, text: str) -> str | None:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return None
+        if candidate in {"和", "与", "及", "或", "、", ",", "，"}:
+            return "connector"
+        if self._is_wrapped_formula(candidate):
+            return "label" if self._looks_like_symbolic_label_payload(self._unwrap_formula_text(candidate)) else None
+        if re.fullmatch(r"[A-Za-zΑ-Ωα-ωΔδ]\s*\d{1,3}", candidate):
+            return "label"
+        if re.fullmatch(r"[A-Za-zΑ-Ωα-ωΔδ]", candidate):
+            return "symbol"
+        if re.fullmatch(r"\d{1,3}", candidate):
+            return "index"
+        return None
+
+    def _looks_like_symbolic_label_payload(self, text: str) -> bool:
+        candidate = self._repair_formula_spacing(text)
+        candidate = re.sub(r"\\(?:mathrm|mathit|mathbf|boldsymbol|vec)\{([^{}]+)\}", r"\1", candidate)
+        candidate = candidate.replace(" ", "")
+        if not candidate or len(candidate) > 24 or re.search(r"[\u4e00-\u9fff]", candidate):
+            return False
+        if re.search(r"\\(?:frac|begin|end|sin|cos|tan|times|cdot|left|right)", candidate):
+            return False
+        if re.search(r"[=+\-/*]", candidate):
+            return False
+        if re.fullmatch(
+            r"\\(?:phi|varphi|theta|alpha|beta|gamma|delta|lambda|mu|omega|pi|rho|sigma|tau|psi|Delta)"
+            r"(?:_\{?[A-Za-z0-9]{1,3}\}?|[0-9]{1,3})?"
+            r"(?:\^\{?[A-Za-z0-9]{1,3}\}?)?",
+            candidate,
+        ):
+            return True
+        return bool(
+            re.fullmatch(
+                r"[A-Za-zΑ-Ωα-ωΔδ](?:_\{?[A-Za-z0-9]{1,3}\}?|[0-9]{1,3})?(?:\^\{?[A-Za-z0-9]{1,3}\}?)?",
+                candidate,
+            )
+        )
+
+    def _unwrap_formula_text(self, text: str) -> str:
+        candidate = str(text or "").strip()
+        if candidate.startswith("$$") and candidate.endswith("$$"):
+            return candidate[2:-2].strip()
+        if candidate.startswith("$") and candidate.endswith("$") and candidate.count("$") >= 2:
+            return candidate[1:-1].strip()
+        if candidate.startswith(r"\(") and candidate.endswith(r"\)"):
+            return candidate[2:-2].strip()
+        if candidate.startswith(r"\[") and candidate.endswith(r"\]"):
+            return candidate[2:-2].strip()
+        return candidate
+
+    def _normalize_symbolic_label(self, text: str) -> str:
+        candidate = str(text or "").strip()
+        if self._is_wrapped_formula(candidate):
+            return self._repair_wrapped_formula(candidate)
+        match = re.fullmatch(r"([A-Za-zΑ-Ωα-ωΔδ])\s*(\d{1,3})", candidate)
+        if match:
+            return self._wrap_symbolic_label(match.group(1), match.group(2))
+        return candidate
+
+    def _wrap_symbolic_label(self, symbol: str, index: str) -> str:
+        return f"${str(symbol or '').strip()}_{{{str(index or '').strip()}}}$"
+
+    def _line_ends_with_symbolic_label(self, text: str) -> bool:
+        tokens = [token for token in re.split(r"\s+", str(text or "").strip()) if token]
+        if not tokens:
+            return False
+        return self._symbolic_label_fragment_kind(tokens[-1]) in {"label", "symbol"}
+
+    def _line_ends_with_hard_stop(self, text: str) -> bool:
+        return bool(re.search(r"[。．！？!?：:；;]$", str(text or "").strip()))
+
+    def _join_inline_text(self, left: str, right: str) -> str:
+        return " ".join(part for part in (str(left or "").strip(), str(right or "").strip()) if part).strip()
+
+    def _is_attachable_inline_formula(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate or candidate.startswith("$$") or candidate.startswith(r"\["):
+            return False
+        if not self._is_wrapped_formula(candidate):
+            return False
+        payload = self._repair_formula_spacing(self._unwrap_formula_text(candidate))
+        if not payload or len(payload) > 40 or re.search(r"[\u4e00-\u9fff]", payload):
+            return False
+        if re.search(r"\\begin\{|\\end\{|=|\+|-", payload):
+            return False
+        if self._looks_like_symbolic_label_payload(payload):
+            return True
+        return bool(
+            re.fullmatch(r"(?:\d+(?:\.\d+)?(?:\s*\\times\s*10\^\{\d+\})?|\d+\^\{\\circ\}(?:\s*\d+\^\{\\prime\})?)", payload)
+        )
+
+    def _line_ends_with_attachable_inline_formula(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        match = re.search(r"(\$[^$]+\$|\\\([^)]*\\\))\s*$", candidate)
+        if not match:
+            return False
+        return self._is_attachable_inline_formula(match.group(1))
+
+    def _starts_inline_continuation_text(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        return bool(re.match(r"^[，。、；：！？!?）)\]】》”’]|^[\u4e00-\u9fff]", candidate))
+
+    def _is_standalone_symbolic_fragment_line(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        return self._symbolic_label_fragment_kind(candidate) in {"label", "symbol", "index"}
 
     def _looks_like_equation_marker_payload(self, text: str) -> bool:
         candidate = str(text or "").strip()
@@ -617,6 +863,8 @@ class PDFParseBridge:
         if self._looks_like_formula_image_path(candidate):
             return False
         if self._is_wrapped_formula(candidate):
+            return False
+        if "$" in candidate and re.search(r"[\u4e00-\u9fff]", candidate):
             return False
         if re.match(r"^\s*(?:\d+\.\s*)?(?:答案|解析)[:：]", candidate):
             return False

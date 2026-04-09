@@ -856,6 +856,207 @@ def test_pdf_bridge_normalizes_equation_inline_into_renderable_latex(tmp_path):
     assert "\\frac{" in combined
 
 
+def test_pdf_bridge_repairs_split_symbolic_label_lines_for_chunk_text(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=66,
+        subject="物理",
+        filename="split-labels.pdf",
+        file_path=str(tmp_path / "split-labels.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "2．图1.37表示用平行四边形法则求三个共点力\n"
+            "$F_{1}$\n"
+            "$F_{2}$\n"
+            "$F_{3}$\n"
+            "的合力F．先求出\n"
+            "$F_{1}$\n"
+            "和\n"
+            "$F_{2}$\n"
+            "的合力，再求出这个合力与\n"
+            "$F_{3}$\n"
+            "的合力F．"
+        ),
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text=(
+                    "2．图1.37表示用平行四边形法则求三个共点力\n"
+                    "$F_{1}$\n"
+                    "$F_{2}$\n"
+                    "$F_{3}$\n"
+                    "的合力F．先求出\n"
+                    "$F_{1}$\n"
+                    "和\n"
+                    "$F_{2}$\n"
+                    "的合力，再求出这个合力与\n"
+                    "$F_{3}$\n"
+                    "的合力F．"
+                ),
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "$F_{1}$ $F_{2}$ $F_{3}$ 的合力F．先求出 $F_{1}$ 和 $F_{2}$ 的合力" in combined
+    assert "\n$F_{1}$\n$F_{2}$\n$F_{3}$\n" not in f"\n{combined}\n"
+    assert "\n$F_{1}$\n和\n$F_{2}$\n" not in f"\n{combined}\n"
+
+
+def test_pdf_bridge_keeps_non_index_symbol_lines_split_when_pattern_is_weak(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=67,
+        subject="物理",
+        filename="plain-symbol-lines.pdf",
+        file_path=str(tmp_path / "plain-symbol-lines.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="如图所示，作图时依次标出\nA\nB\nC\n三点，再连接成线段。",
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text="如图所示，作图时依次标出\nA\nB\nC\n三点，再连接成线段。",
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "\nA\nB\nC\n" in f"\n{combined}\n"
+    assert "如图所示，作图时依次标出 A B C 三点" not in combined
+
+
+def test_pdf_bridge_keeps_single_symbolic_label_line_when_no_continuation_exists(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=68,
+        subject="物理",
+        filename="single-symbolic-label.pdf",
+        file_path=str(tmp_path / "single-symbolic-label.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="设未知量为\n$F_{1}$",
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text="设未知量为\n$F_{1}$",
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert combined.endswith("设未知量为\n$F_{1}$")
+    assert "设未知量为 $F_{1}$" not in combined
+
+
+def test_pdf_bridge_inlines_standalone_symbol_and_short_formula_between_prose_lines(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=69,
+        subject="物理",
+        filename="inline-symbol-formula.pdf",
+        file_path=str(tmp_path / "inline-symbol-formula.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "合力的方向可以用合力跟原来任一个力的夹角表示出来．图中用\n"
+            "F\n"
+            "跟 $F_{1}$ 的夹角\n"
+            "$\\phi$\n"
+            "来表示．钢索NO与水平悬臂 MO 成\n"
+            "$30^{\\circ}$\n"
+            "角，当起重机吊着\n"
+            "$4.0 \\times 10^{4}$\n"
+            "牛的货物时。"
+        ),
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text=(
+                    "合力的方向可以用合力跟原来任一个力的夹角表示出来．图中用\n"
+                    "F\n"
+                    "跟 $F_{1}$ 的夹角\n"
+                    "$\\phi$\n"
+                    "来表示．钢索NO与水平悬臂 MO 成\n"
+                    "$30^{\\circ}$\n"
+                    "角，当起重机吊着\n"
+                    "$4.0 \\times 10^{4}$\n"
+                    "牛的货物时。"
+                ),
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "图中用 F 跟 $F_{1}$ 的夹角 $\\phi$ 来表示" in combined
+    assert "成 $30^{\\circ}$ 角，当起重机吊着 $4.0 \\times 10^{4}$ 牛的货物时" in combined
+    assert "\nF\n" not in f"\n{combined}\n"
+    assert "\n$\\phi$\n" not in f"\n{combined}\n"
+    assert "\n$30^{\\circ}$\n" not in f"\n{combined}\n"
+    assert "\n$4.0 \\times 10^{4}$\n" not in f"\n{combined}\n"
+
+
+def test_pdf_bridge_removes_sparse_array_empty_row_variant(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=70,
+        subject="物理",
+        filename="array-empty-row-variant.pdf",
+        file_path=str(tmp_path / "array-empty-row-variant.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="\\begin{array}{r}{F_{1} = G \\sin \\theta ,} \\\\ {\\} \\\\ {F_{2} = G \\cos \\theta .} \\end{array}",
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text="\\begin{array}{r}{F_{1} = G \\sin \\theta ,} \\\\ {\\} \\\\ {F_{2} = G \\cos \\theta .} \\end{array}",
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "{\\}" not in combined
+    assert "$$\\begin{array}{r}" in combined
+    assert "F_{1} = G \\sin \\theta" in combined
+    assert "F_{2} = G \\cos \\theta" in combined
+
+
 def test_pdf_bridge_normalizes_simple_table_rows_without_leaking_control_markers(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
@@ -1309,7 +1510,7 @@ def test_pdf_bridge_drops_equation_inline_marker_for_symbolic_segment_labels(tmp
     combined = "\n".join(chunk.content for chunk in chunks)
 
     assert "equation_inline" not in combined
-    assert "\na P\n" in f"\n{combined}\n"
+    assert "通过\na P 段电阻丝的电流是多大？" in combined
     assert "$a P$" not in combined
 
 
@@ -1336,7 +1537,7 @@ def test_pdf_bridge_drops_equation_inline_marker_for_axis_style_labels(tmp_path)
     combined = "\n".join(chunk.content for chunk in chunks)
 
     assert "equation_inline" not in combined
-    assert "\na - 1 / m\n" in f"\n{combined}\n"
+    assert "根据实验数据作出\na - 1 / m 图象." in combined
     assert "$a - 1 / m$" not in combined
 
 
