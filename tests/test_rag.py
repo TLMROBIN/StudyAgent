@@ -775,6 +775,60 @@ def test_pdf_bridge_wraps_raw_latex_without_existing_delimiters(tmp_path):
     assert "$$\\frac{v}{t} = a$$" in combined
 
 
+def test_pdf_bridge_normalizes_equation_inline_degree_payload(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=53,
+        subject="物理",
+        filename="formula-degree.pdf",
+        file_path=str(tmp_path / "formula-degree.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="v与x轴成\nequation_inline\n6 0 ^ { \\circ }\n角",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="v与x轴成"),
+            PDFBlock(page_index=0, block_type="paragraph", text="equation_inline\n6 0 ^ { \\circ }\n角"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" not in combined
+    assert "$60^{\\circ}$" in combined
+
+
+def test_pdf_bridge_wraps_equation_inline_greek_symbol_payload(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=54,
+        subject="物理",
+        filename="formula-greek.pdf",
+        file_path=str(tmp_path / "formula-greek.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="磁通量的变化量为\nequation_inline\n\\Delta \\phi\n。",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="磁通量的变化量为"),
+            PDFBlock(page_index=0, block_type="paragraph", text="equation_inline\n\\Delta \\phi\n。"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" not in combined
+    assert "$\\Delta \\phi$" in combined
+
+
 def test_pdf_bridge_removes_latex_marker_and_image_path_after_formula_normalization(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
@@ -857,6 +911,51 @@ def test_pdf_bridge_normalizes_array_environments_into_renderable_display_math(t
 
     assert "$$\\begin{array}{c}" in combined
     assert "\\end{array}$$" in combined
+
+
+def test_pdf_bridge_removes_bare_image_path_when_asset_is_already_bound(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=55,
+        subject="物理",
+        filename="asset-path-noise.pdf",
+        file_path=str(tmp_path / "asset-path-noise.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="[[asset:image-001]]\nimages/demo-formula.jpg\n图1.3-2洛伦兹力演示仪示意图",
+        assets=[
+            ExtractedAsset(
+                asset_id="image-001",
+                filename="image-001.jpg",
+                content_type="image/jpeg",
+                storage_path=str(tmp_path / "image-001.jpg"),
+                public_url="/api/knowledge/documents/55/assets/image-001.jpg",
+                title="demo-formula",
+                description="images/demo-formula.jpg",
+            )
+        ],
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="image",
+                text="[[asset:image-001]]\nimages/demo-formula.jpg\n图1.3-2洛伦兹力演示仪示意图",
+                asset_id="image-001",
+            ),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, assets=parsed_pdf.assets, parsed_pdf=parsed_pdf)
+    assert len(chunks) == 1
+    combined = chunks[0].content
+
+    assert "images/demo-formula.jpg" not in combined
+    assert "【附图1：demo-formula】" in combined
+    assert chunks[0].metadata["contains_images"] is True
+    assert chunks[0].metadata["image_count"] == 1
 
 
 def test_pdf_bridge_preserves_uncertain_formula_like_text_when_signal_is_weak(tmp_path):

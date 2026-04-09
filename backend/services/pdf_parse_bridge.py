@@ -268,7 +268,10 @@ class PDFParseBridge:
         normalized_blocks = [
             replace(
                 block,
-                text=self._normalize_formula_text(self._normalize_markup_text(block.text)),
+                text=self._strip_bound_asset_path_noise(
+                    self._normalize_formula_text(self._normalize_markup_text(block.text)),
+                    asset_bound=bool(block.asset_id) or "[[asset:" in str(block.text or ""),
+                ),
                 metadata=dict(block.metadata or {}),
             )
             for block in parsed_pdf.blocks
@@ -325,7 +328,7 @@ class PDFParseBridge:
 
             if lowered in {"equation_inline", "equation_display"}:
                 display_mode = lowered == "equation_display"
-                if next_line and self._looks_like_formula_payload(next_line):
+                if next_line and self._looks_like_equation_marker_payload(next_line):
                     normalized_lines.append(self._wrap_formula_text(next_line, display_mode=display_mode))
                     index += 2
                     continue
@@ -414,6 +417,16 @@ class PDFParseBridge:
         normalized = re.sub(r"\\scriptscriptstyle\s+", r"\\scriptscriptstyle ", normalized)
         return normalized.strip()
 
+    def _looks_like_equation_marker_payload(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        if self._looks_like_formula_payload(candidate):
+            return True
+        if re.search(r"\\[A-Za-z]+", candidate) and not re.search(r"[\u4e00-\u9fff]{2,}", candidate):
+            return True
+        return False
+
     def _looks_like_formula_payload(self, text: str) -> bool:
         candidate = str(text or "").strip()
         if not candidate:
@@ -428,11 +441,13 @@ class PDFParseBridge:
             return False
         if re.search(r"\\begin\{array\}|\\end\{array\}", candidate):
             return True
+        if re.search(r"\\[A-Za-z]+", candidate) and not re.search(r"[\u4e00-\u9fff]{2,}", candidate):
+            return True
         if re.search(r"\\(?:frac|mathrm|scriptscriptstyle|sin|cos|tan|theta|pi|perp|ast|times|begin|end)", candidate):
             return True
         if re.search(r"(?:^| )equation_inline(?:$| )", candidate, re.I):
             return False
-        if re.search(r"(?:_|\\^)\s*\{", candidate):
+        if re.search(r"(?:_|\^)\s*\{", candidate):
             return True
         if re.search(r"\d\s*\.\s*\d|\b1\s+0\s*\^\s*\{", candidate) and not re.search(r"[\u4e00-\u9fff]", candidate):
             return True
@@ -446,6 +461,16 @@ class PDFParseBridge:
 
     def _looks_like_formula_image_path(self, text: str) -> bool:
         return bool(re.fullmatch(r"images?/[^ \n]+\.(?:png|jpg|jpeg|webp)", str(text or "").strip(), re.I))
+
+    def _strip_bound_asset_path_noise(self, text: str, *, asset_bound: bool) -> str:
+        if not asset_bound:
+            return str(text or "").strip()
+        cleaned_lines = [
+            line
+            for line in (str(text or "").splitlines())
+            if not self._looks_like_formula_image_path(line.strip())
+        ]
+        return "\n".join(line for line in cleaned_lines if line.strip()).strip()
 
     def _is_wrapped_formula(self, text: str) -> bool:
         candidate = str(text or "").strip()
