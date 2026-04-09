@@ -721,6 +721,115 @@ def test_pdf_bridge_preserves_uncertain_footer_when_frequency_is_insufficient(tm
     assert "人民教育出版社" in combined
 
 
+def test_pdf_bridge_normalizes_equation_inline_into_renderable_latex(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=47,
+        subject="物理",
+        filename="formula-inline.pdf",
+        file_path=str(tmp_path / "formula-inline.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="霍尔电压满足\n\nequation_inline\nU _ { \\mathrm { H } } = { \\frac { B I } { n e d } }",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="霍尔电压满足"),
+            PDFBlock(page_index=0, block_type="paragraph", text="equation_inline\nU _ { \\mathrm { H } } = { \\frac { B I } { n e d } }"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" not in combined
+    assert "$U_{\\mathrm{H}}" in combined
+    assert "\\frac{" in combined
+
+
+def test_pdf_bridge_removes_latex_marker_and_image_path_after_formula_normalization(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=48,
+        subject="物理",
+        filename="formula-image-pair.pdf",
+        file_path=str(tmp_path / "formula-image-pair.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="F = q v B\nlatex\nimages/demo-formula.jpg",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="F = q v B"),
+            PDFBlock(page_index=0, block_type="paragraph", text="latex"),
+            PDFBlock(page_index=0, block_type="paragraph", text="images/demo-formula.jpg"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "latex" not in combined
+    assert "images/demo-formula.jpg" not in combined
+    assert "$F = q v B$" in combined
+
+
+def test_pdf_bridge_normalizes_scientific_notation_in_formula_segments(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=49,
+        subject="物理",
+        filename="formula-scientific.pdf",
+        file_path=str(tmp_path / "formula-scientific.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="equation_inline\n1 . 6 7 \\times 1 0 ^ { - 2 7 } ~ \\mathrm { k g }",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="equation_inline\n1 . 6 7 \\times 1 0 ^ { - 2 7 } ~ \\mathrm { k g }"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "$1.67 \\times 10^{-27} ~ \\mathrm{kg}$" in combined
+
+
+def test_pdf_bridge_preserves_uncertain_formula_like_text_when_signal_is_weak(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=50,
+        subject="物理",
+        filename="formula-uncertain.pdf",
+        file_path=str(tmp_path / "formula-uncertain.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    text = "记号说明：equation_inline 表示系统内部标记，不是公式本身。"
+    parsed_pdf = PDFParseResult(
+        text=text,
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text=text),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" in combined
+    assert "$" not in combined
+
+
 def test_extract_heading_context_skips_question_like_lines_for_textbook_chunks(tmp_path):
     rag_service = build_rag_service(tmp_path)
 

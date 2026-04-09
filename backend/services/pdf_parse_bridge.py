@@ -265,12 +265,23 @@ class PDFParseBridge:
         return prepared
 
     def _clean_pdf_parse_result(self, document: KnowledgeDocument, parsed_pdf: PDFParseResult) -> PDFParseResult:
-        normalized_blocks = [replace(block, text=self._normalize_markup_text(block.text), metadata=dict(block.metadata or {})) for block in parsed_pdf.blocks]
+        normalized_blocks = [
+            replace(
+                block,
+                text=self._normalize_formula_text(self._normalize_markup_text(block.text)),
+                metadata=dict(block.metadata or {}),
+            )
+            for block in parsed_pdf.blocks
+        ]
         suppressed = self._boilerplate_suppression_keys(document, normalized_blocks)
         cleaned_blocks: list[PDFBlock] = []
         for block in normalized_blocks:
             block_text = str(block.text or "").strip()
             if not block_text:
+                continue
+            if block_text.lower() == "latex" and cleaned_blocks and self._is_wrapped_formula(str(cleaned_blocks[-1].text or "").strip()):
+                continue
+            if self._looks_like_formula_image_path(block_text) and cleaned_blocks and self._is_wrapped_formula(str(cleaned_blocks[-1].text or "").strip()):
                 continue
             if self._boilerplate_key(block_text) in suppressed and not self._is_protected_pdf_block(document, block):
                 continue
@@ -297,6 +308,153 @@ class PDFParseBridge:
             non_empty = [cell for cell in cells if cell]
             lines.append(" | ".join(non_empty) if non_empty else "")
         return "\n".join(line for line in lines if line).strip()
+
+    def _normalize_formula_text(self, text: str) -> str:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return ""
+
+        lines = [line.strip() for line in raw_text.splitlines()]
+        normalized_lines: list[str] = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            lowered = line.lower()
+            next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+            next_next_line = lines[index + 2].strip() if index + 2 < len(lines) else ""
+
+            if lowered in {"equation_inline", "equation_display"}:
+                display_mode = lowered == "equation_display"
+                if next_line and self._looks_like_formula_payload(next_line):
+                    normalized_lines.append(self._wrap_formula_text(next_line, display_mode=display_mode))
+                    index += 2
+                    continue
+                normalized_lines.append(line)
+                index += 1
+                continue
+
+            if lowered == "latex":
+                if normalized_lines and self._is_wrapped_formula(normalized_lines[-1]):
+                    if next_line and self._looks_like_formula_image_path(next_line):
+                        index += 2
+                        continue
+                    index += 1
+                    continue
+                normalized_lines.append(line)
+                index += 1
+                continue
+
+            if self._looks_like_formula_image_path(line):
+                previous_line = normalized_lines[-1] if normalized_lines else ""
+                if previous_line and self._is_wrapped_formula(previous_line):
+                    index += 1
+                    continue
+                normalized_lines.append(line)
+                index += 1
+                continue
+
+            if next_line.lower() == "latex" and self._looks_like_formula_payload(line):
+                display_mode = self._prefers_display_formula(line)
+                normalized_lines.append(self._wrap_formula_text(line, display_mode=display_mode))
+                index += 2
+                if next_next_line and self._looks_like_formula_image_path(next_next_line):
+                    index += 1
+                continue
+
+            if next_line.lower() == "latex" and next_next_line and self._looks_like_formula_image_path(next_next_line) and self._looks_like_formula_payload(line):
+                display_mode = self._prefers_display_formula(line)
+                normalized_lines.append(self._wrap_formula_text(line, display_mode=display_mode))
+                index += 3
+                continue
+
+            if self._looks_like_formula_payload(line):
+                normalized_lines.append(self._wrap_formula_text(line, display_mode=self._prefers_display_formula(line)))
+                index += 1
+                continue
+
+            normalized_lines.append(line)
+            index += 1
+
+        collapsed: list[str] = []
+        previous_blank = False
+        for line in normalized_lines:
+            if not line:
+                if not previous_blank:
+                    collapsed.append("")
+                previous_blank = True
+                continue
+            collapsed.append(line)
+            previous_blank = False
+        return "\n".join(collapsed).strip()
+
+    def _wrap_formula_text(self, text: str, *, display_mode: bool) -> str:
+        normalized = self._repair_formula_spacing(text)
+        if self._is_wrapped_formula(normalized):
+            return normalized
+        delimiter = "$$" if display_mode else "$"
+        return f"{delimiter}{normalized}{delimiter}"
+
+    def _repair_formula_spacing(self, text: str) -> str:
+        normalized = str(text or "").strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = re.sub(r"\s*_\s*\{\s*", "_{", normalized)
+        normalized = re.sub(r"\s*\^\s*\{\s*", "^{", normalized)
+        normalized = re.sub(r"\s+\}", "}", normalized)
+        normalized = re.sub(r"\\([A-Za-z]+)\s+\{", r"\\\1{", normalized)
+        normalized = re.sub(r"\{\s+", "{", normalized)
+        normalized = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", normalized)
+        normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
+        normalized = re.sub(r"(?<!\d)1\s+0(?=\s*\^\s*\{)", "10", normalized)
+        normalized = re.sub(r"(?<=\d)\s+\^(?=\s*\{)", "^", normalized)
+        normalized = re.sub(r"\^\{\s*-\s*(\d+)\s*\}", r"^{-\1}", normalized)
+        normalized = re.sub(r"\^\{\s*(\d+)\s*\}", r"^{\1}", normalized)
+        normalized = re.sub(r"\\mathrm\{([^}]*)\}", lambda m: "\\mathrm{" + re.sub(r"\s+", "", m.group(1)) + "}", normalized)
+        normalized = re.sub(r"\\scriptscriptstyle\s+", r"\\scriptscriptstyle ", normalized)
+        return normalized.strip()
+
+    def _looks_like_formula_payload(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        if candidate.startswith("[[asset:") or candidate.startswith("【附图"):
+            return False
+        if self._looks_like_formula_image_path(candidate):
+            return False
+        if self._is_wrapped_formula(candidate):
+            return False
+        if re.match(r"^\s*(?:\d+\.\s*)?(?:答案|解析)[:：]", candidate):
+            return False
+        if re.search(r"\\begin\{array\}|\\end\{array\}", candidate):
+            return True
+        if re.search(r"\\(?:frac|mathrm|scriptscriptstyle|sin|cos|tan|theta|pi|perp|ast|times|begin|end)", candidate):
+            return True
+        if re.search(r"(?:^| )equation_inline(?:$| )", candidate, re.I):
+            return False
+        if re.search(r"(?:_|\\^)\s*\{", candidate):
+            return True
+        if re.search(r"\d\s*\.\s*\d|\b1\s+0\s*\^\s*\{", candidate) and not re.search(r"[\u4e00-\u9fff]", candidate):
+            return True
+        if re.search(r"=", candidate) and not re.search(r"[\u4e00-\u9fff]{2,}", candidate):
+            return True
+        return False
+
+    def _prefers_display_formula(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        return bool(re.search(r"\\begin\{array\}|\\\\|\\frac", candidate))
+
+    def _looks_like_formula_image_path(self, text: str) -> bool:
+        return bool(re.fullmatch(r"images?/[^ \n]+\.(?:png|jpg|jpeg|webp)", str(text or "").strip(), re.I))
+
+    def _is_wrapped_formula(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        return (
+            (candidate.startswith("$$") and candidate.endswith("$$"))
+            or (candidate.startswith("$") and candidate.endswith("$") and candidate.count("$") >= 2)
+            or (candidate.startswith(r"\(") and candidate.endswith(r"\)"))
+            or (candidate.startswith(r"\[") and candidate.endswith(r"\]"))
+        )
 
     def _boilerplate_suppression_keys(self, document: KnowledgeDocument, blocks: list[PDFBlock]) -> set[str]:
         page_blocks: dict[int, list[PDFBlock]] = {}
