@@ -21,7 +21,7 @@ from backend.models.schemas import (
 from backend.services.audit_service import audit_service
 from backend.services.rag_service import rag_service
 from backend.tasks.celery_app import celery_app
-from backend.tasks.ingest import enqueue_ingest_task, run_ingest_pipeline, sync_task_state
+from backend.tasks.ingest import dispatch_import_task, dispatch_next_pdf_task, sync_task_state
 from backend.time_utils import now_beijing
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -176,6 +176,7 @@ def _sync_document_state(document: KnowledgeDocument, db: DbSession) -> Knowledg
 
 @router.get("/documents", response_model=list[KnowledgeDocumentRead])
 def list_documents(db: DbSession, current_user: CurrentTeacher) -> list[KnowledgeDocumentRead]:
+    dispatch_next_pdf_task(db)
     documents = db.scalars(select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())).all()
     return [KnowledgeDocumentRead.model_validate(_sync_document_state(item, db)) for item in documents]
 
@@ -257,13 +258,8 @@ async def upload_document(
     db.commit()
     db.refresh(task)
 
-    celery_task_id = enqueue_ingest_task(document.id, task.id)
-    if celery_task_id:
-        task.celery_task_id = celery_task_id
-        db.add(task)
-        db.commit()
-    else:
-        background_tasks.add_task(run_ingest_pipeline, document.id, task.id)
+    dispatch_import_task(db, document, task, background_tasks=background_tasks)
+    db.refresh(task)
 
     audit_service.log(
         db,
@@ -382,12 +378,14 @@ def update_document(
 
 @router.get("/tasks", response_model=list[ImportTaskRead])
 def list_tasks(limit: int = 100, db: DbSession = None, current_user: CurrentTeacher = None) -> list[ImportTaskRead]:
+    dispatch_next_pdf_task(db)
     tasks = db.scalars(select(ImportTask).order_by(ImportTask.updated_at.desc()).limit(limit)).all()
     return [ImportTaskRead.model_validate(sync_task_state(task, db)) for task in tasks]
 
 
 @router.get("/tasks/{task_id}", response_model=ImportTaskRead)
 def get_task(task_id: int, db: DbSession, current_user: CurrentTeacher) -> ImportTaskRead:
+    dispatch_next_pdf_task(db)
     task = db.get(ImportTask, task_id)
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
@@ -402,6 +400,12 @@ def cancel_task(task_id: int, db: DbSession, current_user: CurrentTeacher) -> Im
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     if task.status in {DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED}:
         return ImportTaskRead.model_validate(task)
+    was_waiting_pdf = (
+        task.document is not None
+        and str(task.document.mime_type or "").lower() == "application/pdf"
+        and task.status == DocumentStatus.PENDING
+        and task.error_message == "PDF 导入排队中，等待前序任务完成"
+    )
     task.status = DocumentStatus.CANCELLED
     task.error_message = "已请求取消任务"
     if task.document:
@@ -412,6 +416,9 @@ def cancel_task(task_id: int, db: DbSession, current_user: CurrentTeacher) -> Im
     db.add(task)
     db.commit()
     db.refresh(task)
+    if was_waiting_pdf:
+        dispatch_next_pdf_task(db)
+        db.refresh(task)
     audit_service.log(
         db,
         actor=current_user,

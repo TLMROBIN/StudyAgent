@@ -154,6 +154,84 @@ def test_delete_task_rejects_active_task():
         session.close()
 
 
+def test_cancel_waiting_pdf_task_promotes_next_pending_pdf(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="queued.pdf",
+            file_path="/tmp/queued.pdf",
+            mime_type="application/pdf",
+            size_bytes=64,
+            status=DocumentStatus.PENDING,
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        task = ImportTask(
+            document_id=document.id,
+            status=DocumentStatus.PENDING,
+            progress=0,
+            error_message="PDF 导入排队中，等待前序任务完成",
+        )
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+        promoted: list[bool] = []
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: promoted.append(True) or None)
+
+        result = knowledge_router.cancel_task(task.id, db=session, current_user=teacher)
+
+        assert result.status == DocumentStatus.CANCELLED
+        assert promoted == [True]
+    finally:
+        session.close()
+
+
+def test_list_tasks_promotes_waiting_pdf_queue(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="queued.pdf",
+            file_path="/tmp/queued.pdf",
+            mime_type="application/pdf",
+            size_bytes=64,
+            status=DocumentStatus.PENDING,
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        task = ImportTask(
+            document_id=document.id,
+            status=DocumentStatus.PENDING,
+            progress=0,
+            error_message="PDF 导入排队中，等待前序任务完成",
+        )
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+        promoted: list[bool] = []
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: promoted.append(True) or None)
+
+        result = knowledge_router.list_tasks(db=session, current_user=teacher)
+
+        assert result
+        assert promoted == [True]
+    finally:
+        session.close()
+
+
 def test_list_documents_marks_orphan_pending_document_as_failed():
     session_local = build_session()
     session = session_local()

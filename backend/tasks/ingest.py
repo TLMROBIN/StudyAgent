@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+import fcntl
 import json
 from pathlib import Path
+import threading
 
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.result import AsyncResult
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
@@ -24,6 +29,10 @@ from backend.tasks.celery_app import celery_app
 settings = get_settings()
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
 RETRIABLE_INGEST_EXCEPTIONS = (MineruStartupError, MineruTransientIOError)
+PDF_QUEUE_WAITING_MESSAGE = "PDF 导入排队中，等待前序任务完成"
+TASK_CREATED_MESSAGE = "任务已创建，等待分配 worker"
+LOCAL_TASK_CREATED_MESSAGE = "任务已创建，等待本地处理"
+STALE_PENDING_TASK_SECONDS = max(30, settings.ingest_poll_interval_seconds * 10)
 
 
 def _build_extraction_message(extracted: ExtractionResult) -> str:
@@ -167,6 +176,129 @@ def _update_status(
         )
 
 
+def _is_pdf_document(document: KnowledgeDocument | None) -> bool:
+    if document is None:
+        return False
+    mime_type = str(document.mime_type or "").lower()
+    suffix = Path(document.file_path or document.filename or "").suffix.lower()
+    return mime_type == "application/pdf" or suffix == ".pdf"
+
+
+def _normalize_timestamp(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    return None
+
+
+@contextmanager
+def _pdf_dispatch_lock() -> None:
+    lock_path = Path(settings.task_artifact_path) / "pdf-import-dispatch.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _has_active_pdf_task(db: Session) -> bool:
+    active_task = db.scalar(
+        select(ImportTask.id)
+        .join(KnowledgeDocument, KnowledgeDocument.id == ImportTask.document_id)
+        .where(
+            KnowledgeDocument.mime_type == "application/pdf",
+            or_(
+                ImportTask.status == DocumentStatus.PROCESSING,
+                (ImportTask.status == DocumentStatus.PENDING) & (ImportTask.error_message != PDF_QUEUE_WAITING_MESSAGE),
+            ),
+        )
+        .limit(1)
+    )
+    return active_task is not None
+
+
+def _next_pending_pdf_task(db: Session) -> ImportTask | None:
+    return db.scalar(
+        select(ImportTask)
+        .join(KnowledgeDocument, KnowledgeDocument.id == ImportTask.document_id)
+        .where(
+            KnowledgeDocument.mime_type == "application/pdf",
+            ImportTask.status == DocumentStatus.PENDING,
+            or_(ImportTask.error_message == PDF_QUEUE_WAITING_MESSAGE, ImportTask.error_message.is_(None)),
+        )
+        .order_by(ImportTask.created_at.asc(), ImportTask.id.asc())
+        .limit(1)
+    )
+
+
+def _start_task_execution(
+    db: Session,
+    document: KnowledgeDocument,
+    task: ImportTask,
+    *,
+    background_tasks=None,
+) -> str | None:
+    celery_task_id = enqueue_ingest_task(document.id, task.id)
+    if celery_task_id:
+        task.celery_task_id = celery_task_id
+        task.error_message = TASK_CREATED_MESSAGE
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return celery_task_id
+
+    task.celery_task_id = None
+    task.error_message = LOCAL_TASK_CREATED_MESSAGE
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    if background_tasks is not None:
+        background_tasks.add_task(run_ingest_pipeline, document.id, task.id)
+    else:
+        threading.Thread(target=run_ingest_pipeline, args=(document.id, task.id), daemon=True).start()
+    return None
+
+
+def dispatch_import_task(
+    db: Session,
+    document: KnowledgeDocument,
+    task: ImportTask,
+    *,
+    background_tasks=None,
+) -> bool:
+    if not _is_pdf_document(document):
+        _start_task_execution(db, document, task, background_tasks=background_tasks)
+        return True
+
+    task.error_message = PDF_QUEUE_WAITING_MESSAGE
+    task.celery_task_id = None
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return dispatch_next_pdf_task(db, background_tasks=background_tasks) == task.id
+
+
+def dispatch_next_pdf_task(db: Session, *, background_tasks=None) -> int | None:
+    with _pdf_dispatch_lock():
+        if _has_active_pdf_task(db):
+            return None
+
+        task = _next_pending_pdf_task(db)
+        if task is None:
+            return None
+
+        document = db.get(KnowledgeDocument, task.document_id)
+        if document is None or not _is_pdf_document(document):
+            return None
+
+        _start_task_execution(db, document, task, background_tasks=background_tasks)
+        return task.id
+
+
 def _reload_task_document(db: Session, task_id: int, document_id: int) -> tuple[ImportTask | None, KnowledgeDocument | None]:
     return db.get(ImportTask, task_id), db.get(KnowledgeDocument, document_id)
 
@@ -200,14 +332,33 @@ def _sync_task_from_result(db: Session, task: ImportTask) -> ImportTask:
         task.status = DocumentStatus(meta.get("status", DocumentStatus.PROCESSING.value))
         task.progress = int(meta.get("progress", task.progress))
         task.error_message = meta.get("message") or task.error_message
+    elif (
+        result.state == "PENDING"
+        and task.status == DocumentStatus.PENDING
+        and _is_pdf_document(task.document)
+    ):
+        updated_at = _normalize_timestamp(task.updated_at)
+        now = datetime.now(UTC)
+        if updated_at and now - updated_at >= timedelta(seconds=STALE_PENDING_TASK_SECONDS):
+            task.celery_task_id = None
+            task.error_message = PDF_QUEUE_WAITING_MESSAGE
     db.add(task)
     db.commit()
     db.refresh(task)
+    if (
+        task.status == DocumentStatus.PENDING
+        and task.celery_task_id is None
+        and _is_pdf_document(task.document)
+        and task.error_message == PDF_QUEUE_WAITING_MESSAGE
+    ):
+        dispatch_next_pdf_task(db)
+        db.refresh(task)
     return task
 
 
 def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> None:
     db = SessionLocal()
+    should_dispatch_next_pdf = False
     try:
         task, document = _reload_task_document(db, task_id, document_id)
         if not task or not document:
@@ -274,6 +425,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             error=_build_completion_message(document, chunks, extracted.parsed_pdf),
             celery_task=celery_task,
         )
+        should_dispatch_next_pdf = _is_pdf_document(document)
         db.add(task)
         db.commit()
     except SoftTimeLimitExceeded:
@@ -290,6 +442,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                     error="导入超时，请检查文件大小或内容后重试",
                     celery_task=celery_task,
                 )
+                should_dispatch_next_pdf = _is_pdf_document(document)
     except RETRIABLE_INGEST_EXCEPTIONS as exc:
         if "db" in locals():
             task, document = _reload_task_document(db, task_id, document_id)
@@ -319,6 +472,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                     error=_build_gpu_failure_message(exc),
                     celery_task=celery_task,
                 )
+                should_dispatch_next_pdf = _is_pdf_document(document)
     except RuntimeError as exc:
         if str(exc) == "__TASK_CANCELLED__":
             if "db" in locals():
@@ -334,6 +488,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                         error="任务已取消，未保留中间索引",
                         celery_task=celery_task,
                     )
+                    should_dispatch_next_pdf = _is_pdf_document(document)
             return
         if "db" in locals():
             task, document = _reload_task_document(db, task_id, document_id)
@@ -348,6 +503,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                     error=str(exc),
                     celery_task=celery_task,
                 )
+                should_dispatch_next_pdf = _is_pdf_document(document)
     except Exception as exc:
         if "db" in locals():
             task, document = _reload_task_document(db, task_id, document_id)
@@ -362,7 +518,10 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
                     error=str(exc),
                     celery_task=celery_task,
                 )
+                should_dispatch_next_pdf = _is_pdf_document(document)
     finally:
+        if should_dispatch_next_pdf:
+            dispatch_next_pdf_task(db)
         db.close()
 
 

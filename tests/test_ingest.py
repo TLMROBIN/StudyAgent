@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import json
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -39,6 +40,165 @@ def setup_testing_db():
     testing_session = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)
     return testing_session
+
+
+def test_dispatch_import_task_queues_second_pdf_until_first_finishes(tmp_path, monkeypatch):
+    testing_session = setup_testing_db()
+    monkeypatch.setattr(ingest_module, "SessionLocal", testing_session)
+    monkeypatch.setattr(ingest_module.settings, "task_artifact_path", str(tmp_path / "tasks"), raising=False)
+
+    dispatched: list[tuple[int, int]] = []
+
+    def fake_enqueue(document_id: int, task_id: int) -> str:
+        dispatched.append((document_id, task_id))
+        return f"celery-{task_id}"
+
+    monkeypatch.setattr(ingest_module, "enqueue_ingest_task", fake_enqueue)
+
+    session = testing_session()
+    first_document = KnowledgeDocument(
+        subject="物理",
+        filename="book-a.pdf",
+        file_path=str(tmp_path / "book-a.pdf"),
+        mime_type="application/pdf",
+        size_bytes=128,
+        status=DocumentStatus.PENDING,
+    )
+    second_document = KnowledgeDocument(
+        subject="物理",
+        filename="book-b.pdf",
+        file_path=str(tmp_path / "book-b.pdf"),
+        mime_type="application/pdf",
+        size_bytes=128,
+        status=DocumentStatus.PENDING,
+    )
+    session.add_all([first_document, second_document])
+    session.commit()
+    first_task = ImportTask(document_id=first_document.id, status=DocumentStatus.PENDING, progress=0)
+    second_task = ImportTask(document_id=second_document.id, status=DocumentStatus.PENDING, progress=0)
+    session.add_all([first_task, second_task])
+    session.commit()
+    session.refresh(first_task)
+    session.refresh(second_task)
+
+    assert ingest_module.dispatch_import_task(session, first_document, first_task) is True
+    session.refresh(first_task)
+    assert first_task.celery_task_id == f"celery-{first_task.id}"
+    assert first_task.error_message == ingest_module.TASK_CREATED_MESSAGE
+
+    assert ingest_module.dispatch_import_task(session, second_document, second_task) is False
+    session.refresh(second_task)
+    assert second_task.celery_task_id is None
+    assert second_task.error_message == ingest_module.PDF_QUEUE_WAITING_MESSAGE
+    assert dispatched == [(first_document.id, first_task.id)]
+
+    first_task.status = DocumentStatus.COMPLETED
+    first_task.error_message = "导入完成"
+    session.add(first_task)
+    session.commit()
+
+    next_task_id = ingest_module.dispatch_next_pdf_task(session)
+    session.refresh(second_task)
+    assert next_task_id == second_task.id
+    assert second_task.celery_task_id == f"celery-{second_task.id}"
+    assert second_task.error_message == ingest_module.TASK_CREATED_MESSAGE
+    assert dispatched == [(first_document.id, first_task.id), (second_document.id, second_task.id)]
+    session.close()
+
+
+def test_dispatch_import_task_keeps_non_pdf_immediate_even_when_pdf_is_active(tmp_path, monkeypatch):
+    testing_session = setup_testing_db()
+    monkeypatch.setattr(ingest_module, "SessionLocal", testing_session)
+    monkeypatch.setattr(ingest_module.settings, "task_artifact_path", str(tmp_path / "tasks"), raising=False)
+
+    dispatched: list[tuple[int, int]] = []
+
+    def fake_enqueue(document_id: int, task_id: int) -> str:
+        dispatched.append((document_id, task_id))
+        return f"celery-{task_id}"
+
+    monkeypatch.setattr(ingest_module, "enqueue_ingest_task", fake_enqueue)
+
+    session = testing_session()
+    pdf_document = KnowledgeDocument(
+        subject="物理",
+        filename="book-a.pdf",
+        file_path=str(tmp_path / "book-a.pdf"),
+        mime_type="application/pdf",
+        size_bytes=128,
+        status=DocumentStatus.PENDING,
+    )
+    text_document = KnowledgeDocument(
+        subject="物理",
+        filename="notes.txt",
+        file_path=str(tmp_path / "notes.txt"),
+        mime_type="text/plain",
+        size_bytes=32,
+        status=DocumentStatus.PENDING,
+    )
+    session.add_all([pdf_document, text_document])
+    session.commit()
+    pdf_task = ImportTask(document_id=pdf_document.id, status=DocumentStatus.PENDING, progress=0)
+    text_task = ImportTask(document_id=text_document.id, status=DocumentStatus.PENDING, progress=0)
+    session.add_all([pdf_task, text_task])
+    session.commit()
+    session.refresh(pdf_task)
+    session.refresh(text_task)
+
+    ingest_module.dispatch_import_task(session, pdf_document, pdf_task)
+    ingest_module.dispatch_import_task(session, text_document, text_task)
+    session.refresh(text_task)
+
+    assert text_task.celery_task_id == f"celery-{text_task.id}"
+    assert text_task.error_message == ingest_module.TASK_CREATED_MESSAGE
+    assert dispatched == [(pdf_document.id, pdf_task.id), (text_document.id, text_task.id)]
+    session.close()
+
+
+def test_sync_task_state_requeues_stale_pdf_pending_task(tmp_path, monkeypatch):
+    testing_session = setup_testing_db()
+    monkeypatch.setattr(ingest_module, "SessionLocal", testing_session)
+    monkeypatch.setattr(ingest_module.settings, "task_artifact_path", str(tmp_path / "tasks"), raising=False)
+
+    class FakeResult:
+        state = "PENDING"
+        result = None
+        info = None
+
+    monkeypatch.setattr(ingest_module, "AsyncResult", lambda *args, **kwargs: FakeResult())
+    redispatched: list[int] = []
+    monkeypatch.setattr(ingest_module, "dispatch_next_pdf_task", lambda db, background_tasks=None: redispatched.append(1) or None)
+
+    session = testing_session()
+    document = KnowledgeDocument(
+        subject="物理",
+        filename="stale.pdf",
+        file_path=str(tmp_path / "stale.pdf"),
+        mime_type="application/pdf",
+        size_bytes=128,
+        status=DocumentStatus.PENDING,
+    )
+    session.add(document)
+    session.commit()
+    task = ImportTask(
+        document_id=document.id,
+        status=DocumentStatus.PENDING,
+        progress=0,
+        celery_task_id="ghost-task",
+        error_message=ingest_module.TASK_CREATED_MESSAGE,
+    )
+    session.add(task)
+    session.commit()
+    task.updated_at = datetime.now(UTC) - timedelta(seconds=ingest_module.STALE_PENDING_TASK_SECONDS + 5)
+    session.add(task)
+    session.commit()
+
+    refreshed = ingest_module.sync_task_state(task, session)
+
+    assert refreshed.celery_task_id is None
+    assert refreshed.error_message == ingest_module.PDF_QUEUE_WAITING_MESSAGE
+    assert redispatched == [1]
+    session.close()
 
 
 def test_run_ingest_pipeline_marks_task_completed(tmp_path, monkeypatch):

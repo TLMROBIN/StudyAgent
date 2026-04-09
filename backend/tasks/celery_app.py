@@ -23,6 +23,8 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=False,
     task_track_started=True,
+    worker_max_tasks_per_child=1,
+    worker_prefetch_multiplier=1,
 )
 
 

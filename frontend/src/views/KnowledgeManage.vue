@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import type { UploadFile, UploadFiles, UploadInstance, UploadUserFile } from 'element-plus'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { api, type KnowledgeAsset } from '../utils/api'
@@ -161,6 +162,8 @@ const documentGradeFilter = ref<'all' | number>('all')
 const documentDifficultyFilter = ref('all')
 const documentKeyword = ref('')
 const uploading = ref(false)
+const uploadRef = ref<UploadInstance | null>(null)
+const selectedUploadFiles = ref<UploadUserFile[]>([])
 const deletingTaskIds = ref<number[]>([])
 const deletingDocumentIds = ref<number[]>([])
 const chunkCache = reactive<Record<number, KnowledgeChunk[]>>({})
@@ -687,38 +690,86 @@ function stopPolling() {
   }
 }
 
-async function handleUpload(uploadFile: File) {
-  uploading.value = true
+async function uploadSingleFile(uploadFile: File) {
   sanitizeUploadMetadata()
+  const formData = new FormData()
+  formData.append('file', uploadFile)
+  formData.append('resource_type', uploadForm.resource_type)
+  if (uploadForm.grade !== null) {
+    formData.append('grade', String(uploadForm.grade))
+  }
+  if (uploadForm.chapter.trim()) {
+    formData.append('chapter', uploadForm.chapter.trim())
+  }
+  if (uploadForm.section.trim()) {
+    formData.append('section', uploadForm.section.trim())
+  }
+  if (uploadForm.difficulty) {
+    formData.append('difficulty', uploadForm.difficulty)
+  }
+  if (uploadForm.tags.trim()) {
+    formData.append('tags', uploadForm.tags.trim())
+  }
+  const { data } = await api.post<ImportTask>(`/knowledge/upload?subject=${encodeURIComponent(uploadForm.subject)}`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  latestTask.value = data
+}
+
+function isPdfFile(file: File) {
+  return file.name.toLowerCase().endsWith('.pdf')
+}
+
+function clearSelectedUploadFiles() {
+  selectedUploadFiles.value = []
+  uploadRef.value?.clearFiles()
+}
+
+function handleUploadSelection(_file: UploadFile, fileList: UploadFiles) {
+  selectedUploadFiles.value = [...fileList]
+}
+
+function handleUploadRemove(_file: UploadFile, fileList: UploadFiles) {
+  selectedUploadFiles.value = [...fileList]
+}
+
+async function submitSelectedUploads() {
+  const files = selectedUploadFiles.value
+    .map((item) => item.raw)
+    .filter((item): item is File => item instanceof File)
+
+  if (!files.length) {
+    ElMessage.error('请先选择资料')
+    return
+  }
+  if (files.length > 1 && files.some((file) => !isPdfFile(file))) {
+    ElMessage.error('批量上传目前仅支持 PDF，请将非 PDF 资料改为单文件上传')
+    return
+  }
+
+  uploading.value = true
+  const failures: string[] = []
+  let uploadedCount = 0
   try {
-    const formData = new FormData()
-    formData.append('file', uploadFile)
-    formData.append('resource_type', uploadForm.resource_type)
-    if (uploadForm.grade !== null) {
-      formData.append('grade', String(uploadForm.grade))
+    for (const file of files) {
+      try {
+        await uploadSingleFile(file)
+        uploadedCount += 1
+      } catch (error) {
+        console.error(error)
+        failures.push(`${file.name}：${uploadErrorMessage(error)}`)
+      }
     }
-    if (uploadForm.chapter.trim()) {
-      formData.append('chapter', uploadForm.chapter.trim())
-    }
-    if (uploadForm.section.trim()) {
-      formData.append('section', uploadForm.section.trim())
-    }
-    if (uploadForm.difficulty) {
-      formData.append('difficulty', uploadForm.difficulty)
-    }
-    if (uploadForm.tags.trim()) {
-      formData.append('tags', uploadForm.tags.trim())
-    }
-    const { data } = await api.post<ImportTask>(`/knowledge/upload?subject=${encodeURIComponent(uploadForm.subject)}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-    latestTask.value = data
     await refreshData(true)
-    startPolling()
-    ElMessage.success('上传成功，已进入导入队列')
-  } catch (error) {
-    console.error(error)
-    ElMessage.error(uploadErrorMessage(error))
+    if (uploadedCount > 0) {
+      startPolling()
+    }
+    if (!failures.length) {
+      ElMessage.success(uploadedCount > 1 ? `已提交 ${uploadedCount} 个文件，系统将自动排队处理` : '上传成功，已进入导入队列')
+      clearSelectedUploadFiles()
+      return
+    }
+    ElMessage.warning(`成功 ${uploadedCount} 个，失败 ${failures.length} 个`)
   } finally {
     uploading.value = false
   }
@@ -965,13 +1016,22 @@ onBeforeUnmount(() => {
       </div>
       <div class="toolbar toolbar-wrap toolbar-end">
         <el-upload
-          :show-file-list="false"
+          ref="uploadRef"
+          v-model:file-list="selectedUploadFiles"
+          :show-file-list="true"
           :auto-upload="false"
+          multiple
           accept=".pdf,.docx,.txt,.md,.tex"
-          :on-change="(file) => handleUpload(file.raw!)"
+          :on-change="handleUploadSelection"
+          :on-remove="handleUploadRemove"
         >
-          <button class="primary-button" :disabled="uploading">{{ uploading ? '上传中...' : '选择资料并上传' }}</button>
+          <button class="ghost-button" type="button" :disabled="uploading">
+            {{ uploading ? '选择中...' : '选择资料' }}
+          </button>
         </el-upload>
+        <button class="primary-button" type="button" :disabled="uploading || !selectedUploadFiles.length" @click="submitSelectedUploads">
+          {{ uploading ? '上传中...' : `上传已选资料${selectedUploadFiles.length ? `（${selectedUploadFiles.length}）` : ''}` }}
+        </button>
       </div>
       <div class="detail-chip-group">
         <span class="detail-chip">任务总数 {{ taskSummary.total }}</span>
