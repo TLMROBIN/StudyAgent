@@ -749,6 +749,32 @@ def test_pdf_bridge_normalizes_equation_inline_into_renderable_latex(tmp_path):
     assert "\\frac{" in combined
 
 
+def test_pdf_bridge_wraps_raw_latex_without_existing_delimiters(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=51,
+        subject="物理",
+        filename="formula-raw-latex.pdf",
+        file_path=str(tmp_path / "formula-raw-latex.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="加速度关系\n\\frac { v } { t } = a",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="加速度关系"),
+            PDFBlock(page_index=0, block_type="paragraph", text="\\frac { v } { t } = a"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "$$\\frac{v}{t} = a$$" in combined
+
+
 def test_pdf_bridge_removes_latex_marker_and_image_path_after_formula_normalization(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
@@ -801,6 +827,36 @@ def test_pdf_bridge_normalizes_scientific_notation_in_formula_segments(tmp_path)
     combined = "\n".join(chunk.content for chunk in chunks)
 
     assert "$1.67 \\times 10^{-27} ~ \\mathrm{kg}$" in combined
+
+
+def test_pdf_bridge_normalizes_array_environments_into_renderable_display_math(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=52,
+        subject="物理",
+        filename="formula-array.pdf",
+        file_path=str(tmp_path / "formula-array.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="\\begin { array } { c } F = m a \\\\ p = m v \\end { array }",
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text="\\begin { array } { c } F = m a \\\\ p = m v \\end { array }",
+            ),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "$$\\begin{array}{c}" in combined
+    assert "\\end{array}$$" in combined
 
 
 def test_pdf_bridge_preserves_uncertain_formula_like_text_when_signal_is_weak(tmp_path):

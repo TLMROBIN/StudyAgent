@@ -40,6 +40,13 @@ The PDF path has project-specific constraints:
 
 - `backend/services/pdf_parse_bridge.py` is the preferred place for **PDF-only** structure-aware cleaning and transformation.
 - Avoid turning `backend/services/rag_service.py::_normalize_pdf_text()` into a global catch-all cleaner.
+- Keep formula normalization in the PDF bridge layer; do not move raw parser-repair logic into the frontend unless a narrow compatibility patch is proven necessary.
+- Normalize formulas toward standard delimiters already supported by `frontend/src/utils/richText.ts` (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`) instead of inventing a PDF-specific rendering contract.
+- Prefer transform-over-delete for formula residue:
+  - wrap confident raw LaTeX / `equation_inline` payloads into renderable math,
+  - repair high-confidence spacing damage in subscripts, superscripts, array environments, and scientific notation,
+  - remove control markers such as `latex` or formula-adjacent `images/...jpg` tails only when the formula content is preserved.
+- Preserve ambiguous formula-like text verbatim when confidence is weak.
 - For repeated boilerplate suppression, require strong evidence:
   - repeated within the same document,
   - page-edge/header-footer evidence,
@@ -140,6 +147,9 @@ Before finishing, try to provide evidence for:
 
 For PDF cleanup changes specifically, prefer proving:
 - markup noise is reduced,
+- formulas become more renderable without widening beyond PDF,
+- raw LaTeX / array-environment chunks are normalized into frontend-compatible math forms,
+- `equation_inline`, `latex`, and formula-adjacent image-path noise are reduced only when math content is retained,
 - headings are preserved,
 - captions/steps are preserved,
 - table content remains retrievable,
