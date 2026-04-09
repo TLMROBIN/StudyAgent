@@ -99,11 +99,20 @@ class PDFParseBridge:
 
             page_structure = self._page_structure_context(structure_catalog, page_number)
             if page_structure and (
-                page_structure.get("chapter") != current_chapter or page_structure.get("section") != current_section
+                (page_structure.get("chapter") and page_structure.get("chapter") != current_chapter)
+                or (
+                    page_structure.get("section") is not None
+                    and page_structure.get("section") != current_section
+                )
             ):
                 flush_segment()
-                current_chapter = page_structure.get("chapter")
-                current_section = page_structure.get("section")
+                chapter_changed = bool(page_structure.get("chapter")) and page_structure.get("chapter") != current_chapter
+                if page_structure.get("chapter"):
+                    current_chapter = page_structure.get("chapter")
+                if page_structure.get("section") is not None:
+                    current_section = page_structure.get("section")
+                elif chapter_changed:
+                    current_section = None
                 current_structure_source = str(page_structure.get("structure_source") or "toc_page_map")
                 current_structure_confidence = str(page_structure.get("structure_confidence") or "medium")
 
@@ -282,6 +291,8 @@ class PDFParseBridge:
             block_text = str(block.text or "").strip()
             if not block_text:
                 continue
+            if self._looks_like_table_control_marker(block_text):
+                continue
             if block_text.lower() == "latex" and cleaned_blocks and self._is_wrapped_formula(str(cleaned_blocks[-1].text or "").strip()):
                 continue
             if self._looks_like_formula_image_path(block_text) and cleaned_blocks and self._is_wrapped_formula(str(cleaned_blocks[-1].text or "").strip()):
@@ -308,9 +319,27 @@ class PDFParseBridge:
             cells = [cell.strip() for cell in raw_line.split("\t")]
             if not any(cells):
                 continue
+            cells = self._repair_sparse_table_row(cells)
             non_empty = [cell for cell in cells if cell]
+            non_empty = self._repair_sparse_table_row(non_empty)
             lines.append(" | ".join(non_empty) if non_empty else "")
         return "\n".join(line for line in lines if line).strip()
+
+    def _repair_sparse_table_row(self, cells: list[str]) -> list[str]:
+        normalized_cells = list(cells)
+        if len(normalized_cells) >= 3:
+            target_index = len(normalized_cells) - 1
+            if not normalized_cells[-1].strip():
+                target_index = len(normalized_cells) - 2
+            split_candidate = normalized_cells[target_index].strip()
+            match = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)", split_candidate)
+            if match and any(not self._looks_like_plain_numeric_cell(cell.strip()) for cell in normalized_cells[:target_index]):
+                normalized_cells[target_index] = match.group(1)
+                if target_index == len(normalized_cells) - 1:
+                    normalized_cells.append(match.group(2))
+                else:
+                    normalized_cells[target_index + 1] = match.group(2)
+        return normalized_cells
 
     def _normalize_formula_text(self, text: str) -> str:
         raw_text = str(text or "").strip()
@@ -320,13 +349,31 @@ class PDFParseBridge:
         lines = [line.strip() for line in raw_text.splitlines()]
         normalized_lines: list[str] = []
         index = 0
+        previous_was_table_control_marker = False
         while index < len(lines):
             line = lines[index]
             lowered = line.lower()
             next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
             next_next_line = lines[index + 2].strip() if index + 2 < len(lines) else ""
 
+            if self._looks_like_table_control_marker(line):
+                previous_was_table_control_marker = True
+                index += 1
+                continue
+
+            if line.isdigit() and previous_was_table_control_marker and normalized_lines and self._looks_like_pseudo_table_line(normalized_lines[-1]):
+                previous_was_table_control_marker = False
+                index += 1
+                continue
+
+            if self._looks_like_pseudo_table_line(line):
+                previous_was_table_control_marker = False
+                normalized_lines.append(self._normalize_pseudo_table_line(line))
+                index += 1
+                continue
+
             if lowered in {"equation_inline", "equation_display"}:
+                previous_was_table_control_marker = False
                 display_mode = lowered == "equation_display"
                 if next_line and self._looks_like_equation_marker_payload(next_line):
                     normalized_lines.append(self._wrap_formula_text(next_line, display_mode=display_mode))
@@ -336,11 +383,20 @@ class PDFParseBridge:
                     normalized_lines.append(self._repair_formula_spacing(next_line))
                     index += 2
                     continue
+                if next_line and self._looks_like_short_formula_expression(next_line):
+                    normalized_lines.append(self._wrap_formula_text(next_line, display_mode=display_mode))
+                    index += 2
+                    continue
+                if next_line and self._looks_like_axis_style_label(next_line):
+                    normalized_lines.append(self._normalize_axis_style_label(next_line))
+                    index += 2
+                    continue
                 normalized_lines.append(line)
                 index += 1
                 continue
 
             if lowered == "latex":
+                previous_was_table_control_marker = False
                 if normalized_lines and self._is_wrapped_formula(normalized_lines[-1]):
                     if next_line and self._looks_like_formula_image_path(next_line):
                         index += 2
@@ -352,6 +408,7 @@ class PDFParseBridge:
                 continue
 
             if self._looks_like_formula_image_path(line):
+                previous_was_table_control_marker = False
                 previous_line = normalized_lines[-1] if normalized_lines else ""
                 if previous_line and self._is_wrapped_formula(previous_line):
                     index += 1
@@ -361,6 +418,7 @@ class PDFParseBridge:
                 continue
 
             if next_line.lower() == "latex" and self._looks_like_formula_payload(line):
+                previous_was_table_control_marker = False
                 display_mode = self._prefers_display_formula(line)
                 normalized_lines.append(self._wrap_formula_text(line, display_mode=display_mode))
                 index += 2
@@ -369,16 +427,19 @@ class PDFParseBridge:
                 continue
 
             if next_line.lower() == "latex" and next_next_line and self._looks_like_formula_image_path(next_next_line) and self._looks_like_formula_payload(line):
+                previous_was_table_control_marker = False
                 display_mode = self._prefers_display_formula(line)
                 normalized_lines.append(self._wrap_formula_text(line, display_mode=display_mode))
                 index += 3
                 continue
 
             if self._looks_like_formula_payload(line):
+                previous_was_table_control_marker = False
                 normalized_lines.append(self._wrap_formula_text(line, display_mode=self._prefers_display_formula(line)))
                 index += 1
                 continue
 
+            previous_was_table_control_marker = False
             normalized_lines.append(line)
             index += 1
 
@@ -393,6 +454,101 @@ class PDFParseBridge:
             collapsed.append(line)
             previous_blank = False
         return "\n".join(collapsed).strip()
+
+    def _looks_like_table_control_marker(self, text: str) -> bool:
+        return str(text or "").strip().lower() in {"simple_table", "complex_table", "wireless_table"}
+
+    def _looks_like_pseudo_table_line(self, text: str) -> bool:
+        raw_candidate = str(text or "").strip()
+        candidate = raw_candidate.replace("∣", "|")
+        if "|" not in candidate:
+            return False
+        if "∣" not in raw_candidate and not re.search(r"\s\|\s", candidate):
+            return False
+        cells = [cell.strip() for cell in candidate.split("|")]
+        non_empty = [cell for cell in cells if cell]
+        return len(non_empty) >= 2
+
+    def _normalize_pseudo_table_line(self, text: str) -> str:
+        normalized = str(text or "").strip().replace("∣", "|")
+        cells = [cell.strip() for cell in normalized.split("|")]
+        formatted_cells = [self._normalize_pseudo_table_cell(cell) for cell in cells if cell.strip()]
+        return " | ".join(cell for cell in formatted_cells if cell).strip()
+
+    def _normalize_pseudo_table_cell(self, text: str) -> str:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return ""
+        if self._is_wrapped_formula(candidate):
+            return self._repair_wrapped_formula(candidate)
+        if "$" in candidate and candidate.count("$") >= 2:
+            return self._repair_inline_formula_fragments(candidate)
+        if self._looks_like_plain_numeric_cell(candidate):
+            return candidate
+        if self._looks_like_table_axis_label(candidate):
+            return re.sub(r"\s+", " ", candidate).strip()
+        if re.search(r"\\[A-Za-z]+", candidate) and re.search(r"[A-Za-zΑ-Ωα-ω\u4e00-\u9fff]", candidate):
+            return self._repair_inline_formula_fragments(candidate)
+        if self._looks_like_formula_payload(candidate):
+            return self._wrap_formula_text(candidate, display_mode=False)
+        return re.sub(r"\s+", " ", candidate).strip()
+
+    def _repair_inline_formula_fragments(self, text: str) -> str:
+        candidate = str(text or "").strip()
+        repaired = re.sub(
+            r"\$(.+?)\$",
+            lambda match: f"${self._repair_formula_spacing(match.group(1))}$",
+            candidate,
+        )
+        return re.sub(r"\s+", " ", repaired).strip()
+
+    def _repair_wrapped_formula(self, text: str) -> str:
+        candidate = str(text or "").strip()
+        if candidate.startswith("$$") and candidate.endswith("$$"):
+            return f"$${self._repair_formula_spacing(candidate[2:-2])}$$"
+        if candidate.startswith("$") and candidate.endswith("$") and candidate.count("$") >= 2:
+            return f"${self._repair_formula_spacing(candidate[1:-1])}$"
+        if candidate.startswith(r"\(") and candidate.endswith(r"\)"):
+            return rf"\({self._repair_formula_spacing(candidate[2:-2])}\)"
+        if candidate.startswith(r"\[") and candidate.endswith(r"\]"):
+            return rf"\[{self._repair_formula_spacing(candidate[2:-2])}\]"
+        return candidate
+
+    def _looks_like_table_axis_label(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate or re.search(r"\\[A-Za-z]+", candidate):
+            return False
+        return bool(
+            re.fullmatch(r"[A-Za-zΑ-Ωα-ω]\s*-\s*[A-Za-zΑ-Ωα-ω0-9/ ]+", candidate)
+            or re.fullmatch(r"[A-Za-zΑ-Ωα-ω0-9/()（）\s-]+", candidate) and len(candidate) <= 18 and "-" in candidate
+        )
+
+    def _looks_like_plain_numeric_cell(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        return bool(re.fullmatch(r"[+-]?\d+(?:\.\d+)?", candidate))
+
+    def _looks_like_axis_style_label(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate or re.search(r"[\u4e00-\u9fff]", candidate):
+            return False
+        if self._looks_like_formula_payload(candidate):
+            return False
+        if re.fullmatch(r"[A-Za-zΑ-Ωα-ω]", candidate):
+            return True
+        return len(candidate) <= 24 and bool(re.fullmatch(r"[A-Za-zΑ-Ωα-ω0-9/()（）\s-]+", candidate)) and (
+            "/" in candidate or "-" in candidate
+        )
+
+    def _normalize_axis_style_label(self, text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip()).strip()
+
+    def _looks_like_short_formula_expression(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate or re.search(r"[\u4e00-\u9fff]", candidate):
+            return False
+        if not any(operator in candidate for operator in ("+", "=", "−", "±")):
+            return False
+        return len(candidate) <= 32 and bool(re.fullmatch(r"[A-Za-zΑ-Ωα-ω0-9_{}\^+\-=±\s/().]+", candidate))
 
     def _wrap_formula_text(self, text: str, *, display_mode: bool) -> str:
         normalized = self._repair_formula_spacing(text)
@@ -417,7 +573,19 @@ class PDFParseBridge:
         normalized = re.sub(r"(?<=\d)\s+\^(?=\s*\{)", "^", normalized)
         normalized = re.sub(r"\^\{\s*-\s*(\d+)\s*\}", r"^{-\1}", normalized)
         normalized = re.sub(r"\^\{\s*(\d+)\s*\}", r"^{\1}", normalized)
-        normalized = re.sub(r"\\mathrm\{([^}]*)\}", lambda m: "\\mathrm{" + re.sub(r"\s+", "", m.group(1)) + "}", normalized)
+        normalized = re.sub(r"\\mathrm\{\{([^{}]+)\}\s*([^}]*)\}", r"\\mathrm{\1\2}", normalized)
+        normalized = re.sub(
+            r"\\mathrm\{([^}]*)\}",
+            lambda m: "\\mathrm{"
+            + re.sub(r"\s+", "", re.sub(r"\{([A-Za-z]+)\}", r"\1", m.group(1)))
+            + "}",
+            normalized,
+        )
+        normalized = re.sub(r"\\\\\s*\{\{\s*\\\s*\}\}\s*\\\\", r"\\\\", normalized)
+        if normalized.startswith(r"\mathrm{(") and normalized.count("(") > normalized.count(")"):
+            missing = normalized.count("(") - normalized.count(")")
+            if missing > 0 and normalized.endswith("}"):
+                normalized = normalized[:-1] + (")" * missing) + "}"
         normalized = re.sub(r"\\scriptscriptstyle\s+", r"\\scriptscriptstyle ", normalized)
         return normalized.strip()
 
@@ -576,15 +744,20 @@ class PDFParseBridge:
     def _build_structure_catalog(self, document: KnowledgeDocument, parsed_pdf: PDFParseResult) -> dict[str, Any]:
         resource_type = document.resource_type or ResourceType.KNOWLEDGE_NOTE.value
         if resource_type != ResourceType.TEXTBOOK.value:
-            return {"toc_pages": set(), "entries": [], "page_offset": None}
+            return {"toc_pages": set(), "entries": [], "page_offset": None, "page_headers": {}}
 
         page_texts: dict[int, list[str]] = {}
+        page_headers: dict[int, str] = {}
         for block in parsed_pdf.blocks:
             page_number = block.page_index + 1
             block_text = str(block.text or "").strip()
             if not block_text:
                 continue
             page_texts.setdefault(page_number, []).extend(line.strip() for line in block_text.splitlines() if line.strip())
+            if str(block.block_type or "") == "page_header":
+                heading_context = self.rag_service._extract_heading_context(block_text, resource_type)
+                if heading_context.get("chapter"):
+                    page_headers[page_number] = str(heading_context["chapter"])
 
         toc_pages = {
             page_number
@@ -604,7 +777,7 @@ class PDFParseBridge:
             for entry in entries:
                 entry["pdf_page"] = entry["printed_page"] + page_offset
 
-        return {"toc_pages": toc_pages, "entries": entries, "page_offset": page_offset}
+        return {"toc_pages": toc_pages, "entries": entries, "page_offset": page_offset, "page_headers": page_headers}
 
     def _looks_like_toc_page(self, lines: list[str], resource_type: str) -> bool:
         if any(line in {"目录", "目 录"} for line in lines):
@@ -717,8 +890,17 @@ class PDFParseBridge:
             for entry in structure_catalog.get("entries", [])
             if isinstance(entry.get("pdf_page"), int) and int(entry["pdf_page"]) <= page_number
         ]
+        page_headers = structure_catalog.get("page_headers", {})
         if not entries:
-            return None
+            page_header_chapter = page_headers.get(page_number)
+            if not page_header_chapter:
+                return None
+            return {
+                "chapter": str(page_header_chapter),
+                "section": None,
+                "structure_source": "page_header",
+                "structure_confidence": "medium",
+            }
         chapter: str | None = None
         section: str | None = None
         for entry in sorted(entries, key=lambda item: (int(item["pdf_page"]), 0 if item["kind"] == "chapter" else 1)):
@@ -727,12 +909,18 @@ class PDFParseBridge:
                 section = None
             else:
                 section = str(entry["title"])
+        structure_source = "toc_page_map"
+        if not chapter:
+            page_header_chapter = page_headers.get(page_number)
+            if page_header_chapter:
+                chapter = str(page_header_chapter)
+                structure_source = "page_header"
         if not chapter and not section:
             return None
         return {
             "chapter": chapter,
             "section": section,
-            "structure_source": "toc_page_map",
+            "structure_source": structure_source,
             "structure_confidence": "medium",
         }
 

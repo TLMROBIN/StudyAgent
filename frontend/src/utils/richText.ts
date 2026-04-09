@@ -6,6 +6,8 @@ type Segment =
   | { type: 'math'; content: string; displayMode: boolean }
   | { type: 'code'; content: string; language: string }
 
+type MathSegment = Extract<Segment, { type: 'text' | 'math' }>
+
 const MATH_PLACEHOLDER_PREFIX = '\uE000'
 const MATH_PLACEHOLDER_SUFFIX = '\uE001'
 const INLINE_PLACEHOLDER_PREFIX = '\uE010'
@@ -84,8 +86,8 @@ function splitCodeSegments(text: string): Segment[] {
   return segments
 }
 
-function splitMathSegments(text: string): Segment[] {
-  const segments: Segment[] = []
+function splitMathSegments(text: string): MathSegment[] {
+  const segments: MathSegment[] = []
   let cursor = 0
   let plainStart = 0
 
@@ -145,13 +147,23 @@ function renderTextSegment(text: string): string {
   return escapeHtml(text).replace(/\n/g, '<br>')
 }
 
+function renderMathFallback(content: string, displayMode: boolean): string {
+  const tag = displayMode ? 'div' : 'span'
+  return `<${tag} class="message-math-fallback">${escapeHtml(content)}</${tag}>`
+}
+
 function renderMathSegment(content: string, displayMode: boolean): string {
-  return katex.renderToString(content, {
-    displayMode,
-    throwOnError: false,
-    strict: 'ignore',
-    output: 'html',
-  })
+  try {
+    const html = katex.renderToString(content, {
+      displayMode,
+      throwOnError: false,
+      strict: 'ignore',
+      output: 'html',
+    })
+    return html.includes('katex-error') ? renderMathFallback(content, displayMode) : html
+  } catch {
+    return renderMathFallback(content, displayMode)
+  }
 }
 
 function renderCodeSegment(content: string, language: string): string {

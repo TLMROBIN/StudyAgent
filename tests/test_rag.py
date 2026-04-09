@@ -499,9 +499,116 @@ def test_extract_heading_context_supports_compact_textbook_titles_and_single_lev
 
     chapter = rag_service._extract_heading_context("第一章运动的描述", ResourceType.TEXTBOOK.value)
     section = rag_service._extract_heading_context("1.质点参考系", ResourceType.TEXTBOOK.value)
+    textbook_section = rag_service._extract_heading_context("第三节 加速度和力的关系", ResourceType.TEXTBOOK.value)
 
     assert chapter == {"chapter": "第一章运动的描述", "section": None}
     assert section == {"chapter": None, "section": "1.质点参考系"}
+    assert textbook_section == {"chapter": None, "section": "第三节 加速度和力的关系"}
+
+
+def test_pdf_bridge_keeps_textbook_chapter_anchor_for_section_titles(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=57,
+        subject="物理",
+        filename="textbook-chapter-section.pdf",
+        file_path=str(tmp_path / "textbook-chapter-section.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+        tags_json=["教材"],
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "目录\n第三章 运动定律 ........ 74\n第三节 加速度和力的关系 ........ 79\n"
+            "第三节 加速度和力的关系\n质量一定时加速度和力的关系是怎样的呢？"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="目录"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第三章 运动定律 ........ 74"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第三节 加速度和力的关系 ........ 79"),
+            PDFBlock(page_index=78, block_type="title", text="第三节 加速度和力的关系"),
+            PDFBlock(page_index=78, block_type="paragraph", text="质量一定时加速度和力的关系是怎样的呢？"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+
+    assert len(chunks) == 1
+    metadata = chunks[0].metadata
+    assert metadata["chapter"] == "第三章 运动定律"
+    assert metadata["section"] == "第三节 加速度和力的关系"
+    assert metadata["structure_path"] == ["第三章 运动定律", "第三节 加速度和力的关系"]
+
+
+def test_pdf_bridge_uses_page_header_chapter_context_before_late_page_header_block(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=58,
+        subject="物理",
+        filename="page-header-chapter.pdf",
+        file_path=str(tmp_path / "page-header-chapter.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+        tags_json=["教材"],
+    )
+    parsed_pdf = PDFParseResult(
+        text="第三节 加速度和力的关系\n质量一定时加速度和力的关系是怎样的呢？\n第三章 运动定律",
+        blocks=[
+            PDFBlock(page_index=79, block_type="title", text="第三节 加速度和力的关系"),
+            PDFBlock(page_index=79, block_type="paragraph", text="质量一定时加速度和力的关系是怎样的呢？"),
+            PDFBlock(page_index=79, block_type="page_header", text="第三章 运动定律"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+
+    assert len(chunks) == 1
+    metadata = chunks[0].metadata
+    assert metadata["chapter"] == "第三章 运动定律"
+    assert metadata["section"] == "第三节 加速度和力的关系"
+    assert metadata["structure_source"] in {"page_header", "body_heading"}
+
+
+def test_pdf_bridge_clears_stale_section_when_page_header_switches_chapter(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=61,
+        subject="物理",
+        filename="page-header-chapter-switch.pdf",
+        file_path=str(tmp_path / "page-header-chapter-switch.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+        tags_json=["教材"],
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "目录\n第三章 运动定律 ........ 79\n第二节 旧章节 ........ 80\n第四章 曲线运动 ........ 81\n"
+            "第二节 旧章节\n上一页正文\n第四章 曲线运动\n本页正文"
+        ),
+        blocks=[
+            PDFBlock(page_index=0, block_type="title", text="目录"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第三章 运动定律 ........ 79"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第二节 旧章节 ........ 80"),
+            PDFBlock(page_index=0, block_type="paragraph", text="第四章 曲线运动 ........ 81"),
+            PDFBlock(page_index=79, block_type="title", text="第二节 旧章节"),
+            PDFBlock(page_index=79, block_type="paragraph", text="上一页正文"),
+            PDFBlock(page_index=80, block_type="page_header", text="第四章 曲线运动"),
+            PDFBlock(page_index=80, block_type="paragraph", text="本页正文"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    switched_chunk = next(chunk for chunk in chunks if "本页正文" in chunk.content)
+
+    assert switched_chunk.metadata["chapter"] == "第四章 曲线运动"
+    assert switched_chunk.metadata["section"] is None
+    assert switched_chunk.metadata["structure_source"] in {"page_header", "body_heading"}
 
 
 def test_extract_heading_context_rejects_sentence_like_textbook_steps(tmp_path):
@@ -749,6 +856,227 @@ def test_pdf_bridge_normalizes_equation_inline_into_renderable_latex(tmp_path):
     assert "\\frac{" in combined
 
 
+def test_pdf_bridge_normalizes_simple_table_rows_without_leaking_control_markers(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=59,
+        subject="物理",
+        filename="formula-simple-table.pdf",
+        file_path=str(tmp_path / "formula-simple-table.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "<table><tr><td>F</td><td>a</td></tr>"
+            "<tr><td>(kgf)</td><td> $\\left( \\mathrm { m } / \\mathrm { s } ^ { 2 } \\right)$ </td></tr>"
+            "<tr><td>0.020</td><td>0.193</td></tr></table>\n"
+            "simple_table\n1"
+        ),
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="table",
+                text=(
+                    "<table><tr><td>F</td><td>a</td></tr>"
+                    "<tr><td>(kgf)</td><td> $\\left( \\mathrm { m } / \\mathrm { s } ^ { 2 } \\right)$ </td></tr>"
+                    "<tr><td>0.020</td><td>0.193</td></tr></table>\n"
+                    "simple_table\n1"
+                ),
+                metadata={"table_type": "simple_table"},
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "simple_table" not in combined
+    assert "\n1\n" not in f"\n{combined}\n"
+    assert "F | a" in combined
+    assert "(kgf) | $" in combined
+    assert "0.020 | 0.193" in combined
+    assert "$0.020 | 0.193$" not in combined
+
+
+def test_pdf_bridge_repairs_sparse_simple_table_rows_and_mixed_formula_headers(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=64,
+        subject="物理",
+        filename="sparse-simple-table.pdf",
+        file_path=str(tmp_path / "sparse-simple-table.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text=(
+            "<table><tr><td>汽车型号</td><td>初速度  $v _ { 0 }$   $\\left( \\mathrm { { k m } / h } \\right)$ </td>"
+            "<td>末速度  $v _ { t }$   $\\left( \\mathrm { { k m } / h } \\right)$ </td>"
+            "<td>时间t加速度α (s)  $\\left( \\mathrm { m } / \\mathrm { s } ^ { 2 } \\right)$ </td></tr>"
+            "<tr><td>某型号高级轿车</td><td>20</td><td>50 7</td><td></td></tr></table>"
+        ),
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="table",
+                text=(
+                    "<table><tr><td>汽车型号</td><td>初速度  $v _ { 0 }$   $\\left( \\mathrm { { k m } / h } \\right)$ </td>"
+                    "<td>末速度  $v _ { t }$   $\\left( \\mathrm { { k m } / h } \\right)$ </td>"
+                    "<td>时间t加速度α (s)  $\\left( \\mathrm { m } / \\mathrm { s } ^ { 2 } \\right)$ </td></tr>"
+                    "<tr><td>某型号高级轿车</td><td>20</td><td>50 7</td><td></td></tr></table>"
+                ),
+                metadata={"table_type": "simple_table"},
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "汽车型号 | 初速度 $v_{0}$ $\\left( \\mathrm{km/h} \\right)$" in combined
+    assert "末速度 $v_{t}$ $\\left( \\mathrm{km/h} \\right)$" in combined
+    assert "某型号高级轿车 | 20 | 50 | 7" in combined
+
+
+def test_pdf_bridge_does_not_treat_conditional_probability_as_pseudo_table(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=62,
+        subject="数学",
+        filename="probability.pdf",
+        file_path=str(tmp_path / "probability.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text=r"P(A|B) = \frac{P(A\cap B)}{P(B)}",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text=r"P(A|B) = \frac{P(A\cap B)}{P(B)}"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert r"P(A|B)" in combined
+    assert "P(A |" not in combined
+
+
+def test_pdf_bridge_does_not_treat_absolute_value_as_pseudo_table(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=63,
+        subject="数学",
+        filename="absolute-value.pdf",
+        file_path=str(tmp_path / "absolute-value.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="|a|=1",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="|a|=1"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "|a|=1" in combined
+    assert "a |" not in combined
+
+
+def test_pdf_bridge_wraps_equation_inline_short_formula_expression(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=65,
+        subject="物理",
+        filename="short-formula-expression.pdf",
+        file_path=str(tmp_path / "short-formula-expression.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="equation_inline\nG + m a",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="equation_inline\nG + m a"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" not in combined
+    assert "$G + m a$" in combined
+
+
+def test_pdf_bridge_removes_empty_array_row_artifacts(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=66,
+        subject="物理",
+        filename="array-empty-row.pdf",
+        file_path=str(tmp_path / "array-empty-row.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="\\begin{array}{l}{{v_{t} = v_{0} - g t}} \\\\ {{\\}} \\\\ {{s = v_{0} t - {\\frac{1}{2}} g t^{2}}} \\end{array}",
+        blocks=[
+            PDFBlock(
+                page_index=0,
+                block_type="paragraph",
+                text="\\begin{array}{l}{{v_{t} = v_{0} - g t}} \\\\ {{\\}} \\\\ {{s = v_{0} t - {\\frac{1}{2}} g t^{2}}} \\end{array}",
+            )
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "{{\\}}" not in combined
+    assert "$$\\begin{array}{l}" in combined
+    assert "s = v_{0} t - {\\frac{1}{2}} g t^{2}" in combined
+
+
+def test_pdf_bridge_balances_unclosed_parenthesized_unit_formula(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=67,
+        subject="物理",
+        filename="unit-balance.pdf",
+        file_path=str(tmp_path / "unit-balance.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="equation_inline\n\\mathrm { ( k g \\cdot m / s ^ { 2 } }",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="equation_inline\n\\mathrm { ( k g \\cdot m / s ^ { 2 } }"),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "$\\mathrm{(kg\\cdotm/s^{2})}$" in combined
+
+
 def test_pdf_bridge_wraps_raw_latex_without_existing_delimiters(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
@@ -983,6 +1311,33 @@ def test_pdf_bridge_drops_equation_inline_marker_for_symbolic_segment_labels(tmp
     assert "equation_inline" not in combined
     assert "\na P\n" in f"\n{combined}\n"
     assert "$a P$" not in combined
+
+
+def test_pdf_bridge_drops_equation_inline_marker_for_axis_style_labels(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=60,
+        subject="物理",
+        filename="formula-axis-label.pdf",
+        file_path=str(tmp_path / "formula-axis-label.pdf"),
+        mime_type="application/pdf",
+        size_bytes=256,
+        resource_type=ResourceType.TEXTBOOK.value,
+    )
+    parsed_pdf = PDFParseResult(
+        text="根据实验数据作出\nequation_inline\na - 1 / m\n图象.",
+        blocks=[
+            PDFBlock(page_index=0, block_type="paragraph", text="根据实验数据作出\nequation_inline\na - 1 / m\n图象."),
+        ],
+        parser_backend="pipeline",
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, parsed_pdf.text, parsed_pdf=parsed_pdf)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "equation_inline" not in combined
+    assert "\na - 1 / m\n" in f"\n{combined}\n"
+    assert "$a - 1 / m$" not in combined
 
 
 def test_pdf_bridge_preserves_uncertain_formula_like_text_when_signal_is_weak(tmp_path):

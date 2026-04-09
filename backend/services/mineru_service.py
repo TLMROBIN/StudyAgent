@@ -243,7 +243,12 @@ class MineruService:
             text=text.strip(),
             level=int(level) if isinstance(level, int) else None,
             asset_id=asset_id,
-            metadata={"raw_type": block_type, "content_roles": content_roles},
+            metadata={
+                "raw_type": block_type,
+                "content_roles": content_roles,
+                "table_type": content.get("table_type") if isinstance(content, dict) else None,
+                "table_nest_level": content.get("table_nest_level") if isinstance(content, dict) else None,
+            },
         )
 
     def _content_roles(self, content: Any) -> list[str]:
@@ -260,8 +265,12 @@ class MineruService:
             "algorithm_caption",
             "algorithm_content",
             "algorithm_footnote",
+            "chart_caption",
+            "chart_footnote",
             "list_items",
+            "page_header_content",
             "page_footer_content",
+            "page_number_content",
         ]
         roles: list[str] = []
         for key in ordered_keys:
@@ -283,6 +292,18 @@ class MineruService:
         if isinstance(value, dict):
             if value.get("type") == "text":
                 return str(value.get("content") or "").strip()
+            item_type = str(value.get("type") or "").strip().lower()
+            if item_type in {"equation_inline", "inline_equation"}:
+                payload = str(value.get("content") or "").strip()
+                return f"equation_inline\n{payload}".strip() if payload else "equation_inline"
+            if item_type in {"equation_interline", "interline_equation"}:
+                payload = str(value.get("content") or "").strip()
+                return f"equation_display\n{payload}".strip() if payload else "equation_display"
+            if value.get("math_content"):
+                payload = str(value.get("math_content") or "").strip()
+                return f"equation_display\n{payload}".strip() if payload else ""
+            if value.get("html"):
+                return str(value.get("html") or "").strip()
             ordered_keys = [
                 "title_content",
                 "paragraph_content",
@@ -294,8 +315,12 @@ class MineruService:
                 "algorithm_caption",
                 "algorithm_content",
                 "algorithm_footnote",
+                "chart_caption",
+                "chart_footnote",
                 "list_items",
+                "page_header_content",
                 "page_footer_content",
+                "page_number_content",
             ]
             parts = [self._flatten_content(value.get(key)) for key in ordered_keys if key in value]
             if not any(parts):

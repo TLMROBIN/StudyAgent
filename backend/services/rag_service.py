@@ -34,13 +34,14 @@ CHAPTER_AWARE_RESOURCE_TYPES = {
     ResourceType.QUESTION_SET.value,
 }
 CHAPTER_HEADING_PATTERNS = [
-    re.compile(r"^(第[一二三四五六七八九十百零两0-9]+[章节单元编部分课])(?:\s*[-—－:：]?\s*\S.*)?$"),
+    re.compile(r"^(第[一二三四五六七八九十百零两0-9]+(?:章|单元|编|部分))(?:\s*[-—－:：]?\s*\S.*)?$"),
     re.compile(r"^(专题[一二三四五六七八九十百零两0-9]+.*)$"),
     re.compile(r"^(Unit\s+\d+.*)$", re.IGNORECASE),
 ]
 DECIMAL_SECTION_HEADING_PATTERN = re.compile(r"^[0-9]{1,2}(?:\.[0-9]{1,2})+\s*\S.*$")
 GENERIC_SINGLE_LEVEL_SECTION_PATTERN = re.compile(r"^[0-9]{1,2}[.．、]\s*\S.*$")
 SECTION_HEADING_PATTERNS = [
+    re.compile(r"^(第[一二三四五六七八九十百零两0-9]+(?:节|课))(?:\s*[-—－:：]?\s*\S.*)?$"),
     DECIMAL_SECTION_HEADING_PATTERN,
     GENERIC_SINGLE_LEVEL_SECTION_PATTERN,
     re.compile(r"^[（(][一二三四五六七八九十百零两0-9]+[)）]\s*\S.*$"),
