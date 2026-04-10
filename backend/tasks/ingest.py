@@ -29,7 +29,8 @@ from backend.tasks.celery_app import celery_app
 settings = get_settings()
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
 RETRIABLE_INGEST_EXCEPTIONS = (MineruStartupError, MineruTransientIOError)
-PDF_QUEUE_WAITING_MESSAGE = "PDF 导入排队中，等待前序任务完成"
+PDF_QUEUE_WAITING_MESSAGE = "排队中，等待前一条任务处理完成"
+LEGACY_PDF_QUEUE_WAITING_MESSAGE = "PDF 导入排队中，等待前序任务完成"
 TASK_CREATED_MESSAGE = "任务已创建，等待分配 worker"
 LOCAL_TASK_CREATED_MESSAGE = "任务已创建，等待本地处理"
 STALE_PENDING_TASK_SECONDS = max(30, settings.ingest_poll_interval_seconds * 10)
@@ -37,6 +38,11 @@ STALE_PENDING_TASK_SECONDS = max(30, settings.ingest_poll_interval_seconds * 10)
 
 def _build_extraction_message(extracted: ExtractionResult) -> str:
     return f"文本提取完成，共 {len(extracted.text.strip())} 个字符"
+
+
+def is_pdf_queue_waiting_message(message: str | None) -> bool:
+    normalized = str(message or "").strip()
+    return normalized in {PDF_QUEUE_WAITING_MESSAGE, LEGACY_PDF_QUEUE_WAITING_MESSAGE}
 
 
 def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_pdf: PDFParseResult | None = None) -> str:

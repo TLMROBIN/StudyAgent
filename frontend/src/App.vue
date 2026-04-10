@@ -30,9 +30,11 @@ const showShell = computed(() => route.path !== '/login')
 const shellActive = computed(() => showShell.value && !!auth.user)
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
 const navigationItems = computed<NavigationItem[]>(() => {
-  const items: NavigationItem[] = [
-    { to: '/student', label: '学生答疑', shortLabel: '答疑' },
-  ]
+  const items: NavigationItem[] = []
+
+  if (auth.user?.role === 'student') {
+    items.push({ to: '/student', label: '学生答疑', shortLabel: '答疑' })
+  }
 
   if (auth.user?.role !== 'student') {
     items.push(

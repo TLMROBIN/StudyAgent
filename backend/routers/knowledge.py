@@ -21,7 +21,7 @@ from backend.models.schemas import (
 from backend.services.audit_service import audit_service
 from backend.services.rag_service import rag_service
 from backend.tasks.celery_app import celery_app
-from backend.tasks.ingest import dispatch_import_task, dispatch_next_pdf_task, sync_task_state
+from backend.tasks.ingest import dispatch_import_task, dispatch_next_pdf_task, is_pdf_queue_waiting_message, sync_task_state
 from backend.time_utils import now_beijing
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -404,7 +404,7 @@ def cancel_task(task_id: int, db: DbSession, current_user: CurrentTeacher) -> Im
         task.document is not None
         and str(task.document.mime_type or "").lower() == "application/pdf"
         and task.status == DocumentStatus.PENDING
-        and task.error_message == "PDF 导入排队中，等待前序任务完成"
+        and is_pdf_queue_waiting_message(task.error_message)
     )
     task.status = DocumentStatus.CANCELLED
     task.error_message = "已请求取消任务"

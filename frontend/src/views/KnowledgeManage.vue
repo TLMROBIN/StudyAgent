@@ -343,6 +343,9 @@ function friendlyImportMessage(value?: string | null) {
   if (!normalized) {
     return '-'
   }
+  if (normalized.includes('排队中') && normalized.includes('等待')) {
+    return '排队中，等待前一条任务处理完成。'
+  }
   if (
     normalized.startsWith('任务已创建')
     || normalized.startsWith('开始解析文件')
@@ -385,6 +388,9 @@ function friendlyImportMessage(value?: string | null) {
 
 function hasTechnicalImportDetail(value?: string | null) {
   const normalized = value?.trim()
+  if (normalized?.includes('排队中') && normalized.includes('等待')) {
+    return false
+  }
   return Boolean(normalized && friendlyImportMessage(normalized) !== normalized)
 }
 

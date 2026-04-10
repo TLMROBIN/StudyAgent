@@ -3,11 +3,14 @@ import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.database import Base
+from backend.database import Base, get_db
+from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.conversation import GuidanceStage, Message, MessageRole
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
@@ -78,6 +81,25 @@ def _create_user(session_factory, *, role: UserRole, grade: int | None = None) -
 
 def _create_student(session_factory) -> User:
     return _create_user(session_factory, role=UserRole.STUDENT)
+
+
+def _build_chat_test_client(session_factory, current_user: User):
+    app = FastAPI()
+    app.include_router(chat_router.router)
+
+    def override_db():
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def override_current_user():
+        return current_user
+
+    app.dependency_overrides[get_current_user] = override_current_user
+    app.dependency_overrides[get_db] = override_db
+    return TestClient(app)
 
 
 async def _read_streaming_response(response) -> str:
@@ -241,6 +263,29 @@ def test_chat_stream_allows_students_marked_for_password_change(monkeypatch):
         assert events[-1][1]["content"] == "先看磁场方向。"
     finally:
         session.close()
+
+
+def test_chat_stream_allows_admin_user_via_http(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.ADMIN)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先从题干条件入手。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post("/api/chat/stream", json={"subject": "数学", "message": "管理员试问一道题"})
+
+    assert response.status_code == 200
+    assert "Insufficient permissions" not in response.text
+    assert "先从题干条件入手。" in response.text
 
 
 def test_chat_stream_replays_completed_request_id(monkeypatch):

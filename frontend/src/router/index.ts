@@ -16,7 +16,7 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: '/student' },
     { path: '/login', component: Login, meta: { public: true } },
-    { path: '/student', component: StudentChat, meta: { requiresAuth: true } },
+    { path: '/student', component: StudentChat, meta: { requiresAuth: true, roles: ['student'] } },
     { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/knowledge', component: KnowledgeManage, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/audit', component: AuditLogs, meta: { requiresAuth: true, roles: ['admin'] } },

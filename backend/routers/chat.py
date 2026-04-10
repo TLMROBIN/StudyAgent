@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.database import SessionLocal
-from backend.dependencies import CurrentStudent, CurrentUser, DbSession
+from backend.dependencies import CurrentUser, DbSession
 from backend.models.agent_config import AgentConfig
 from backend.models.conversation import Conversation, Message, MessageRole
 from backend.models.schemas import ChatRequest, ConversationRead, QuestionRecommendationRead, QuestionRecommendationRequest, ResolveConversationRequest
@@ -191,7 +191,7 @@ def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -
 
 
 @router.get("/history", response_model=list[ConversationRead])
-def list_conversations(db: DbSession, current_user: CurrentStudent) -> list[ConversationRead]:
+def list_conversations(db: DbSession, current_user: CurrentUser) -> list[ConversationRead]:
     conversations = db.scalars(
         select(Conversation)
         .options(selectinload(Conversation.messages))
@@ -202,7 +202,7 @@ def list_conversations(db: DbSession, current_user: CurrentStudent) -> list[Conv
 
 
 @router.get("/history/{conversation_id}", response_model=ConversationRead)
-def get_conversation(conversation_id: int, db: DbSession, current_user: CurrentStudent) -> ConversationRead:
+def get_conversation(conversation_id: int, db: DbSession, current_user: CurrentUser) -> ConversationRead:
     conversation = db.scalar(
         select(Conversation)
         .options(selectinload(Conversation.messages))
@@ -218,7 +218,7 @@ def resolve_conversation(
     conversation_id: int,
     payload: ResolveConversationRequest,
     db: DbSession,
-    current_user: CurrentStudent,
+    current_user: CurrentUser,
 ) -> ConversationRead:
     conversation = db.scalar(
         select(Conversation).where(Conversation.id == conversation_id, Conversation.student_id == current_user.id)
@@ -255,7 +255,7 @@ def recommend_questions(
 
 
 @router.post("/stream")
-async def stream_chat(payload: ChatRequest, db: DbSession, current_user: CurrentStudent, request: Request):
+async def stream_chat(payload: ChatRequest, db: DbSession, current_user: CurrentUser, request: Request):
     started = perf_counter()
     chat_request_total.inc()
     decision = filter_service.check_question(payload.message, payload.subject)

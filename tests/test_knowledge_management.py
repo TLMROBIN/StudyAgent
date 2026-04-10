@@ -16,6 +16,7 @@ from backend.routers import knowledge as knowledge_router
 from backend.services.embed_service import EmbedService
 from backend.services.rag_service import RagService
 from backend.services.vector_store_service import VectorStoreService
+from backend.tasks.ingest import LEGACY_PDF_QUEUE_WAITING_MESSAGE, PDF_QUEUE_WAITING_MESSAGE
 
 
 def build_session():
@@ -176,7 +177,7 @@ def test_cancel_waiting_pdf_task_promotes_next_pending_pdf(monkeypatch):
             document_id=document.id,
             status=DocumentStatus.PENDING,
             progress=0,
-            error_message="PDF 导入排队中，等待前序任务完成",
+            error_message=PDF_QUEUE_WAITING_MESSAGE,
         )
         session.add(task)
         session.commit()
@@ -215,7 +216,7 @@ def test_list_tasks_promotes_waiting_pdf_queue(monkeypatch):
             document_id=document.id,
             status=DocumentStatus.PENDING,
             progress=0,
-            error_message="PDF 导入排队中，等待前序任务完成",
+            error_message=PDF_QUEUE_WAITING_MESSAGE,
         )
         session.add(task)
         session.commit()
@@ -227,6 +228,45 @@ def test_list_tasks_promotes_waiting_pdf_queue(monkeypatch):
         result = knowledge_router.list_tasks(db=session, current_user=teacher)
 
         assert result
+        assert promoted == [True]
+    finally:
+        session.close()
+
+
+def test_cancel_waiting_pdf_task_accepts_legacy_queue_message(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="queued.pdf",
+            file_path="/tmp/queued.pdf",
+            mime_type="application/pdf",
+            size_bytes=64,
+            status=DocumentStatus.PENDING,
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        task = ImportTask(
+            document_id=document.id,
+            status=DocumentStatus.PENDING,
+            progress=0,
+            error_message=LEGACY_PDF_QUEUE_WAITING_MESSAGE,
+        )
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+        promoted: list[bool] = []
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: promoted.append(True) or None)
+
+        result = knowledge_router.cancel_task(task.id, db=session, current_user=teacher)
+
+        assert result.status == DocumentStatus.CANCELLED
         assert promoted == [True]
     finally:
         session.close()
