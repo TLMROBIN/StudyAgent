@@ -9,13 +9,59 @@ from sqlalchemy.orm import selectinload
 
 from backend.dependencies import CurrentAdmin, DbSession
 from backend.models.audit_log import AuditLog
-from backend.models.schemas import AuditLogRead, PasswordResetRequest, StudentImportIssue, StudentImportResult, UserCreate, UserRead
+from backend.models.schemas import (
+    AuditLogRead,
+    PasswordResetRequest,
+    UserCreate,
+    UserImportIssue,
+    UserImportResult,
+    UserRead,
+    UserUpdate,
+)
 from backend.models.user import Classroom, User, UserRole
 from backend.security import get_password_hash
+from backend.services.account_service import build_default_password, build_generated_username
 from backend.services.audit_service import audit_service
 from backend.services.auth_service import auth_service
+from backend.services.student_grade_service import student_grade_service
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+MANAGED_USER_ROLES = {UserRole.STUDENT, UserRole.TEACHER}
+
+
+def _normalized_classroom_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _parse_managed_role(value: str | UserRole | None) -> UserRole | None:
+    if isinstance(value, UserRole):
+        return value if value in MANAGED_USER_ROLES else None
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "student": UserRole.STUDENT,
+        "学生": UserRole.STUDENT,
+        "teacher": UserRole.TEACHER,
+        "教师": UserRole.TEACHER,
+    }
+    return mapping.get(normalized)
+
+
+def _validate_managed_user_fields(role: UserRole, *, grade: int | None, classroom_name: str | None, is_graduated: bool) -> None:
+    if role not in MANAGED_USER_ROLES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only student and teacher accounts can be managed here")
+
+    if role == UserRole.STUDENT:
+        if grade not in {1, 2, 3} and not is_graduated:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student grade must be 高一/高二/高三 or 毕业")
+        if not classroom_name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student classroom is required")
+        return
+
+    if grade is not None or classroom_name is not None or is_graduated:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Teacher accounts do not use grade/classroom fields")
 
 
 def _get_or_create_classroom(db: DbSession, grade: int | None, classroom_name: str | None) -> Classroom | None:
@@ -31,6 +77,60 @@ def _get_or_create_classroom(db: DbSession, grade: int | None, classroom_name: s
     return classroom
 
 
+def _ensure_generated_username_available(db: DbSession, username: str, *, exclude_user_id: int | None = None) -> None:
+    statement = select(User).where(User.username == username)
+    if exclude_user_id is not None:
+        statement = statement.where(User.id != exclude_user_id)
+    if db.scalar(statement.limit(1)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Generated username already exists: {username}")
+
+
+def _apply_managed_user_payload(
+    db: DbSession,
+    user: User,
+    *,
+    full_name: str,
+    role: UserRole,
+    grade: int | None,
+    classroom_name: str | None,
+    is_graduated: bool,
+    is_active: bool | None = None,
+    exclude_user_id: int | None = None,
+) -> None:
+    normalized_name = full_name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Full name is required")
+    normalized_classroom_name = _normalized_classroom_name(classroom_name)
+    _validate_managed_user_fields(
+        role,
+        grade=grade,
+        classroom_name=normalized_classroom_name,
+        is_graduated=is_graduated,
+    )
+
+    if role == UserRole.STUDENT:
+        classroom = _get_or_create_classroom(db, grade, normalized_classroom_name)
+        username = build_generated_username(normalized_name, role, normalized_classroom_name)
+        student_grade_service.apply_manual_grade_state(user, grade=grade, is_graduated=is_graduated)
+        user.classroom_id = classroom.id if classroom else None
+        user.must_change_password = True
+    else:
+        username = build_generated_username(normalized_name, role)
+        user.grade = None
+        user.graduated_at = None
+        user.last_grade_promotion_year = None
+        user.classroom_id = None
+        user.must_change_password = False
+
+    _ensure_generated_username_available(db, username, exclude_user_id=exclude_user_id)
+    user.username = username
+    user.student_no = None
+    user.full_name = normalized_name
+    user.role = role
+    if is_active is not None:
+        user.is_active = is_active
+
+
 @router.get("/users", response_model=list[UserRead])
 def list_users(db: DbSession, current_user: CurrentAdmin) -> list[UserRead]:
     users = db.scalars(select(User).order_by(User.created_at.desc())).all()
@@ -39,19 +139,27 @@ def list_users(db: DbSession, current_user: CurrentAdmin) -> list[UserRead]:
 
 @router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 def create_user(payload: UserCreate, db: DbSession, current_user: CurrentAdmin, request: Request) -> UserRead:
-    existing = db.scalar(select(User).where(User.username == payload.username).limit(1))
-    if existing:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
+    role = _parse_managed_role(payload.role)
+    if role is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only student and teacher accounts can be created here")
 
     user = User(
-        username=payload.username,
-        student_no=payload.student_no,
+        username="pending",
+        student_no=None,
+        full_name=payload.full_name.strip(),
+        role=role,
+        password_hash=get_password_hash(build_default_password(payload.full_name)),
+        classroom_id=None,
+        must_change_password=role == UserRole.STUDENT,
+    )
+    _apply_managed_user_payload(
+        db,
+        user,
         full_name=payload.full_name,
-        role=payload.role,
-        password_hash=get_password_hash(payload.password),
+        role=role,
         grade=payload.grade,
-        classroom_id=payload.classroom_id,
-        must_change_password=payload.role == UserRole.STUDENT,
+        classroom_name=payload.classroom_name,
+        is_graduated=payload.is_graduated,
     )
     db.add(user)
     db.commit()
@@ -69,13 +177,90 @@ def create_user(payload: UserCreate, db: DbSession, current_user: CurrentAdmin, 
     return UserRead.model_validate(user)
 
 
+@router.put("/users/{user_id}", response_model=UserRead)
+def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> UserRead:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.role == UserRole.ADMIN:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admin account cannot be edited here")
+
+    role = _parse_managed_role(payload.role)
+    if role is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only student and teacher accounts can be edited here")
+
+    _apply_managed_user_payload(
+        db,
+        user,
+        full_name=payload.full_name,
+        role=role,
+        grade=payload.grade,
+        classroom_name=payload.classroom_name,
+        is_graduated=payload.is_graduated,
+        is_active=payload.is_active,
+        exclude_user_id=user_id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="update_user",
+        target_type="user",
+        target_id=str(user.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={
+            "username": user.username,
+            "role": user.role.value,
+            "grade": user.grade,
+            "classroom_name": user.classroom_name,
+            "is_active": user.is_active,
+        },
+    )
+    return UserRead.model_validate(user)
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: int, db: DbSession, current_user: CurrentAdmin, request: Request) -> dict[str, str]:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete current admin account")
+    if user.role == UserRole.ADMIN:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admin account cannot be deleted here")
+
+    username = user.username
+    db.delete(user)
+    db.commit()
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="delete_user",
+        target_type="user",
+        target_id=str(user_id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"username": username},
+    )
+    return {"status": "ok"}
+
+
 @router.post("/users/reset-password", response_model=UserRead)
 def reset_password(payload: PasswordResetRequest, db: DbSession, current_user: CurrentAdmin, request: Request) -> UserRead:
     user = db.get(User, payload.user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    updated = auth_service.update_password(db, user, payload.new_password)
-    updated.must_change_password = True
+    updated = auth_service.update_password(db, user, build_default_password(user.full_name))
+    updated.must_change_password = updated.role == UserRole.STUDENT
     db.add(updated)
     db.commit()
     db.refresh(updated)
@@ -92,21 +277,12 @@ def reset_password(payload: PasswordResetRequest, db: DbSession, current_user: C
     return UserRead.model_validate(updated)
 
 
-@router.post("/students/import", response_model=StudentImportResult)
-async def import_students(
-    file: UploadFile = File(...),
-    db: DbSession = None,
-    current_user: CurrentAdmin = None,
-    request: Request = None,
-) -> StudentImportResult:
-    suffix = (file.filename or "").lower().rsplit(".", 1)[-1]
-    content = await file.read()
-    rows: list[dict[str, str]] = []
-
+def _parse_import_rows(file_name: str, content: bytes) -> list[dict[str, str]]:
+    suffix = (file_name or "").lower().rsplit(".", 1)[-1]
     if suffix == "csv":
         reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
-        rows = [dict(row) for row in reader]
-    elif suffix == "xlsx":
+        return [dict(row) for row in reader]
+    if suffix == "xlsx":
         try:
             from openpyxl import load_workbook
         except ImportError as exc:
@@ -115,52 +291,81 @@ async def import_students(
         workbook = load_workbook(io.BytesIO(content))
         sheet = workbook.active
         headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            rows.append({headers[index]: str(value).strip() if value is not None else "" for index, value in enumerate(row)})
-    else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only csv/xlsx supported")
+        return [{headers[index]: str(value).strip() if value is not None else "" for index, value in enumerate(row)} for row in sheet.iter_rows(min_row=2, values_only=True)]
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only csv/xlsx supported")
 
+
+def _import_users(file_name: str, content: bytes, db: DbSession, current_user: CurrentAdmin, request: Request | None) -> UserImportResult:
+    rows = _parse_import_rows(file_name, content)
     created = 0
     skipped_existing = 0
     invalid = 0
-    issues: list[StudentImportIssue] = []
-    seen_student_nos: set[str] = set()
+    issues: list[UserImportIssue] = []
+    seen_usernames: set[str] = set()
 
     for index, row in enumerate(rows, start=2):
-        student_no = row.get("student_no") or row.get("学号")
-        if not student_no:
+        full_name = (row.get("full_name") or row.get("姓名") or "").strip()
+        if not full_name:
             invalid += 1
-            issues.append(StudentImportIssue(row_number=index, student_no=None, reason="missing_student_no"))
+            issues.append(UserImportIssue(row_number=index, full_name=None, login_account=None, reason="missing_full_name"))
             continue
-        if student_no in seen_student_nos:
+
+        role = _parse_managed_role(row.get("role") or row.get("身份"))
+        if role is None:
             invalid += 1
-            issues.append(StudentImportIssue(row_number=index, student_no=student_no, reason="duplicate_student_no_in_file"))
+            issues.append(UserImportIssue(row_number=index, full_name=full_name, login_account=None, reason="invalid_role"))
             continue
-        seen_student_nos.add(student_no)
-        existing = db.scalar(select(User).where(User.student_no == student_no))
+
+        classroom_name = _normalized_classroom_name(row.get("class_name") or row.get("班级"))
+        if role == UserRole.TEACHER:
+            grade = None
+            classroom_name = None
+        else:
+            raw_grade = (row.get("grade") or row.get("年级") or "").strip()
+            try:
+                grade = int(raw_grade) if raw_grade else None
+            except ValueError:
+                invalid += 1
+                issues.append(UserImportIssue(row_number=index, full_name=full_name, login_account=None, reason="invalid_grade"))
+                continue
+
+        try:
+            username = build_generated_username(full_name, role, classroom_name)
+            _validate_managed_user_fields(role, grade=grade, classroom_name=classroom_name, is_graduated=False)
+        except (HTTPException, ValueError) as exc:
+            invalid += 1
+            reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            issues.append(UserImportIssue(row_number=index, full_name=full_name, login_account=None, reason=reason))
+            continue
+
+        if username in seen_usernames:
+            invalid += 1
+            issues.append(UserImportIssue(row_number=index, full_name=full_name, login_account=username, reason="duplicate_login_account_in_file"))
+            continue
+        seen_usernames.add(username)
+
+        existing = db.scalar(select(User).where(User.username == username).limit(1))
         if existing:
             skipped_existing += 1
-            issues.append(StudentImportIssue(row_number=index, student_no=student_no, reason="student_already_exists"))
+            issues.append(UserImportIssue(row_number=index, full_name=full_name, login_account=username, reason="login_account_already_exists"))
             continue
-        raw_grade = row.get("grade") or row.get("年级") or ""
-        try:
-            grade = int(raw_grade) if raw_grade else None
-        except ValueError:
-            invalid += 1
-            issues.append(StudentImportIssue(row_number=index, student_no=student_no, reason="invalid_grade"))
-            continue
-        class_name = row.get("class_name") or row.get("班级")
-        classroom = _get_or_create_classroom(db, grade, class_name)
-        password = row.get("password") or student_no[-6:]
+
         user = User(
-            username=student_no,
-            student_no=student_no,
-            full_name=row.get("full_name") or row.get("姓名") or student_no,
-            role=UserRole.STUDENT,
-            password_hash=get_password_hash(password),
+            username=username,
+            student_no=None,
+            full_name=full_name,
+            role=role,
+            password_hash=get_password_hash(build_default_password(full_name)),
+            must_change_password=role == UserRole.STUDENT,
+        )
+        _apply_managed_user_payload(
+            db,
+            user,
+            full_name=full_name,
+            role=role,
             grade=grade,
-            classroom_id=classroom.id if classroom else None,
-            must_change_password=True,
+            classroom_name=classroom_name,
+            is_graduated=False,
         )
         db.add(user)
         created += 1
@@ -169,25 +374,36 @@ async def import_students(
     audit_service.log(
         db,
         actor=current_user,
-        action="import_students",
+        action="import_users",
         target_type="batch",
         target_id=None,
         result="success",
         ip_address=request.client.host if request and request.client else None,
-        detail={
-            "created": created,
-            "rows": len(rows),
-            "skipped_existing": skipped_existing,
-            "invalid": invalid,
-        },
+        detail={"created": created, "rows": len(rows), "skipped_existing": skipped_existing, "invalid": invalid},
     )
-    return StudentImportResult(
-        rows=len(rows),
-        created=created,
-        skipped_existing=skipped_existing,
-        invalid=invalid,
-        issues=issues[:50],
-    )
+    return UserImportResult(rows=len(rows), created=created, skipped_existing=skipped_existing, invalid=invalid, issues=issues[:50])
+
+
+@router.post("/users/import", response_model=UserImportResult)
+async def import_users(
+    file: UploadFile = File(...),
+    db: DbSession = None,
+    current_user: CurrentAdmin = None,
+    request: Request = None,
+) -> UserImportResult:
+    content = await file.read()
+    return _import_users(file.filename or "", content, db, current_user, request)
+
+
+@router.post("/students/import", response_model=UserImportResult)
+async def import_students_legacy(
+    file: UploadFile = File(...),
+    db: DbSession = None,
+    current_user: CurrentAdmin = None,
+    request: Request = None,
+) -> UserImportResult:
+    content = await file.read()
+    return _import_users(file.filename or "", content, db, current_user, request)
 
 
 @router.get("/audit-logs", response_model=list[AuditLogRead])

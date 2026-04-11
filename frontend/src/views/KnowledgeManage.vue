@@ -289,6 +289,13 @@ function difficultyLabel(value?: string | null) {
   return difficultyOptions.find((item) => item.value === value)?.label || value
 }
 
+function gradeLabel(value?: number | null) {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+  return gradeOptions.find((item) => item.value === value)?.label || `${value}年级`
+}
+
 function formatFileSize(value: number) {
   if (value < 1024) {
     return `${value} B`
@@ -1523,7 +1530,7 @@ onBeforeUnmount(() => {
             <div class="detail-chip-group">
               <span class="detail-chip">{{ formatFileSize(item.size_bytes) }}</span>
               <span class="detail-chip">{{ statusLabel(item.status) }}</span>
-              <span v-if="item.grade" class="detail-chip">{{ item.grade }}年级</span>
+              <span v-if="item.grade" class="detail-chip">{{ gradeLabel(item.grade) }}</span>
               <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
               <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
               <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>

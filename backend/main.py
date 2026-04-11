@@ -19,6 +19,7 @@ from backend.services.gpu_runtime import log_gpu_runtime_status
 from backend.services.metrics_service import render_metrics
 from backend.services.rag_service import rag_service
 from backend.services.socratic_service import socratic_service
+from backend.services.student_grade_service import student_grade_service
 from backend.services.store_service import store
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ async def lifespan(_: FastAPI):
     session = SessionLocal()
     try:
         auth_service.seed_bootstrap_admin(session)
+        student_grade_service.initialize_students(session)
     finally:
         session.close()
     seed_default_agent_config()

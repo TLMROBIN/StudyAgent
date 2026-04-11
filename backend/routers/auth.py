@@ -26,7 +26,7 @@ def _client_ip(request: Request) -> str | None:
 
 @router.post("/student/login", response_model=TokenResponse)
 def student_login(payload: StudentLoginRequest, request: Request, db: DbSession) -> TokenResponse:
-    user = auth_service.authenticate_student(db, payload.student_no, payload.password, _client_ip(request))
+    user = auth_service.authenticate_student(db, payload.username, payload.password, _client_ip(request))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     tokens = auth_service.issue_token_pair(user)

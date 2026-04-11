@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage
 
 
@@ -58,7 +59,7 @@ class SocraticService:
             "行内公式使用 $...$，独立公式使用 $$...$$，不要使用图片或伪公式文本代替。",
         ]
         if student_grade is not None:
-            system_sections.append(f"当前学生年级：{student_grade}年级")
+            system_sections.append(f"当前学生年级：{format_grade_label(student_grade) or f'{student_grade}年级'}")
         if retrieved_context:
             system_sections.append(f"知识库参考：{retrieved_context}")
 

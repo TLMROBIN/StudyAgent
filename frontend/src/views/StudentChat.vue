@@ -172,10 +172,22 @@ function difficultyLabel(value?: string | null) {
   return difficultyOptions.find((item) => item.value === value)?.label || value
 }
 
+function gradeLabel(value?: number | null) {
+  if (!value) {
+    return ''
+  }
+  const labels: Record<number, string> = {
+    1: '高一',
+    2: '高二',
+    3: '高三',
+  }
+  return labels[value] || `${value}年级`
+}
+
 function recommendationMeta(item: QuestionRecommendation): string[] {
   const meta: string[] = [resourceTypeLabel(item.resource_type)]
   if (item.grade) {
-    meta.push(`${item.grade}年级`)
+    meta.push(gradeLabel(item.grade))
   }
   if (item.chapter) {
     meta.push(item.chapter)

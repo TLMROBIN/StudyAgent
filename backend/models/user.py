@@ -8,6 +8,7 @@ from sqlalchemy import Boolean, Column, DateTime, Enum as SqlEnum, ForeignKey, I
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+from backend.grade_utils import format_grade_label
 from backend.models.base import TimestampMixin
 
 
@@ -47,6 +48,8 @@ class User(TimestampMixin, Base):
     role: Mapped[UserRole] = mapped_column(SqlEnum(UserRole), index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     grade: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_grade_promotion_year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    graduated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     classroom_id: Mapped[int | None] = mapped_column(ForeignKey("classrooms.id", ondelete="SET NULL"), nullable=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -61,14 +64,27 @@ class User(TimestampMixin, Base):
     created_agent_configs: Mapped[list["AgentConfig"]] = relationship(back_populates="creator")
 
     @property
+    def is_graduated(self) -> bool:
+        return self.role == UserRole.STUDENT and self.graduated_at is not None and self.grade is None
+
+    @property
+    def grade_label(self) -> str | None:
+        return format_grade_label(self.grade, graduated=self.is_graduated)
+
+    @property
+    def classroom_name(self) -> str | None:
+        return self.classroom.name if self.classroom else None
+
+    @property
     def classroom_label(self) -> str | None:
+        if self.is_graduated:
+            return "毕业"
+        grade_label = self.grade_label
         if self.classroom:
-            if self.grade is not None:
-                return f"{self.grade}年级{self.classroom.name}"
+            if grade_label is not None:
+                return f"{grade_label}{self.classroom.name}"
             return self.classroom.name
-        if self.grade is not None:
-            return f"{self.grade}年级"
-        return None
+        return grade_label
 
 
 if TYPE_CHECKING:

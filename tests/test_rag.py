@@ -122,6 +122,45 @@ def test_retrieve_prefers_matching_grade_document(tmp_path):
         session.close()
 
 
+def test_retrieve_prefers_matching_grade_tag_document(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        grade2_doc = KnowledgeDocument(
+            subject="物理",
+            filename="grade2-tag.txt",
+            file_path="/tmp/grade2-tag.txt",
+            mime_type="text/plain",
+            size_bytes=12,
+            tags_json=["高二", "牛顿定律"],
+        )
+        grade3_doc = KnowledgeDocument(
+            subject="物理",
+            filename="grade3-tag.txt",
+            file_path="/tmp/grade3-tag.txt",
+            mime_type="text/plain",
+            size_bytes=12,
+            tags_json=["高三", "牛顿定律"],
+        )
+        session.add_all([grade2_doc, grade3_doc])
+        session.commit()
+        session.refresh(grade2_doc)
+        session.refresh(grade3_doc)
+
+        content = "牛顿第二定律描述合外力、质量和加速度之间的关系。"
+        rag_service.ingest_document_text(session, grade2_doc, content)
+        rag_service.ingest_document_text(session, grade3_doc, content)
+
+        result = rag_service.retrieve(session, "物理", "牛顿第二定律是什么意思", student_grade=2)
+        assert result.chunks
+        assert result.chunks[0].document_id == grade2_doc.id
+    finally:
+        session.close()
+
+
 def test_ingest_document_detects_chapter_heading_metadata(tmp_path):
     rag_service = build_rag_service(tmp_path)
     engine = create_engine("sqlite:///:memory:")
@@ -1831,6 +1870,81 @@ def test_recommend_questions_prefers_question_chunks_with_matching_grade_and_ima
         assert result[0].document_id == grade2_doc.id
         assert result[0].metadata_json.get("contains_images") is True
         assert all(row.document.resource_type in {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value} for row in result)
+    finally:
+        session.close()
+
+
+def test_recommend_questions_prefers_matching_grade_tags_even_when_other_grade_has_images(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        grade2_doc = KnowledgeDocument(
+            subject="物理",
+            filename="grade2-tags.docx",
+            file_path="/tmp/grade2-tags.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            tags_json=["高二", "受力分析"],
+        )
+        grade3_doc = KnowledgeDocument(
+            subject="物理",
+            filename="grade3-tags.docx",
+            file_path="/tmp/grade3-tags.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            tags_json=["高三", "受力分析"],
+        )
+        session.add_all([grade2_doc, grade3_doc])
+        session.commit()
+        session.refresh(grade2_doc)
+        session.refresh(grade3_doc)
+
+        session.add_all(
+            [
+                KnowledgeChunk(
+                    document_id=grade2_doc.id,
+                    subject="物理",
+                    chunk_index=0,
+                    content="第1题\n\n题目：如图所示斜面受力分析，求加速度。",
+                    metadata_json={
+                        "document_id": grade2_doc.id,
+                        "resource_type": grade2_doc.resource_type,
+                        "chunk_kind": "question_item",
+                        "question_number": "1",
+                        "question_text": "如图所示斜面受力分析，求加速度。",
+                        "tags": ["高二", "受力分析"],
+                        "contains_images": False,
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=grade3_doc.id,
+                    subject="物理",
+                    chunk_index=0,
+                    content="第2题\n\n题目：如图所示斜面受力分析，求加速度。",
+                    metadata_json={
+                        "document_id": grade3_doc.id,
+                        "resource_type": grade3_doc.resource_type,
+                        "chunk_kind": "question_item",
+                        "question_number": "2",
+                        "question_text": "如图所示斜面受力分析，求加速度。",
+                        "tags": ["高三", "受力分析"],
+                        "contains_images": True,
+                        "image_count": 1,
+                    },
+                ),
+            ]
+        )
+        session.commit()
+
+        result = rag_service.recommend_questions(session, "物理", "如图所示这道受力分析题怎么练", student_grade=2, limit=1)
+
+        assert len(result) == 1
+        assert result[0].document_id == grade2_doc.id
     finally:
         session.close()
 

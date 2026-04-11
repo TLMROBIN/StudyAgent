@@ -12,7 +12,6 @@ import {
 export interface UserInfo {
   id: number
   username: string
-  student_no?: string | null
   full_name: string
   role: 'student' | 'teacher' | 'admin'
   must_change_password: boolean
@@ -34,9 +33,9 @@ export const useAuthStore = defineStore('auth', {
     initialized: false,
   }),
   actions: {
-    async loginStudent(studentNo: string, password: string) {
+    async loginStudent(username: string, password: string) {
       const { data } = await api.post<LoginPayload>('/auth/student/login', {
-        student_no: studentNo,
+        username,
         password,
       })
       await this.applyTokenPair(data)

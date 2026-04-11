@@ -9,7 +9,7 @@ import { useAuthStore } from '../stores/auth'
 const router = useRouter()
 const auth = useAuthStore()
 const mode = ref<'student' | 'staff'>('student')
-const studentForm = reactive({ studentNo: '', password: '' })
+const studentForm = reactive({ username: '', password: '' })
 const staffForm = reactive({ username: '', password: '' })
 const loading = ref(false)
 
@@ -33,7 +33,7 @@ async function submit() {
   loading.value = true
   try {
     if (mode.value === 'student') {
-      await auth.loginStudent(studentForm.studentNo, studentForm.password)
+      await auth.loginStudent(studentForm.username, studentForm.password)
       router.push('/student')
     } else {
       await auth.loginStaff(staffForm.username, staffForm.password)
@@ -74,8 +74,8 @@ async function submit() {
         :options="[{ label: '学生登录', value: 'student' }, { label: '教师 / 管理员', value: 'staff' }]"
       />
       <el-form v-if="mode === 'student'" class="login-form" @submit.prevent="submit">
-        <el-form-item label="学号">
-          <el-input v-model="studentForm.studentNo" placeholder="输入学号" />
+        <el-form-item label="登录账号">
+          <el-input v-model="studentForm.username" placeholder="输入登录账号" />
         </el-form-item>
         <el-form-item label="密码">
           <el-input v-model="studentForm.password" show-password placeholder="输入密码" />

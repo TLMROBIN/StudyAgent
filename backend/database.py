@@ -22,41 +22,47 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expi
 def apply_runtime_schema_updates() -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-    if "knowledge_documents" not in table_names:
-        return
-
-    columns = {column["name"] for column in inspector.get_columns("knowledge_documents")}
     statements: list[str] = []
-    if "resource_type" not in columns:
-        statements.append("ALTER TABLE knowledge_documents ADD COLUMN resource_type VARCHAR(32)")
-    if "grade" not in columns:
-        statements.append("ALTER TABLE knowledge_documents ADD COLUMN grade INTEGER")
-    if "chapter" not in columns:
-        statements.append("ALTER TABLE knowledge_documents ADD COLUMN chapter VARCHAR(255)")
-    if "section" not in columns:
-        statements.append("ALTER TABLE knowledge_documents ADD COLUMN section VARCHAR(255)")
-    if "difficulty" not in columns:
-        statements.append("ALTER TABLE knowledge_documents ADD COLUMN difficulty VARCHAR(32)")
-    if "tags_json" not in columns:
-        statements.append("ALTER TABLE knowledge_documents ADD COLUMN tags_json JSON")
+    if "knowledge_documents" in table_names:
+        columns = {column["name"] for column in inspector.get_columns("knowledge_documents")}
+        if "resource_type" not in columns:
+            statements.append("ALTER TABLE knowledge_documents ADD COLUMN resource_type VARCHAR(32)")
+        if "grade" not in columns:
+            statements.append("ALTER TABLE knowledge_documents ADD COLUMN grade INTEGER")
+        if "chapter" not in columns:
+            statements.append("ALTER TABLE knowledge_documents ADD COLUMN chapter VARCHAR(255)")
+        if "section" not in columns:
+            statements.append("ALTER TABLE knowledge_documents ADD COLUMN section VARCHAR(255)")
+        if "difficulty" not in columns:
+            statements.append("ALTER TABLE knowledge_documents ADD COLUMN difficulty VARCHAR(32)")
+        if "tags_json" not in columns:
+            statements.append("ALTER TABLE knowledge_documents ADD COLUMN tags_json JSON")
+
+    if "users" in table_names:
+        user_columns = {column["name"] for column in inspector.get_columns("users")}
+        if "last_grade_promotion_year" not in user_columns:
+            statements.append("ALTER TABLE users ADD COLUMN last_grade_promotion_year INTEGER")
+        if "graduated_at" not in user_columns:
+            statements.append("ALTER TABLE users ADD COLUMN graduated_at DATETIME")
 
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))
-        connection.execute(
-            text(
-                "UPDATE knowledge_documents "
-                "SET resource_type = 'knowledge_note' "
-                "WHERE resource_type IS NULL OR resource_type = ''"
+        if "knowledge_documents" in table_names:
+            connection.execute(
+                text(
+                    "UPDATE knowledge_documents "
+                    "SET resource_type = 'knowledge_note' "
+                    "WHERE resource_type IS NULL OR resource_type = ''"
+                )
             )
-        )
-        connection.execute(
-            text(
-                "UPDATE knowledge_documents "
-                "SET tags_json = '[]' "
-                "WHERE tags_json IS NULL OR tags_json = ''"
+            connection.execute(
+                text(
+                    "UPDATE knowledge_documents "
+                    "SET tags_json = '[]' "
+                    "WHERE tags_json IS NULL OR tags_json = ''"
+                )
             )
-        )
 
 
 def get_db() -> Generator[Session, None, None]:

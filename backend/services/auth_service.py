@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from backend.config import get_settings
 from backend.models.user import User, UserRole
 from backend.security import create_access_token, create_refresh_token, get_password_hash, verify_password
+from backend.services.student_grade_service import student_grade_service
 from backend.services.store_service import store
 
 
@@ -36,11 +37,10 @@ class AuthService:
     def get_user_by_subject(self, db: Session, subject: str) -> User | None:
         return db.scalar(select(User).where(User.username == subject).limit(1))
 
-    def get_user_by_student_no(self, db: Session, student_no: str) -> User | None:
-        return db.scalar(select(User).where(User.student_no == student_no).limit(1))
-
-    def authenticate_student(self, db: Session, student_no: str, password: str, client_ip: str | None = None) -> User | None:
-        user = self.get_user_by_student_no(db, student_no)
+    def authenticate_student(self, db: Session, username: str, password: str, client_ip: str | None = None) -> User | None:
+        user = db.scalar(select(User).where(User.username == username).limit(1))
+        if user and user.role != UserRole.STUDENT:
+            return None
         return self._authenticate(db, user, password, client_ip)
 
     def authenticate_staff(self, db: Session, username: str, password: str, client_ip: str | None = None) -> User | None:
@@ -72,6 +72,7 @@ class AuthService:
         user.locked_until = None
         db.add(user)
         db.commit()
+        student_grade_service.ensure_user_grade_current(db, user)
         return user
 
     def issue_token_pair(self, user: User) -> dict[str, str | int | bool]:
@@ -98,6 +99,7 @@ class AuthService:
         user = self.get_user_by_subject(db, refresh_payload.get("sub", ""))
         if not user:
             return None, None
+        student_grade_service.ensure_user_grade_current(db, user)
 
         family_id = refresh_payload.get("family_id", "")
         presented_jti = refresh_payload.get("jti", "")

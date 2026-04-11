@@ -23,7 +23,7 @@ interface ClassroomStat {
 interface StudentPortrait {
   student_id: number
   student_name: string
-  student_no?: string | null
+  login_account?: string | null
   classroom_label?: string | null
   total_conversations: number
   resolved_rate: number
@@ -166,7 +166,7 @@ onMounted(loadDashboard)
         <article v-for="item in portraits" :key="item.student_id" class="table-row table-row-wrap">
           <div class="table-main">
             <strong>{{ item.student_name }}</strong>
-            <span>{{ item.classroom_label || '未分班' }} · {{ item.student_no || '-' }}</span>
+            <span>{{ item.classroom_label || '未分班' }} · {{ item.login_account || '-' }}</span>
           </div>
           <div class="detail-chip-group">
             <span class="detail-chip">会话 {{ item.total_conversations }}</span>

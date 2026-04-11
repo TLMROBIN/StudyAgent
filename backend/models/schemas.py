@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer
+from pydantic import AliasChoices, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
@@ -26,7 +26,7 @@ class TokenResponse(BaseModel):
 
 
 class StudentLoginRequest(BaseModel):
-    student_no: str
+    username: str = Field(validation_alias=AliasChoices("username", "student_no"))
     password: str
 
 
@@ -53,29 +53,37 @@ class UserRead(BaseModel):
 
     id: int
     username: str
-    student_no: str | None
     full_name: str
     role: UserRole
     grade: int | None
+    grade_label: str | None = None
+    is_graduated: bool = False
     classroom_id: int | None
+    classroom_name: str | None = None
     classroom_label: str | None = None
     must_change_password: bool
     is_active: bool
 
 
 class UserCreate(BaseModel):
-    username: str
-    full_name: str
+    full_name: str = Field(min_length=1, max_length=64)
     role: UserRole
-    password: str
-    student_no: str | None = None
-    grade: int | None = None
-    classroom_id: int | None = None
+    grade: int | None = Field(default=None, ge=1, le=3)
+    is_graduated: bool = False
+    classroom_name: str | None = Field(default=None, max_length=50)
+
+
+class UserUpdate(BaseModel):
+    full_name: str = Field(min_length=1, max_length=64)
+    role: UserRole
+    grade: int | None = Field(default=None, ge=1, le=3)
+    is_graduated: bool = False
+    classroom_name: str | None = Field(default=None, max_length=50)
+    is_active: bool = True
 
 
 class PasswordResetRequest(BaseModel):
     user_id: int
-    new_password: str = Field(min_length=8)
 
 
 class MessageRead(BaseModel):
@@ -113,7 +121,7 @@ class QuestionRecommendationRequest(BaseModel):
     subject: str
     question: str = Field(min_length=2, max_length=500)
     limit: int = Field(default=3, ge=1, le=10)
-    student_grade: int | None = Field(default=None, ge=1, le=12)
+    student_grade: int | None = Field(default=None, ge=1, le=3)
     include_solutions: bool = False
 
 
@@ -143,7 +151,7 @@ class KnowledgeDocumentRead(BaseModel):
 
 class KnowledgeDocumentUpdate(BaseModel):
     resource_type: ResourceType = ResourceType.KNOWLEDGE_NOTE
-    grade: int | None = Field(default=None, ge=1, le=12)
+    grade: int | None = Field(default=None, ge=1, le=3)
     chapter: str | None = Field(default=None, max_length=255)
     section: str | None = Field(default=None, max_length=255)
     difficulty: DifficultyLevel | None = None
@@ -153,7 +161,7 @@ class KnowledgeDocumentUpdate(BaseModel):
 class KnowledgeDocumentBulkUpdate(BaseModel):
     document_ids: list[int] = Field(min_length=1, max_length=200)
     resource_type: ResourceType | None = None
-    grade: int | None = Field(default=None, ge=1, le=12)
+    grade: int | None = Field(default=None, ge=1, le=3)
     chapter: str | None = Field(default=None, max_length=255)
     section: str | None = Field(default=None, max_length=255)
     difficulty: DifficultyLevel | None = None
@@ -303,7 +311,7 @@ class ClassroomStat(BaseModel):
 class StudentPortrait(BaseModel):
     student_id: int
     student_name: str
-    student_no: str | None = None
+    login_account: str | None = None
     classroom_label: str | None = None
     total_conversations: int
     resolved_rate: float
@@ -329,15 +337,16 @@ class StudentProfile(BaseModel):
     last_active_at: datetime | None = None
 
 
-class StudentImportIssue(BaseModel):
+class UserImportIssue(BaseModel):
     row_number: int
-    student_no: str | None = None
+    full_name: str | None = None
+    login_account: str | None = None
     reason: str
 
 
-class StudentImportResult(BaseModel):
+class UserImportResult(BaseModel):
     rows: int
     created: int
     skipped_existing: int
     invalid: int
-    issues: list[StudentImportIssue] = []
+    issues: list[UserImportIssue] = []

@@ -14,6 +14,8 @@ from backend.models.schemas import StudentPortrait
 from backend.models.user import Classroom, User, UserRole
 from backend.routers import admin as admin_router
 from backend.routers import stats as stats_router
+from backend.services.account_service import build_default_password, build_generated_username
+from backend.services.auth_service import auth_service
 from backend.services.stats_service import stats_service
 
 
@@ -39,16 +41,14 @@ def test_stats_service_returns_classroom_breakdown_and_portraits():
     try:
         classroom = Classroom(grade=1, name="1班")
         teacher = User(
-            username="teacher1",
+            username="mathteacher",
             full_name="数学老师",
             role=UserRole.TEACHER,
             password_hash="hash",
-            grade=1,
         )
         teacher.teacher_classrooms.append(classroom)
         student = User(
-            username="20260001",
-            student_no="20260001",
+            username="zhangsan1",
             full_name="张三",
             role=UserRole.STUDENT,
             password_hash="hash",
@@ -81,19 +81,20 @@ def test_stats_service_returns_classroom_breakdown_and_portraits():
         portrait_rows = stats_service.student_portraits(session, teacher)
 
         assert len(classroom_rows) == 1
-        assert classroom_rows[0]["classroom_label"] == "1年级1班"
+        assert classroom_rows[0]["classroom_label"] == "高一1班"
         assert classroom_rows[0]["student_count"] == 1
         assert classroom_rows[0]["total_conversations"] == 1
 
         assert len(portrait_rows) == 1
         assert portrait_rows[0]["student_name"] == "张三"
+        assert portrait_rows[0]["login_account"] == "zhangsan1"
         assert portrait_rows[0]["focus_subject"] == "数学"
         assert portrait_rows[0]["fallback_ratio"] == 1.0
     finally:
         session.close()
 
 
-def test_import_students_returns_detailed_feedback(monkeypatch):
+def test_import_users_returns_detailed_feedback(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()
     try:
@@ -105,29 +106,30 @@ def test_import_students_returns_detailed_feedback(monkeypatch):
             password_hash="hash",
         )
         existing_student = User(
-            username="20260002",
-            student_no="20260002",
-            full_name="已存在学生",
+            username=build_generated_username("张三", UserRole.STUDENT, "1班"),
+            full_name="张三",
             role=UserRole.STUDENT,
             password_hash="hash",
+            grade=1,
+            classroom=Classroom(grade=1, name="1班"),
         )
         session.add_all([admin_user, existing_student])
         session.commit()
         session.refresh(admin_user)
 
         csv_payload = (
-            "student_no,full_name,grade,class_name\n"
-            "20260001,新学生,1,1班\n"
-            "20260002,重复学生,1,1班\n"
-            ",缺少学号,1,1班\n"
-            "20260003,非法年级,abc,1班\n"
-            "20260001,文件内重复,1,1班\n"
+            "full_name,role,grade,class_name\n"
+            "李四,学生,1,1班\n"
+            "张三,学生,1,1班\n"
+            ",学生,1,1班\n"
+            "王五,学生,abc,1班\n"
+            "李四,学生,1,1班\n"
         )
-        upload = FakeUploadFile(filename="students.csv", payload=csv_payload.encode("utf-8"))
+        upload = FakeUploadFile(filename="users.csv", payload=csv_payload.encode("utf-8"))
         request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
 
         result = asyncio.run(
-            admin_router.import_students(
+            admin_router.import_users(
                 file=upload,
                 db=session,
                 current_user=admin_user,
@@ -139,18 +141,17 @@ def test_import_students_returns_detailed_feedback(monkeypatch):
         assert result.created == 1
         assert result.skipped_existing == 1
         assert result.invalid == 3
-        assert len(result.issues) == 4
         assert {issue.reason for issue in result.issues} >= {
-            "student_already_exists",
-            "missing_student_no",
+            "login_account_already_exists",
+            "missing_full_name",
             "invalid_grade",
-            "duplicate_student_no_in_file",
+            "duplicate_login_account_in_file",
         }
     finally:
         session.close()
 
 
-def test_import_students_supports_xlsx(monkeypatch):
+def test_import_users_supports_xlsx_and_teacher_rows(monkeypatch):
     from openpyxl import Workbook
 
     SessionLocal = build_session()
@@ -169,16 +170,17 @@ def test_import_students_supports_xlsx(monkeypatch):
 
         workbook = Workbook()
         sheet = workbook.active
-        sheet.append(["student_no", "full_name", "grade", "class_name"])
-        sheet.append(["20260011", "表格学生", 2, "3班"])
+        sheet.append(["full_name", "role", "grade", "class_name"])
+        sheet.append(["表格学生", "student", 2, "3班"])
+        sheet.append(["赵老师", "teacher", None, None])
         payload = io.BytesIO()
         workbook.save(payload)
 
-        upload = FakeUploadFile(filename="students.xlsx", payload=payload.getvalue())
+        upload = FakeUploadFile(filename="users.xlsx", payload=payload.getvalue())
         request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
 
         result = asyncio.run(
-            admin_router.import_students(
+            admin_router.import_users(
                 file=upload,
                 db=session,
                 current_user=admin_user,
@@ -186,11 +188,189 @@ def test_import_students_supports_xlsx(monkeypatch):
             )
         )
 
-        created_student = session.query(User).filter(User.student_no == "20260011").one()
-        assert result.rows == 1
-        assert result.created == 1
-        assert created_student.full_name == "表格学生"
-        assert created_student.grade == 2
+        created_student = session.query(User).filter(User.full_name == "表格学生").one()
+        created_teacher = session.query(User).filter(User.full_name == "赵老师").one()
+        assert result.rows == 2
+        assert result.created == 2
+        assert created_student.username == build_generated_username("表格学生", UserRole.STUDENT, "3班")
+        assert created_student.grade_label == "高二"
+        assert created_teacher.username == build_generated_username("赵老师", UserRole.TEACHER)
+        assert created_teacher.classroom_id is None
+        assert created_teacher.grade is None
+    finally:
+        session.close()
+
+
+def test_create_user_auto_generates_username_and_default_password(monkeypatch):
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        monkeypatch.setattr(admin_router, "get_password_hash", lambda password: f"hash:{password}")
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        session.add(admin_user)
+        session.commit()
+        session.refresh(admin_user)
+
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        result = admin_router.create_user(
+            admin_router.UserCreate(
+                full_name="高二学生",
+                role=UserRole.STUDENT,
+                grade=2,
+                classroom_name="2班",
+            ),
+            db=session,
+            current_user=admin_user,
+            request=request,
+        )
+
+        created_student = session.query(User).filter(User.full_name == "高二学生").one()
+        assert result.username == build_generated_username("高二学生", UserRole.STUDENT, "2班")
+        assert result.grade_label == "高二"
+        assert created_student.password_hash == f"hash:{build_default_password('高二学生')}"
+        assert created_student.classroom_label == "高二2班"
+    finally:
+        session.close()
+
+
+def test_update_user_can_switch_student_to_teacher(monkeypatch):
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        student = User(
+            username=build_generated_username("待调整", UserRole.STUDENT, "3班"),
+            full_name="待调整",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=3,
+            classroom=Classroom(grade=3, name="3班"),
+        )
+        session.add_all([admin_user, student])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(student)
+
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        result = admin_router.update_user(
+            student.id,
+            admin_router.UserUpdate(
+                full_name="赵老师",
+                role=UserRole.TEACHER,
+                grade=None,
+                classroom_name=None,
+                is_graduated=False,
+                is_active=False,
+            ),
+            db=session,
+            current_user=admin_user,
+            request=request,
+        )
+
+        refreshed = session.get(User, student.id)
+        assert refreshed is not None
+        assert refreshed.role == UserRole.TEACHER
+        assert refreshed.grade is None
+        assert refreshed.classroom_id is None
+        assert refreshed.username == build_generated_username("赵老师", UserRole.TEACHER)
+        assert result.is_active is False
+    finally:
+        session.close()
+
+
+def test_delete_user_removes_teacher(monkeypatch):
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        teacher = User(
+            username="zhaolaoshi",
+            full_name="赵老师",
+            role=UserRole.TEACHER,
+            password_hash="hash",
+        )
+        session.add_all([admin_user, teacher])
+        session.commit()
+        session.refresh(admin_user)
+
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        admin_router.delete_user(teacher.id, session, admin_user, request)
+
+        assert session.get(User, teacher.id) is None
+    finally:
+        session.close()
+
+
+def test_reset_password_uses_generated_default(monkeypatch):
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        monkeypatch.setattr(admin_router.auth_service, "update_password", lambda db, user, new_password: setattr(user, "password_hash", f"hash:{new_password}") or user)
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        teacher = User(
+            username="zhaolaoshi",
+            full_name="赵老师",
+            role=UserRole.TEACHER,
+            password_hash="old-hash",
+        )
+        session.add_all([admin_user, teacher])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(teacher)
+
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        result = admin_router.reset_password(
+            admin_router.PasswordResetRequest(user_id=teacher.id),
+            session,
+            admin_user,
+            request,
+        )
+
+        assert result.username == "zhaolaoshi"
+        assert teacher.password_hash == f"hash:{build_default_password('赵老师')}"
+    finally:
+        session.close()
+
+
+def test_student_can_authenticate_with_generated_login_account(monkeypatch):
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        student = User(
+            username=build_generated_username("张三", UserRole.STUDENT, "1班"),
+            full_name="张三",
+            role=UserRole.STUDENT,
+            password_hash=admin_router.get_password_hash(build_default_password("张三")),
+            grade=1,
+            classroom=Classroom(grade=1, name="1班"),
+        )
+        session.add(student)
+        session.commit()
+
+        authenticated = auth_service.authenticate_student(session, "zhangsan1", build_default_password("张三"))
+
+        assert authenticated is not None
+        assert authenticated.username == "zhangsan1"
     finally:
         session.close()
 
@@ -209,8 +389,7 @@ def test_stats_export_supports_xlsx():
             password_hash="hash",
         )
         student = User(
-            username="20260001",
-            student_no="20260001",
+            username="zhangsan1",
             full_name="张三",
             role=UserRole.STUDENT,
             password_hash="hash",
@@ -219,7 +398,6 @@ def test_stats_export_supports_xlsx():
         )
         session.add_all([classroom, admin_user, student])
         session.commit()
-        session.refresh(student)
 
         conversation_row = Conversation(
             student_id=student.id,
@@ -245,6 +423,7 @@ def test_stats_export_supports_xlsx():
         assert workbook["概览"]["A2"].value == "累计提问"
         assert workbook["概览"]["B2"].value == 1
         assert workbook["学科分布"]["A2"].value == "数学"
+        assert workbook["学生画像"]["B2"].value == "zhangsan1"
         assert str(workbook["学生画像"]["H2"].value).endswith("+08:00")
     finally:
         session.close()
@@ -254,6 +433,7 @@ def test_student_portrait_serializes_naive_utc_to_beijing():
     portrait = StudentPortrait(
         student_id=1,
         student_name="张三",
+        login_account="zhangsan1",
         total_conversations=1,
         resolved_rate=1.0,
         fallback_ratio=0.0,

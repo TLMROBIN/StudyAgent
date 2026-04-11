@@ -8,6 +8,7 @@ from backend.database import get_db
 from backend.models.user import User, UserRole
 from backend.security import decode_token
 from backend.services.auth_service import auth_service
+from backend.services.student_grade_service import student_grade_service
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/student/login")
 DbSession = Annotated[Session, Depends(get_db)]
@@ -28,6 +29,7 @@ def get_current_user(db: DbSession, token: Annotated[str, Depends(oauth2_scheme)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User unavailable")
 
+    student_grade_service.ensure_user_grade_current(db, user)
     if auth_service.password_changed_after_token(user, payload):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired by password change")
     return user

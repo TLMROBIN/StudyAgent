@@ -86,12 +86,12 @@ def _build_xlsx_export(overview: dict, class_rows: list[dict], portrait_rows: li
         )
 
     portrait_sheet = workbook.create_sheet("学生画像")
-    portrait_sheet.append(["学生", "学号", "班级", "会话数", "解决率", "关注学科", "兜底占比", "最近活跃"])
+    portrait_sheet.append(["学生", "登录账号", "班级", "会话数", "解决率", "关注学科", "兜底占比", "最近活跃"])
     for row in portrait_rows:
         portrait_sheet.append(
             [
                 row["student_name"],
-                row["student_no"],
+                row["login_account"],
                 row["classroom_label"],
                 row["total_conversations"],
                 row["resolved_rate"],

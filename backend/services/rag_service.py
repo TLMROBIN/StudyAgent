@@ -15,6 +15,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.config import Settings, get_settings
+from backend.grade_utils import HIGH_SCHOOL_GRADE_LABELS, extract_grade_levels
 from backend.models.knowledge import DifficultyLevel, KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.services.embed_service import EmbedService, embed_service
 from backend.services.mineru_service import mineru_service
@@ -1375,7 +1376,13 @@ class RagService:
     ) -> list[KnowledgeChunk]:
         rescored: list[tuple[float, KnowledgeChunk]] = []
         for base_score, row in scored_rows:
-            final_score = base_score + self._metadata_score(row, question, profile, student_grade)
+            final_score = base_score + self._metadata_score(
+                row,
+                question,
+                profile,
+                student_grade,
+                recommendation_mode=False,
+            )
             rescored.append((final_score, row))
         rescored.sort(key=lambda item: item[0], reverse=True)
         return [row for _, row in rescored[: self.settings.rag_top_k]]
@@ -1386,6 +1393,8 @@ class RagService:
         question: str,
         profile: QuestionProfile,
         student_grade: int | None,
+        *,
+        recommendation_mode: bool,
     ) -> float:
         score = 0.0
         document = row.document
@@ -1397,12 +1406,6 @@ class RagService:
             score += max(0.04, 0.26 - profile.preferred_resources.index(resource_type) * 0.05)
         if profile.prefer_extension and resource_type == ResourceType.EXTENSION.value:
             score += 0.18
-
-        if student_grade is not None:
-            if document.grade == student_grade:
-                score += 0.34
-            elif document.grade is not None:
-                score -= 0.10
 
         if profile.desired_difficulty and document.difficulty and resource_type in QUESTION_RESOURCE_TYPES:
             if document.difficulty == profile.desired_difficulty:
@@ -1437,6 +1440,7 @@ class RagService:
             score += 0.03
         elif retrieval_metadata.get("structure_source") == "toc_page_map":
             score += 0.01
+        score += self._grade_match_score(row, student_grade, recommendation_mode=recommendation_mode)
         for tag in document.tags[:5]:
             if tag.lower() in question_lowered:
                 score += 0.08
@@ -1485,11 +1489,54 @@ class RagService:
         for row, candidate_text, candidate_embedding in zip(rows, candidate_texts, candidate_embeddings):
             score = self.embedder.cosine_similarity(query_embedding, candidate_embedding)
             score += sum(1 for char in question[:16] if char and char in candidate_text) / 24.0
-            score += self._metadata_score(row, question, profile, student_grade)
+            score += self._metadata_score(row, question, profile, student_grade, recommendation_mode=True)
             score += self._question_recommendation_bonus(row, question)
             scored_rows.append((score, row))
         scored_rows.sort(key=lambda item: item[0], reverse=True)
         return scored_rows
+
+    def _grade_match_score(self, row: KnowledgeChunk, student_grade: int | None, *, recommendation_mode: bool) -> float:
+        if student_grade is None or student_grade not in HIGH_SCHOOL_GRADE_LABELS:
+            return 0.0
+
+        document = row.document
+        if not document:
+            return 0.0
+
+        metadata = row.metadata_json or {}
+        signal_grades: set[int] = set()
+        exact_matches = 0
+
+        document_grade = document.grade
+        if document_grade == student_grade:
+            exact_matches += 1
+        elif document_grade in HIGH_SCHOOL_GRADE_LABELS:
+            signal_grades.add(document_grade)
+
+        metadata_grade = metadata.get("grade")
+        if isinstance(metadata_grade, int):
+            if metadata_grade == student_grade:
+                exact_matches += 1
+            elif metadata_grade in HIGH_SCHOOL_GRADE_LABELS:
+                signal_grades.add(metadata_grade)
+
+        tag_candidates = list(document.tags)
+        metadata_tags = metadata.get("tags")
+        if isinstance(metadata_tags, list):
+            tag_candidates.extend(str(tag) for tag in metadata_tags if str(tag).strip())
+        tag_grades = extract_grade_levels(tag_candidates)
+        if student_grade in tag_grades:
+            exact_matches += 1
+        elif tag_grades:
+            signal_grades.update(tag_grades)
+
+        if exact_matches:
+            base_bonus = 0.34 if not recommendation_mode else 0.52
+            corroboration_bonus = 0.12 if not recommendation_mode else 0.24
+            return base_bonus + max(0, exact_matches - 1) * corroboration_bonus
+        if signal_grades:
+            return -0.10 if not recommendation_mode else -0.18
+        return 0.0
 
     def _question_candidate_text(self, row: KnowledgeChunk) -> str:
         metadata = row.metadata_json or {}
@@ -1549,7 +1596,7 @@ class RagService:
         difficulty = metadata.get("difficulty") or document.difficulty
         question_number = metadata.get("question_number")
         if grade:
-            labels.append(f"{grade}年级")
+            labels.append(HIGH_SCHOOL_GRADE_LABELS.get(int(grade), f"{grade}年级"))
         if chapter:
             labels.append(str(chapter))
         if section:
