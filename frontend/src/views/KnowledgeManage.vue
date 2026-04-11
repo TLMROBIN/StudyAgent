@@ -722,10 +722,6 @@ async function uploadSingleFile(uploadFile: File) {
   latestTask.value = data
 }
 
-function isPdfFile(file: File) {
-  return file.name.toLowerCase().endsWith('.pdf')
-}
-
 function clearSelectedUploadFiles() {
   selectedUploadFiles.value = []
   uploadRef.value?.clearFiles()
@@ -746,10 +742,6 @@ async function submitSelectedUploads() {
 
   if (!files.length) {
     ElMessage.error('请先选择资料')
-    return
-  }
-  if (files.length > 1 && files.some((file) => !isPdfFile(file))) {
-    ElMessage.error('批量上传目前仅支持 PDF，请将非 PDF 资料改为单文件上传')
     return
   }
 

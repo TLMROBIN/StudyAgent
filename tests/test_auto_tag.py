@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.database import Base
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
-from backend.models.knowledge import KnowledgeDocument, ResourceType
+from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.services.auto_tag_service import AutoTagService
 
 
@@ -27,6 +27,29 @@ def _seed_textbook(db: Session, subject: str, tags: list[str]) -> KnowledgeDocum
     db.add(doc)
     db.commit()
     return doc
+
+
+def _seed_textbook_chunk(
+    db: Session,
+    *,
+    document: KnowledgeDocument,
+    chapter: str | None = None,
+    section: str | None = None,
+) -> None:
+    db.add(
+        KnowledgeChunk(
+            document_id=document.id,
+            subject=document.subject,
+            chunk_index=0,
+            content="示例教材片段",
+            metadata_json={
+                "document_id": document.id,
+                "chapter": chapter,
+                "section": section,
+            },
+        )
+    )
+    db.commit()
 
 
 class TestCleanTitle:
@@ -112,7 +135,28 @@ class TestAutoTag:
         svc = AutoTagService(cache_ttl=0)
         with factory() as db:
             result = svc.auto_tag(db, "牛顿第二定律.pdf", "物理")
-            assert result == []
+            assert result == ["牛顿第二定律"]
+
+    def test_uses_textbook_section_and_chapter_vocabulary_when_tags_are_empty(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第七章 万有引力与宇宙航行",
+                section="第五节 牛顿第二定律",
+            )
+
+            result = svc.auto_tag(
+                db,
+                "物理思维向导：牛顿第二定律的深度解译与实战自学手册.md",
+                "物理",
+            )
+
+            assert "牛顿第二定律" in result
+            assert "第五节 牛顿第二定律" not in result
 
     def test_respects_max_20_tags(self):
         factory = setup_db()
@@ -142,6 +186,24 @@ class TestAutoTag:
             _seed_textbook(db, "英语", ["定语从句"])
             result = svc.auto_tag(db, "完形填空.pdf", "英语", existing_tags=["完形"])
             assert result == ["完形"]
+
+    def test_fallback_extracts_core_tag_from_quoted_title_when_vocab_missing(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            result = svc.auto_tag(db, "《时间与位移》深度思维向导手册.md", "物理")
+            assert result == ["时间与位移"]
+
+    def test_fallback_extracts_core_tag_from_colon_title_when_vocab_missing(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            result = svc.auto_tag(
+                db,
+                "课程思维向导：重力势能 (Gravitational Potential Energy) 自学手册.md",
+                "物理",
+            )
+            assert result == ["重力势能"]
 
 
 class TestCache:

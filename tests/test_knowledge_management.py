@@ -1,7 +1,9 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import BackgroundTasks
 from fastapi import HTTPException
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -68,6 +70,18 @@ class FakeRagService:
         return Path("/tmp") / "studyagent-test-assets" / str(document_id)
 
 
+class FakeUploadFile:
+    def __init__(
+        self, filename: str, payload: bytes, content_type: str | None = None
+    ) -> None:
+        self.filename = filename
+        self._payload = payload
+        self.content_type = content_type
+
+    async def read(self) -> bytes:
+        return self._payload
+
+
 def create_teacher(session: Session) -> User:
     teacher = User(
         username="teacher1",
@@ -79,6 +93,178 @@ def create_teacher(session: Session) -> User:
     session.commit()
     session.refresh(teacher)
     return teacher
+
+
+def configure_upload_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, list]:
+    settings = Settings(
+        ALLOWED_UPLOAD_EXTENSIONS=".pdf,.docx,.txt,.md,.tex",
+        ALLOWED_UPLOAD_MIME_TYPES=(
+            "application/pdf,"
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
+            "text/plain,"
+            "text/markdown,"
+            "text/x-markdown,"
+            "text/x-tex,"
+            "application/x-tex"
+        ),
+        CHROMADB_PATH=str(tmp_path / "chromadb"),
+        TASK_ARTIFACT_PATH=str(tmp_path / "tasks"),
+        UPLOAD_PATH=str(tmp_path / "uploads"),
+    )
+    settings.ensure_storage()
+    monkeypatch.setattr(knowledge_router, "settings", settings)
+    monkeypatch.setattr(knowledge_router.auto_tag_service, "auto_tag", lambda *args, **kwargs: [])
+    dispatched: list[tuple[str, int]] = []
+    audit_details: list[dict] = []
+    monkeypatch.setattr(
+        knowledge_router.audit_service,
+        "log",
+        lambda *args, **kwargs: audit_details.append(kwargs["detail"]),
+    )
+    monkeypatch.setattr(
+        knowledge_router,
+        "dispatch_import_task",
+        lambda db, document, task, background_tasks=None: dispatched.append((document.filename, task.id)),
+    )
+    return {"dispatched": dispatched, "audit_details": audit_details}
+
+
+def run_upload(session: Session, teacher: User, upload: FakeUploadFile, subject: str):
+    return asyncio.run(
+        knowledge_router.upload_document(
+            background_tasks=BackgroundTasks(),
+            subject=subject,
+            resource_type="knowledge_note",
+            grade=None,
+            chapter=None,
+            section=None,
+            difficulty=None,
+            tags=None,
+            file=upload,
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "expected_mime_type"),
+    [
+        ("notes.md", None, "text/markdown"),
+        ("notes.md", "application/octet-stream", "text/markdown"),
+        ("notes.txt", "application/octet-stream", "text/plain"),
+        (
+            "notes.docx",
+            None,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        (
+            "notes.docx",
+            "application/octet-stream",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+    ],
+)
+def test_upload_document_accepts_supported_files_with_generic_or_missing_mime(
+    tmp_path, monkeypatch, filename, content_type, expected_mime_type
+):
+    session_local = build_session()
+    session = session_local()
+    try:
+        upload_context = configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(filename=filename, payload=b"demo content", content_type=content_type)
+
+        result = run_upload(session, teacher, upload, subject="数学")
+
+        document = session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == filename)
+        )
+        assert document is not None
+        assert document.mime_type == expected_mime_type
+        task = session.scalar(select(ImportTask).where(ImportTask.document_id == document.id))
+        assert task is not None
+        assert upload_context["dispatched"] == [(filename, task.id)]
+        assert upload_context["audit_details"][-1]["raw_mime"] == (content_type or "")
+        assert upload_context["audit_details"][-1]["effective_mime"] == expected_mime_type
+        assert result.document_id == document.id
+    finally:
+        session.close()
+
+
+def test_upload_document_preserves_explicit_allowlisted_mime(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        upload_context = configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="notes.md",
+            payload=b"# markdown",
+            content_type="text/plain",
+        )
+
+        run_upload(session, teacher, upload, subject="语文")
+
+        document = session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "notes.md")
+        )
+        assert document is not None
+        assert document.mime_type == "text/plain"
+        assert upload_context["audit_details"][-1]["raw_mime"] == "text/plain"
+        assert upload_context["audit_details"][-1]["effective_mime"] == "text/plain"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("content_type", ["image/png", "application/pdf"])
+def test_upload_document_rejects_conflicting_mime_for_supported_extension(
+    tmp_path, monkeypatch, content_type
+):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="notes.md",
+            payload=b"# markdown",
+            content_type=content_type,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            run_upload(session, teacher, upload, subject="英语")
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Unsupported MIME type"
+        assert session.scalar(select(KnowledgeDocument).where(KnowledgeDocument.filename == "notes.md")) is None
+    finally:
+        session.close()
+
+
+def test_upload_document_rejects_unsupported_extension(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="notes.exe",
+            payload=b"MZ",
+            content_type="application/octet-stream",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            run_upload(session, teacher, upload, subject="物理")
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Unsupported file type"
+        assert session.scalar(select(KnowledgeDocument).where(KnowledgeDocument.filename == "notes.exe")) is None
+    finally:
+        session.close()
 
 
 def test_delete_task_removes_failed_record_only():

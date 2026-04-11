@@ -73,6 +73,11 @@ TEXTBOOK_SENTENCE_PUNCTUATION = ("，", "；", "。", "！", "？", ",", ";", "!
 PLAIN_TEXT_SPLIT_PATTERN = re.compile(r"(?<=[。！？；;.!?])\s+|\n+")
 CHUNK_BOUNDARY_HINTS = "。！？；;.!?，,"
 ASSET_MARKER_PATTERN = re.compile(r"\[\[asset:([A-Za-z0-9_.-]+)\]\]")
+MARKDOWN_BLOCK_START_PATTERN = re.compile(
+    r"^(?:#{1,6}\s|[*+-]\s|[0-9]{1,2}(?:\\?\.)\s|[0-9]{1,2}[)）]\s|>\s|```|~~~|\|)"
+)
+INLINE_MATH_TERMINAL_PATTERN = re.compile(r"(?:\$(?!\$)[^$]+\$|\\\([^)]*\\\))$")
+PUNCTUATION_ONLY_PATTERN = re.compile(r"^[，。！？；：、,.;!?）)】》]+$")
 DOCX_WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 DOCX_MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 DOCX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -466,7 +471,10 @@ class RagService:
         mime = (mime_type or mimetypes.guess_type(file_path)[0] or "").lower()
         suffix = Path(file_path).suffix.lower()
         if suffix in {".txt", ".md", ".tex"} or mime in {"text/plain", "text/markdown", "text/x-markdown", "text/x-tex", "application/x-tex"}:
-            return ExtractionResult(text=Path(file_path).read_text(encoding="utf-8", errors="ignore"))
+            text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+            if suffix == ".md" or mime in {"text/markdown", "text/x-markdown"}:
+                text = self._normalize_markdown_text(text)
+            return ExtractionResult(text=text)
 
         if suffix == ".pdf":
             if self.settings.pdf_parser_backend == "mineru":
@@ -488,6 +496,81 @@ class RagService:
             "pdf_parser": mineru_service.health_snapshot(),
         }
 
+    def _normalize_markdown_text(self, text: str) -> str:
+        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        normalized = normalized.replace("\xa0", " ")
+        normalized = self._normalize_markdown_math_spans(normalized)
+        normalized = normalized.replace(r"\.", ".")
+        normalized = self._collapse_soft_markdown_line_breaks(normalized)
+        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+        normalized = re.sub(r"\n[ \t]+", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        normalized = re.sub(r"[ \t]{2,}", " ", normalized)
+        return normalized.strip()
+
+    def _normalize_markdown_math_spans(self, text: str) -> str:
+        parts: list[str] = []
+        for token_type, content in self._extract_preserved_tokens(text):
+            if token_type == "math":
+                parts.append(self._normalize_markdown_math_token(content))
+                continue
+            parts.append(content)
+        return "".join(parts)
+
+    def _normalize_markdown_math_token(self, token: str) -> str:
+        delimiters = [
+            ("$$", "$$"),
+            (r"\[", r"\]"),
+            (r"\(", r"\)"),
+            ("$", "$"),
+        ]
+        for opening, closing in delimiters:
+            if token.startswith(opening) and token.endswith(closing):
+                body = token[len(opening) : len(token) - len(closing)]
+                body = re.sub(r"\\([_=.#])", r"\1", body)
+                body = re.sub(r"\s+", " ", body).strip()
+                return f"{opening}{body}{closing}"
+        return token
+
+    def _collapse_soft_markdown_line_breaks(self, text: str) -> str:
+        normalized_lines: list[str] = []
+        current = ""
+        in_fence = False
+
+        def flush_current() -> None:
+            nonlocal current
+            if current:
+                normalized_lines.append(current.strip())
+                current = ""
+
+        for raw_line in text.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                flush_current()
+                if normalized_lines and normalized_lines[-1] != "":
+                    normalized_lines.append("")
+                continue
+
+            if line.startswith(("```", "~~~")):
+                flush_current()
+                normalized_lines.append(line)
+                in_fence = not in_fence
+                continue
+
+            if in_fence:
+                normalized_lines.append(line)
+                continue
+
+            if MARKDOWN_BLOCK_START_PATTERN.match(line):
+                flush_current()
+                current = line
+                continue
+
+            current = f"{current} {line}".strip() if current else line
+
+        flush_current()
+        return "\n".join(normalized_lines)
+
     def document_asset_dir(self, document_id: int) -> Path:
         return Path(self.settings.task_artifact_path) / "knowledge" / str(document_id)
 
@@ -505,7 +588,7 @@ class RagService:
                 current = normalized_segment
                 continue
 
-            candidate = f"{current}\n{normalized_segment}".strip()
+            candidate = self._join_chunkable_segments(current, normalized_segment)
             if len(candidate) <= self.settings.rag_chunk_size:
                 current = candidate
                 continue
@@ -516,6 +599,41 @@ class RagService:
         if current:
             segments.append(current)
         return [segment for segment in segments if segment.strip()]
+
+    def _join_chunkable_segments(self, current: str, next_segment: str) -> str:
+        joiner = "\n"
+        if self._should_inline_join_segment(current, next_segment):
+            joiner = "" if PUNCTUATION_ONLY_PATTERN.fullmatch(next_segment.strip()) else " "
+        combined = f"{current}{joiner}{next_segment}".strip()
+        return re.sub(r"\s+([，。！？；：、,.;!?）)】》])", r"\1", combined)
+
+    def _should_inline_join_segment(self, current: str, next_segment: str) -> bool:
+        previous = current.strip()
+        upcoming = next_segment.strip()
+        if not previous or not upcoming:
+            return False
+        if self._is_display_math_segment(previous) or self._is_display_math_segment(upcoming):
+            return False
+        if MARKDOWN_BLOCK_START_PATTERN.match(upcoming):
+            return False
+        return (
+            self._is_inline_math_segment(upcoming)
+            or bool(INLINE_MATH_TERMINAL_PATTERN.search(previous))
+        )
+
+    def _is_inline_math_segment(self, segment: str) -> bool:
+        stripped = segment.strip()
+        return (
+            (stripped.startswith("$") and not stripped.startswith("$$") and stripped.endswith("$"))
+            or (stripped.startswith(r"\(") and stripped.endswith(r"\)"))
+        )
+
+    def _is_display_math_segment(self, segment: str) -> bool:
+        stripped = segment.strip()
+        return (
+            (stripped.startswith("$$") and stripped.endswith("$$"))
+            or (stripped.startswith(r"\[") and stripped.endswith(r"\]"))
+        )
 
     def _chunkable_segments(self, text: str) -> list[str]:
         segments: list[str] = []

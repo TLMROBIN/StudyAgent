@@ -50,20 +50,73 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 settings = get_settings()
 ACTIVE_TASK_STATUSES = {DocumentStatus.PENDING, DocumentStatus.PROCESSING}
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
+GENERIC_UPLOAD_MIME_TYPES = {"", "application/octet-stream"}
+UPLOAD_MIME_COMPATIBILITY = {
+    ".pdf": {
+        "accepted": {"application/pdf"},
+    },
+    ".docx": {
+        "accepted": {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        },
+    },
+    ".txt": {
+        "accepted": {"text/plain"},
+    },
+    ".md": {
+        "accepted": {"text/markdown", "text/x-markdown", "text/plain"},
+    },
+    ".tex": {
+        "accepted": {"text/x-tex", "application/x-tex", "text/plain"},
+    },
+}
 
 
-def _validate_upload(file: UploadFile) -> None:
+def _resolve_upload_mime_type(file: UploadFile) -> tuple[str, str]:
+    suffix = Path(file.filename or "").suffix.lower()
+    raw_content_type = (file.content_type or "").strip().lower()
+    derived_content_type = (mimetypes.guess_type(file.filename or "")[0] or "").lower()
+    compatibility = UPLOAD_MIME_COMPATIBILITY.get(suffix)
+
+    if compatibility is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported MIME type"
+        )
+
+    accepted_content_types = {
+        content_type
+        for content_type in compatibility["accepted"]
+        if content_type in settings.upload_mime_type_list
+    }
+
+    if raw_content_type in accepted_content_types:
+        return raw_content_type, raw_content_type
+
+    if raw_content_type in GENERIC_UPLOAD_MIME_TYPES:
+        if derived_content_type in accepted_content_types:
+            return raw_content_type, derived_content_type
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported MIME type"
+    )
+
+
+def _validate_upload(file: UploadFile) -> tuple[str, str]:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in settings.upload_extension_list:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type"
         )
+    return _resolve_upload_mime_type(file)
 
-    content_type = (file.content_type or "").lower()
-    if content_type and content_type not in settings.upload_mime_type_list:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported MIME type"
-        )
+
+def _upload_detail(
+    document: KnowledgeDocument, *, raw_mime: str, effective_mime: str
+) -> dict:
+    detail = _document_detail(document)
+    detail["raw_mime"] = raw_mime
+    detail["effective_mime"] = effective_mime
+    return detail
 
 
 def _normalize_optional_text(value: str | None) -> str | None:
@@ -295,7 +348,7 @@ async def upload_document(
     current_user: CurrentTeacher = None,
     request: Request = None,
 ) -> ImportTaskRead:
-    _validate_upload(file)
+    raw_content_type, content_type = _validate_upload(file)
     content = await file.read()
     if len(content) > settings.upload_max_bytes:
         raise HTTPException(
@@ -310,7 +363,7 @@ async def upload_document(
         subject=subject,
         filename=file.filename or saved_name,
         file_path=str(target_path),
-        mime_type=file.content_type or "application/octet-stream",
+        mime_type=content_type,
         size_bytes=len(content),
         status=DocumentStatus.PENDING,
         created_by=current_user.id,
@@ -359,7 +412,9 @@ async def upload_document(
         target_id=str(document.id),
         result="accepted",
         ip_address=request.client.host if request and request.client else None,
-        detail=_document_detail(document),
+        detail=_upload_detail(
+            document, raw_mime=raw_content_type, effective_mime=content_type
+        ),
     )
     return ImportTaskRead.model_validate(task)
 

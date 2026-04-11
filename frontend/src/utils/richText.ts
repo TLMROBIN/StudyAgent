@@ -143,6 +143,13 @@ function splitMathSegments(text: string): MathSegment[] {
   return segments
 }
 
+function normalizeMathContent(content: string): string {
+  return content
+    .trim()
+    .replace(/\\([_=.#])/g, '$1')
+    .replace(/\s+/g, ' ')
+}
+
 function renderTextSegment(text: string): string {
   return escapeHtml(text).replace(/\n/g, '<br>')
 }
@@ -153,16 +160,17 @@ function renderMathFallback(content: string, displayMode: boolean): string {
 }
 
 function renderMathSegment(content: string, displayMode: boolean): string {
+  const normalized = normalizeMathContent(content)
   try {
-    const html = katex.renderToString(content, {
+    const html = katex.renderToString(normalized, {
       displayMode,
       throwOnError: false,
       strict: 'ignore',
       output: 'html',
     })
-    return html.includes('katex-error') ? renderMathFallback(content, displayMode) : html
+    return html.includes('katex-error') ? renderMathFallback(normalized, displayMode) : html
   } catch {
-    return renderMathFallback(content, displayMode)
+    return renderMathFallback(normalized, displayMode)
   }
 }
 
@@ -291,7 +299,7 @@ function matchUnorderedList(line: string): RegExpMatchArray | null {
 }
 
 function matchOrderedList(line: string): RegExpMatchArray | null {
-  return line.match(/^\s{0,3}(\d+)[.)]\s+(.*)$/)
+  return line.match(/^\s{0,3}(\d+)(?:\\?\.[\s]+|[)]\s+)(.*)$/)
 }
 
 function isHorizontalRule(line: string): boolean {
@@ -310,6 +318,53 @@ function isSpecialBlockStart(line: string): boolean {
     || isHorizontalRule(line)
     || isBlockquote(line),
   )
+}
+
+function collapseSoftLineBreaks(text: string): string {
+  const normalizedLines: string[] = []
+  let current = ''
+  let inFence = false
+
+  const flushCurrent = () => {
+    if (current) {
+      normalizedLines.push(current.trim())
+      current = ''
+    }
+  }
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim()
+    if (!line) {
+      flushCurrent()
+      if (normalizedLines[normalizedLines.length - 1] !== '') {
+        normalizedLines.push('')
+      }
+      continue
+    }
+
+    if (line.startsWith('```') || line.startsWith('~~~')) {
+      flushCurrent()
+      normalizedLines.push(line)
+      inFence = !inFence
+      continue
+    }
+
+    if (inFence) {
+      normalizedLines.push(line)
+      continue
+    }
+
+    if (isSpecialBlockStart(line)) {
+      flushCurrent()
+      current = line
+      continue
+    }
+
+    current = current ? `${current} ${line}` : line
+  }
+
+  flushCurrent()
+  return normalizedLines.join('\n')
 }
 
 function renderMarkdownBlocks(text: string, mathHtml: string[], options: RenderRichTextOptions): string {
@@ -411,7 +466,7 @@ function renderMarkdownBlocks(text: string, mathHtml: string[], options: RenderR
 }
 
 export function renderRichText(content: string, options: RenderRichTextOptions = {}): string {
-  const normalized = content.replace(/\r\n?/g, '\n')
+  const normalized = collapseSoftLineBreaks(content.replace(/\r\n?/g, '\n'))
   return splitCodeSegments(normalized)
     .map((segment) => {
       if (segment.type === 'code') {

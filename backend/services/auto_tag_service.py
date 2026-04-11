@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 
 _MIN_TAG_LENGTH = 2
 _MIN_TITLE_LENGTH = 2
+_TAG_PREFIX_PATTERNS = [
+    re.compile(r"^\s*第[一二三四五六七八九十百零两0-9]+(?:章|节|课|单元|编|部分)\s*"),
+    re.compile(r"^\s*[（(][一二三四五六七八九十百零两0-9]+[)）]\s*"),
+    re.compile(r"^\s*[A-Za-z][.、]\s*"),
+    re.compile(r"^\s*[0-9]{1,2}(?:\.[0-9]{1,2})*[.．、:：)]\s*"),
+]
+_GENERIC_TITLE_SUFFIX_PATTERNS = [
+    re.compile(r"\s*[（(][A-Za-z0-9 .,_+\-]+[)）]\s*"),
+    re.compile(
+        r"\s*(?:深度思维导图自学手册|深度思维向导手册|深度思维向导自学手册|深度自学手册|思维向导自学手册|思维向导手册|课程思维向导|课程导学手册|课程学习手册|学习手册|导学手册|自学手册|思维向导|深度报告)\s*$"
+    ),
+    re.compile(r"的[^的]{0,60}(?:手册|向导|解析|导图|报告).*$"),
+]
+_GENERIC_TITLE_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:(?:课程|物理|数学|化学|生物|英语|语文|政治|历史|地理)?(?:思维向导|课程思维向导|课程导学手册|课程学习手册|学习手册|导学手册))\s*[：:]?\s*"
+)
 
 _FILENAME_NOISE_PATTERNS = [
     re.compile(r"\(\d+\)"),
@@ -45,14 +61,13 @@ class AutoTagService:
     ) -> list[str]:
         """Match *filename* against textbook tag vocabulary. Preserves *existing_tags*, appends auto-matched tags (max 20 total)."""
         vocabulary = self._get_vocabulary(db, subject)
-        if not vocabulary:
-            return list(existing_tags or [])
-
         clean_title = self._clean_title(filename)
         if len(clean_title) < _MIN_TITLE_LENGTH:
             return list(existing_tags or [])
 
-        matched = self._match_tags(clean_title, vocabulary)
+        matched = self._match_tags(clean_title, vocabulary) if vocabulary else []
+        if not matched and not existing_tags:
+            matched = self._extract_title_tags(clean_title)
 
         merged = list(existing_tags or [])
         existing_lower = {t.lower() for t in merged}
@@ -73,23 +88,53 @@ class AutoTagService:
         return self._cache.get(subject, [])
 
     def _refresh_cache(self, db: Session) -> None:
-        from backend.models.knowledge import KnowledgeDocument, ResourceType
+        from backend.models.knowledge import (
+            KnowledgeChunk,
+            KnowledgeDocument,
+            ResourceType,
+        )
 
-        rows = db.execute(
-            select(KnowledgeDocument.tags_json, KnowledgeDocument.subject).where(
+        document_rows = db.execute(
+            select(
+                KnowledgeDocument.tags_json,
+                KnowledgeDocument.subject,
+                KnowledgeDocument.chapter,
+                KnowledgeDocument.section,
+            ).where(
                 KnowledgeDocument.resource_type == ResourceType.TEXTBOOK.value
             )
         ).all()
+        chunk_rows = db.execute(
+            select(KnowledgeChunk.metadata_json, KnowledgeDocument.subject)
+            .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+            .where(KnowledgeDocument.resource_type == ResourceType.TEXTBOOK.value)
+        ).all()
 
         by_subject: dict[str, set[str]] = {}
-        for tags_json, subject in rows:
-            if not tags_json or not subject:
+        for tags_json, subject, chapter, section in document_rows:
+            if not subject:
                 continue
             by_subject.setdefault(subject, set())
-            for tag in tags_json:
-                tag = str(tag).strip()
-                if len(tag) >= _MIN_TAG_LENGTH:
-                    by_subject[subject].add(tag)
+            for candidate in [
+                *(tags_json or []),
+                chapter,
+                section,
+            ]:
+                normalized = self._normalize_tag_candidate(candidate)
+                if normalized:
+                    by_subject[subject].add(normalized)
+
+        for metadata_json, subject in chunk_rows:
+            if not subject or not metadata_json:
+                continue
+            by_subject.setdefault(subject, set())
+            for candidate in [
+                metadata_json.get("chapter"),
+                metadata_json.get("section"),
+            ]:
+                normalized = self._normalize_tag_candidate(candidate)
+                if normalized:
+                    by_subject[subject].add(normalized)
 
         self._cache = {}
         for subject, tags in by_subject.items():
@@ -111,6 +156,19 @@ class AutoTagService:
             title = pattern.sub("", title)
         return re.sub(r"\s+", " ", title).strip()
 
+    def _normalize_tag_candidate(self, value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        if len(normalized) < _MIN_TAG_LENGTH:
+            return None
+
+        for pattern in _TAG_PREFIX_PATTERNS:
+            normalized = pattern.sub("", normalized).strip()
+
+        normalized = re.sub(r"\s+", " ", normalized).strip("：:—-·•,，.。 ")
+        if len(normalized) < _MIN_TAG_LENGTH:
+            return None
+        return normalized
+
     def _match_tags(self, title: str, vocabulary: list[str]) -> list[str]:
         matched: list[str] = []
         matched_lower: list[str] = []
@@ -126,6 +184,43 @@ class AutoTagService:
             matched_lower.append(tag_lower)
 
         return matched
+
+    def _extract_title_tags(self, title: str) -> list[str]:
+        candidates: list[str] = []
+        candidates.extend(match.strip() for match in re.findall(r"《([^》]+)》", title))
+        if "：" in title or ":" in title:
+            candidates.append(re.split(r"[：:]", title, maxsplit=1)[-1].strip())
+        candidates.append(title)
+
+        extracted: list[str] = []
+        extracted_lower: set[str] = set()
+        for candidate in candidates:
+            normalized = self._normalize_title_tag_candidate(candidate)
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in extracted_lower:
+                continue
+            if any(key in existing or existing in key for existing in extracted_lower):
+                continue
+            extracted.append(normalized)
+            extracted_lower.add(key)
+        return extracted[:5]
+
+    def _normalize_title_tag_candidate(self, value: str | None) -> str | None:
+        normalized = self._normalize_tag_candidate(value)
+        if not normalized:
+            return None
+
+        normalized = normalized.replace("《", "").replace("》", "")
+        normalized = _GENERIC_TITLE_PREFIX_PATTERN.sub("", normalized).strip()
+        for pattern in _GENERIC_TITLE_SUFFIX_PATTERNS:
+            normalized = pattern.sub("", normalized).strip()
+
+        normalized = re.sub(r"\s+", " ", normalized).strip("：:—-·•,，.。 ")
+        if len(normalized) < _MIN_TAG_LENGTH:
+            return None
+        return normalized
 
 
 auto_tag_service = AutoTagService()

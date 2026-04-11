@@ -1643,12 +1643,47 @@ def test_rerank_rows_prefers_chunk_level_structure_match_over_wrong_chapter(tmp_
 def test_extract_text_supports_markdown_files(tmp_path):
     rag_service = build_rag_service(tmp_path)
     source_file = tmp_path / "formula.md"
-    source_file.write_text("# 机械能守恒\n\n公式：$$E_k=\\frac{1}{2}mv^2$$", encoding="utf-8")
+    source_file.write_text(
+        "# 机械能守恒\n\n"
+        "公式：$$E\\_k\\=\\frac{1}{2}mv^2$$\n"
+        "一个质量为\n"
+        "$15kg$\n"
+        "的\n"
+        "$4$\n"
+        "岁儿童从\n"
+        "$9m$\n"
+        "高处坠落。\n",
+        encoding="utf-8",
+    )
 
     extracted = rag_service.extract_text(str(source_file), "text/markdown")
 
     assert "机械能守恒" in extracted
     assert "$$E_k=\\frac{1}{2}mv^2$$" in extracted
+    assert "一个质量为 $15kg$ 的 $4$ 岁儿童从 $9m$ 高处坠落。" in extracted
+
+
+def test_prepare_chunks_keeps_inline_markdown_math_on_the_same_line(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=1,
+        subject="物理",
+        filename="时间与位移.md",
+        file_path=str(tmp_path / "time.md"),
+        mime_type="text/markdown",
+        size_bytes=0,
+        resource_type=ResourceType.KNOWLEDGE_NOTE.value,
+    )
+    text = (
+        "一个质量为 $15kg$ 的 $4$ 岁儿童从 $9m$ 高处坠落，"
+        "触手时刻的速度高达 $13.4m/s$。\n\n"
+        "公式：$$E_k=\\frac{1}{2}mv^2$$"
+    )
+
+    chunks = rag_service.prepare_document_chunks(document, text)
+    combined = "\n".join(chunk.content for chunk in chunks)
+
+    assert "一个质量为 $15kg$ 的 $4$ 岁儿童从 $9m$ 高处坠落，触手时刻的速度高达 $13.4m/s$。" in combined
 
 
 def test_extract_text_supports_native_docx_equations(tmp_path):
