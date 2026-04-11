@@ -30,4 +30,25 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/katex')) {
+            return 'math'
+          }
+          if (id.includes('node_modules/axios')) {
+            return 'network'
+          }
+          if (
+            id.includes('node_modules/vue/')
+            || id.includes('node_modules/vue-router/')
+            || id.includes('node_modules/pinia/')
+          ) {
+            return 'framework'
+          }
+        },
+      },
+    },
+  },
 })
