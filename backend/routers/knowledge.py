@@ -15,7 +15,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, or_, select
 
 from backend.config import get_settings
 from backend.dependencies import CurrentTeacher, CurrentUser, DbSession
@@ -33,6 +33,9 @@ from backend.models.schemas import (
     KnowledgeDocumentBulkUpdate,
     KnowledgeDocumentRead,
     KnowledgeDocumentUpdate,
+    PaginatedImportTaskRead,
+    PaginatedKnowledgeDocumentRead,
+    StatusSummaryRead,
 )
 from backend.services.audit_service import audit_service
 from backend.services.auto_tag_service import auto_tag_service
@@ -50,6 +53,7 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 settings = get_settings()
 ACTIVE_TASK_STATUSES = {DocumentStatus.PENDING, DocumentStatus.PROCESSING}
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
+METADATA_SUGGESTION_FIELDS = {"chapter", "section", "tag"}
 GENERIC_UPLOAD_MIME_TYPES = {"", "application/octet-stream"}
 UPLOAD_MIME_COMPATIBILITY = {
     ".pdf": {
@@ -217,6 +221,131 @@ def _document_detail(document: KnowledgeDocument) -> dict:
     }
 
 
+def _build_status_summary(rows: list[tuple[DocumentStatus, int]]) -> StatusSummaryRead:
+    counts = {status: count for status, count in rows}
+    return StatusSummaryRead(
+        total=sum(counts.values()),
+        active=int(counts.get(DocumentStatus.PENDING, 0))
+        + int(counts.get(DocumentStatus.PROCESSING, 0)),
+        failed=int(counts.get(DocumentStatus.FAILED, 0)),
+        completed=int(counts.get(DocumentStatus.COMPLETED, 0)),
+        cancelled=int(counts.get(DocumentStatus.CANCELLED, 0)),
+    )
+
+
+def _task_summary(db: DbSession) -> StatusSummaryRead:
+    rows = db.execute(
+        select(ImportTask.status, func.count(ImportTask.id)).group_by(ImportTask.status)
+    ).all()
+    return _build_status_summary(rows)
+
+
+def _document_summary(db: DbSession) -> StatusSummaryRead:
+    rows = db.execute(
+        select(KnowledgeDocument.status, func.count(KnowledgeDocument.id)).group_by(
+            KnowledgeDocument.status
+        )
+    ).all()
+    return _build_status_summary(rows)
+
+
+def _document_read(
+    document: KnowledgeDocument, *, has_active_task: bool = False
+) -> KnowledgeDocumentRead:
+    return KnowledgeDocumentRead(
+        id=document.id,
+        subject=document.subject,
+        filename=document.filename,
+        mime_type=document.mime_type,
+        size_bytes=document.size_bytes,
+        resource_type=document.resource_type,
+        grade=document.grade,
+        chapter=document.chapter,
+        section=document.section,
+        difficulty=document.difficulty,
+        tags=document.tags,
+        status=document.status,
+        has_active_task=has_active_task,
+        error_message=document.error_message,
+        created_at=document.created_at,
+    )
+
+
+def _rank_suggestions(
+    values: list[str], *, query: str | None, limit: int
+) -> list[str]:
+    normalized_query = (query or "").strip().lower()
+    deduped: dict[str, str] = {}
+    for value in values:
+        normalized = str(value).strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if normalized_query and normalized_query not in key:
+            continue
+        deduped.setdefault(key, normalized)
+    return sorted(
+        deduped.values(),
+        key=lambda item: (
+            not item.lower().startswith(normalized_query),
+            item.lower(),
+        ),
+    )[:limit]
+
+
+def _tags_match_query(tags: list[str] | None, query: str | None) -> bool:
+    normalized_query = (query or "").strip().lower()
+    if not normalized_query:
+        return True
+    return any(normalized_query in str(tag).strip().lower() for tag in (tags or []))
+
+
+def _metadata_suggestions(
+    db: DbSession,
+    *,
+    field: str,
+    query: str | None,
+    subject: str | None,
+    limit: int,
+) -> list[str]:
+    if field not in METADATA_SUGGESTION_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported metadata suggestion field",
+        )
+    if limit < 1 or limit > 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid suggestion limit",
+        )
+
+    if field == "tag":
+        stmt = select(KnowledgeDocument.tags_json)
+        if subject:
+            stmt = stmt.where(KnowledgeDocument.subject == subject)
+        rows = db.scalars(stmt).all()
+        values = [
+            str(tag).strip()
+            for tag_list in rows
+            for tag in (tag_list or [])
+            if str(tag).strip()
+        ]
+        return _rank_suggestions(values, query=query, limit=limit)
+
+    column = (
+        KnowledgeDocument.chapter
+        if field == "chapter"
+        else KnowledgeDocument.section
+    )
+    stmt = select(column).where(column.is_not(None))
+    if subject:
+        stmt = stmt.where(KnowledgeDocument.subject == subject)
+    if query:
+        stmt = stmt.where(column.ilike(f"%{query.strip()}%"))
+    values = [item for item in db.scalars(stmt.distinct()).all() if item]
+    return _rank_suggestions(values, query=query, limit=limit)
+
+
 def _chunk_read(row: KnowledgeChunk) -> KnowledgeChunkRead:
     metadata = row.metadata_json or {}
     document = row.document
@@ -281,18 +410,206 @@ def _sync_document_state(
     return document
 
 
-@router.get("/documents", response_model=list[KnowledgeDocumentRead])
+@router.get(
+    "/documents",
+    response_model=list[KnowledgeDocumentRead] | PaginatedKnowledgeDocumentRead,
+)
 def list_documents(
-    db: DbSession, current_user: CurrentTeacher
-) -> list[KnowledgeDocumentRead]:
+    db: DbSession,
+    current_user: CurrentTeacher,
+    page: int | None = None,
+    page_size: int | None = None,
+    subject: str | None = None,
+    status_filter: DocumentStatus | None = None,
+    resource_type: str | None = None,
+    grade: int | None = None,
+    difficulty: str | None = None,
+    chapter: str | None = None,
+    section: str | None = None,
+    tag: str | None = None,
+    keyword: str | None = None,
+) -> list[KnowledgeDocumentRead] | PaginatedKnowledgeDocumentRead:
     dispatch_next_pdf_task(db)
-    documents = db.scalars(
-        select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())
-    ).all()
-    return [
-        KnowledgeDocumentRead.model_validate(_sync_document_state(item, db))
-        for item in documents
-    ]
+    is_paginated = any(
+        value is not None and value != ""
+        for value in [
+            page,
+            page_size,
+            subject,
+            status_filter,
+            resource_type,
+            grade,
+            difficulty,
+            chapter,
+            section,
+            tag,
+            keyword,
+        ]
+    )
+    if not is_paginated:
+        documents = db.scalars(
+            select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())
+        ).all()
+        active_ids = {
+            item
+            for item in db.scalars(
+                select(ImportTask.document_id)
+                .where(ImportTask.status.in_(ACTIVE_TASK_STATUSES))
+                .distinct()
+            ).all()
+        }
+        return [
+            _document_read(
+                _sync_document_state(item, db), has_active_task=item.id in active_ids
+            )
+            for item in documents
+        ]
+
+    page = page or 1
+    page_size = page_size or 20
+    if page < 1 or page_size < 1 or page_size > 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid pagination parameters",
+        )
+
+    query = select(KnowledgeDocument)
+    count_query = select(func.count(KnowledgeDocument.id))
+
+    if subject:
+        query = query.where(KnowledgeDocument.subject == subject)
+        count_query = count_query.where(KnowledgeDocument.subject == subject)
+    if status_filter:
+        query = query.where(KnowledgeDocument.status == status_filter)
+        count_query = count_query.where(KnowledgeDocument.status == status_filter)
+    if resource_type:
+        query = query.where(KnowledgeDocument.resource_type == resource_type)
+        count_query = count_query.where(KnowledgeDocument.resource_type == resource_type)
+    if grade is not None:
+        query = query.where(KnowledgeDocument.grade == grade)
+        count_query = count_query.where(KnowledgeDocument.grade == grade)
+    if difficulty:
+        query = query.where(KnowledgeDocument.difficulty == difficulty)
+        count_query = count_query.where(KnowledgeDocument.difficulty == difficulty)
+    if chapter:
+        query = query.where(KnowledgeDocument.chapter.ilike(f"%{chapter.strip()}%"))
+        count_query = count_query.where(
+            KnowledgeDocument.chapter.ilike(f"%{chapter.strip()}%")
+        )
+    if section:
+        query = query.where(KnowledgeDocument.section.ilike(f"%{section.strip()}%"))
+        count_query = count_query.where(
+            KnowledgeDocument.section.ilike(f"%{section.strip()}%")
+        )
+    if keyword:
+        like_keyword = f"%{keyword.strip()}%"
+        keyword_clause = or_(
+            KnowledgeDocument.filename.ilike(like_keyword),
+            KnowledgeDocument.chapter.ilike(like_keyword),
+            KnowledgeDocument.section.ilike(like_keyword),
+            KnowledgeDocument.error_message.ilike(like_keyword),
+            cast(KnowledgeDocument.tags_json, String).ilike(like_keyword),
+        )
+        query = query.where(keyword_clause)
+        count_query = count_query.where(keyword_clause)
+
+    if tag:
+        matching_rows = db.execute(
+            query.with_only_columns(
+                KnowledgeDocument.id, KnowledgeDocument.tags_json, maintain_column_froms=True
+            ).order_by(KnowledgeDocument.created_at.desc())
+        ).all()
+        matching_ids = [
+            document_id
+            for document_id, tags_json in matching_rows
+            if _tags_match_query(tags_json, tag)
+        ]
+        total = len(matching_ids)
+        page_ids = matching_ids[(page - 1) * page_size : page * page_size]
+        if not page_ids:
+            synced_rows: list[KnowledgeDocument] = []
+        else:
+            row_map = {
+                row.id: row
+                for row in db.scalars(
+                    select(KnowledgeDocument)
+                    .where(KnowledgeDocument.id.in_(page_ids))
+                    .order_by(KnowledgeDocument.created_at.desc())
+                ).all()
+            }
+            synced_rows = [_sync_document_state(row_map[item], db) for item in page_ids if item in row_map]
+    else:
+        total = int(db.scalar(count_query) or 0)
+        rows = db.scalars(
+            query.order_by(KnowledgeDocument.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        synced_rows = [_sync_document_state(item, db) for item in rows]
+    active_ids = set()
+    if synced_rows:
+        active_ids = {
+            item
+            for item in db.scalars(
+                select(ImportTask.document_id)
+                .where(
+                    ImportTask.document_id.in_([row.id for row in synced_rows]),
+                    ImportTask.status.in_(ACTIVE_TASK_STATUSES),
+                )
+                .distinct()
+            ).all()
+        }
+    return PaginatedKnowledgeDocumentRead(
+        items=[
+            _document_read(item, has_active_task=item.id in active_ids)
+            for item in synced_rows
+        ],
+        page=page,
+        page_size=page_size,
+        total=total,
+        summary=_document_summary(db),
+    )
+
+
+@router.get("/metadata-suggestions", response_model=list[str])
+def list_metadata_suggestions(
+    field: str,
+    db: DbSession,
+    current_user: CurrentTeacher,
+    query: str | None = None,
+    subject: str | None = None,
+    limit: int = 10,
+) -> list[str]:
+    return _metadata_suggestions(
+        db,
+        field=field,
+        query=query,
+        subject=subject,
+        limit=limit,
+    )
+
+
+@router.get("/documents/{document_id}", response_model=KnowledgeDocumentRead)
+def get_document(
+    document_id: int, db: DbSession, current_user: CurrentTeacher
+) -> KnowledgeDocumentRead:
+    document = db.get(KnowledgeDocument, document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        )
+    document = _sync_document_state(document, db)
+    has_active_task = bool(
+        db.scalar(
+            select(ImportTask.id)
+            .where(
+                ImportTask.document_id == document_id,
+                ImportTask.status.in_(ACTIVE_TASK_STATUSES),
+            )
+            .limit(1)
+        )
+    )
+    return _document_read(document, has_active_task=has_active_task)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[KnowledgeChunkRead])
@@ -537,15 +854,48 @@ def update_document(
     return KnowledgeDocumentRead.model_validate(document)
 
 
-@router.get("/tasks", response_model=list[ImportTaskRead])
+@router.get("/tasks", response_model=list[ImportTaskRead] | PaginatedImportTaskRead)
 def list_tasks(
-    limit: int = 100, db: DbSession = None, current_user: CurrentTeacher = None
-) -> list[ImportTaskRead]:
+    limit: int | None = None,
+    db: DbSession = None,
+    current_user: CurrentTeacher = None,
+    page: int | None = None,
+    page_size: int | None = None,
+    status_filter: DocumentStatus | None = None,
+) -> list[ImportTaskRead] | PaginatedImportTaskRead:
     dispatch_next_pdf_task(db)
+    is_paginated = page is not None or page_size is not None or status_filter is not None
+    query = select(ImportTask)
+    count_query = select(func.count(ImportTask.id))
+    if status_filter is not None:
+        query = query.where(ImportTask.status == status_filter)
+        count_query = count_query.where(ImportTask.status == status_filter)
+    query = query.order_by(ImportTask.updated_at.desc())
+
+    if not is_paginated:
+        if limit is not None:
+            query = query.limit(limit)
+        tasks = db.scalars(query).all()
+        return [ImportTaskRead.model_validate(sync_task_state(task, db)) for task in tasks]
+
+    page = page or 1
+    page_size = page_size or 10
+    if page < 1 or page_size < 1 or page_size > 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid pagination parameters",
+        )
+    total = int(db.scalar(count_query) or 0)
     tasks = db.scalars(
-        select(ImportTask).order_by(ImportTask.updated_at.desc()).limit(limit)
+        query.offset((page - 1) * page_size).limit(page_size)
     ).all()
-    return [ImportTaskRead.model_validate(sync_task_state(task, db)) for task in tasks]
+    return PaginatedImportTaskRead(
+        items=[ImportTaskRead.model_validate(sync_task_state(task, db)) for task in tasks],
+        page=page,
+        page_size=page_size,
+        total=total,
+        summary=_task_summary(db),
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=ImportTaskRead)

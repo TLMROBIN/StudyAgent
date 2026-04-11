@@ -21,6 +21,7 @@ interface KnowledgeDoc {
   difficulty?: string | null
   tags: string[]
   status: string
+  has_active_task: boolean
   error_message?: string | null
   created_at: string
 }
@@ -37,6 +38,34 @@ interface ImportTask {
   document_subject?: string | null
   created_at: string
   updated_at: string
+}
+
+interface StatusSummary {
+  total: number
+  active: number
+  failed: number
+  completed: number
+  cancelled: number
+}
+
+interface PaginatedTaskResponse {
+  items: ImportTask[]
+  page: number
+  page_size: number
+  total: number
+  summary: StatusSummary
+}
+
+interface PaginatedDocumentResponse {
+  items: KnowledgeDoc[]
+  page: number
+  page_size: number
+  total: number
+  summary: StatusSummary
+}
+
+interface SuggestionItem {
+  value: string
 }
 
 interface KnowledgeChunk {
@@ -104,6 +133,15 @@ const statusOptions = [
   { value: 'failed', label: '失败' },
   { value: 'cancelled', label: '已取消' },
 ]
+const TASKS_PAGE_SIZE = 10
+const DOCUMENTS_PAGE_SIZE = 20
+const emptySummary = (): StatusSummary => ({
+  total: 0,
+  active: 0,
+  failed: 0,
+  completed: 0,
+  cancelled: 0,
+})
 
 const uploadForm = reactive({
   subject: '数学',
@@ -151,23 +189,34 @@ const latestTask = ref<ImportTask | null>(null)
 const previewDialogVisible = ref(false)
 const previewLoading = ref(false)
 const previewDocumentId = ref<number | null>(null)
+const previewDocumentSnapshot = ref<KnowledgeDoc | null>(null)
 const previewChunks = ref<KnowledgeChunk[]>([])
 const previewError = ref('')
 const selectedDocumentIds = ref<number[]>([])
 const taskStatusFilter = ref('all')
+const taskPage = ref(1)
 const documentSubjectFilter = ref('all')
 const documentStatusFilter = ref('all')
 const documentResourceTypeFilter = ref('all')
 const documentGradeFilter = ref<'all' | number>('all')
 const documentDifficultyFilter = ref('all')
+const documentChapterFilter = ref('')
+const documentSectionFilter = ref('')
+const documentTagFilter = ref('')
 const documentKeyword = ref('')
+const documentPage = ref(1)
 const uploading = ref(false)
 const uploadRef = ref<UploadInstance | null>(null)
 const selectedUploadFiles = ref<UploadUserFile[]>([])
 const deletingTaskIds = ref<number[]>([])
 const deletingDocumentIds = ref<number[]>([])
+const uploadTagDraft = ref('')
 const chunkCache = reactive<Record<number, KnowledgeChunk[]>>({})
 const chunkSummaryCache = reactive<Record<number, ChunkPreviewSummary>>({})
+const taskTotal = ref(0)
+const documentTotal = ref(0)
+const taskSummary = ref<StatusSummary>(emptySummary())
+const documentSummary = ref<StatusSummary>(emptySummary())
 let pollingTimer: number | null = null
 const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 
@@ -178,70 +227,14 @@ const editSupportsChapter = computed(() => editForm.resource_type !== 'extension
 const batchResourceTypeSupportsDifficulty = computed(() => questionResourceTypes.has(batchForm.resource_type))
 const batchResourceTypeSupportsChapter = computed(() => batchForm.resource_type !== 'extension')
 
-const taskSummary = computed(() => ({
-  total: tasks.value.length,
-  active: tasks.value.filter((item) => isActiveStatus(item.status)).length,
-  failed: tasks.value.filter((item) => item.status === 'failed').length,
-  completed: tasks.value.filter((item) => item.status === 'completed').length,
-  cancelled: tasks.value.filter((item) => item.status === 'cancelled').length,
-}))
-
-const documentSummary = computed(() => ({
-  total: documents.value.length,
-  active: documents.value.filter((item) => documentHasActiveTask(item.id)).length,
-  failed: documents.value.filter((item) => item.status === 'failed').length,
-  completed: documents.value.filter((item) => item.status === 'completed').length,
-  cancelled: documents.value.filter((item) => item.status === 'cancelled').length,
-}))
-
-const filteredTasks = computed(() => tasks.value.filter((item) => {
-  return taskStatusFilter.value === 'all' || item.status === taskStatusFilter.value
-}))
-
-const filteredDocuments = computed(() => {
-  const keyword = documentKeyword.value.trim().toLowerCase()
-  return documents.value.filter((item) => {
-    if (documentSubjectFilter.value !== 'all' && item.subject !== documentSubjectFilter.value) {
-      return false
-    }
-    if (documentStatusFilter.value !== 'all' && item.status !== documentStatusFilter.value) {
-      return false
-    }
-    if (documentResourceTypeFilter.value !== 'all' && item.resource_type !== documentResourceTypeFilter.value) {
-      return false
-    }
-    if (documentGradeFilter.value !== 'all' && item.grade !== documentGradeFilter.value) {
-      return false
-    }
-    if (documentDifficultyFilter.value !== 'all' && item.difficulty !== documentDifficultyFilter.value) {
-      return false
-    }
-    if (keyword) {
-      const haystack = [
-        item.filename,
-        item.chapter || '',
-        item.section || '',
-        item.error_message || '',
-        ...item.tags,
-      ]
-        .join(' ')
-        .toLowerCase()
-      if (!haystack.includes(keyword)) {
-        return false
-      }
-    }
-    return true
-  })
-})
-
-const selectedDocuments = computed(() => documents.value.filter((item) => selectedDocumentIds.value.includes(item.id)))
-const selectedEditableDocuments = computed(() => selectedDocuments.value.filter((item) => !documentHasActiveTask(item.id)))
-const filteredSelectableDocuments = computed(() => filteredDocuments.value.filter((item) => !documentHasActiveTask(item.id)))
-const allFilteredSelectableSelected = computed(() => {
-  if (!filteredSelectableDocuments.value.length) {
+const selectedEditableDocumentIds = computed(() => [...selectedDocumentIds.value])
+const selectedEditableDocumentCount = computed(() => selectedEditableDocumentIds.value.length)
+const currentPageSelectableDocuments = computed(() => documents.value.filter((item) => !item.has_active_task))
+const allCurrentPageSelectableSelected = computed(() => {
+  if (!currentPageSelectableDocuments.value.length) {
     return false
   }
-  return filteredSelectableDocuments.value.every((item) => selectedDocumentIds.value.includes(item.id))
+  return currentPageSelectableDocuments.value.every((item) => selectedDocumentIds.value.includes(item.id))
 })
 const editingDocument = computed(() => documents.value.find((item) => item.id === editingDocumentId.value) || null)
 const editNeedsReingest = computed(() => {
@@ -252,12 +245,14 @@ const editNeedsReingest = computed(() => {
   )
 })
 const batchNeedsReingest = computed(() => {
-  return Boolean(
-    batchForm.apply_resource_type
-    && selectedEditableDocuments.value.some((item) => item.status === 'completed' && item.resource_type !== batchForm.resource_type),
-  )
+  return Boolean(batchForm.apply_resource_type)
 })
-const previewDocument = computed(() => documents.value.find((item) => item.id === previewDocumentId.value) || null)
+const previewDocument = computed(() => {
+  if (previewDocumentId.value === null) {
+    return null
+  }
+  return documents.value.find((item) => item.id === previewDocumentId.value) || previewDocumentSnapshot.value
+})
 const previewSummary = computed(() => {
   if (previewDocumentId.value === null) {
     return null
@@ -276,7 +271,7 @@ function isActiveStatus(status: string) {
 }
 
 function documentHasActiveTask(documentId: number) {
-  return tasks.value.some((item) => item.document_id === documentId && isActiveStatus(item.status))
+  return documents.value.some((item) => item.id === documentId && item.has_active_task)
 }
 
 function statusLabel(status: string) {
@@ -326,6 +321,11 @@ function progressStatus(status: string) {
     return 'success'
   }
   return undefined
+}
+
+function clampPage(page: number, total: number, pageSize: number) {
+  const maxPage = Math.max(1, Math.ceil(total / pageSize))
+  return Math.min(Math.max(page, 1), maxPage)
 }
 
 function markBusy(target: typeof deletingTaskIds | typeof deletingDocumentIds, id: number) {
@@ -530,6 +530,11 @@ async function ensureLatestTaskSummary(task: ImportTask | null) {
   }
 }
 
+async function fetchDocumentById(documentId: number) {
+  const { data } = await api.get<KnowledgeDoc>(`/knowledge/documents/${documentId}`)
+  return data
+}
+
 async function openChunkPreview(document: KnowledgeDoc) {
   if (document.status !== 'completed') {
     ElMessage.info('资料尚未完成导入，当前没有可预览的切分结果')
@@ -538,6 +543,7 @@ async function openChunkPreview(document: KnowledgeDoc) {
   previewDialogVisible.value = true
   previewLoading.value = true
   previewDocumentId.value = document.id
+  previewDocumentSnapshot.value = document
   previewError.value = ''
   try {
     previewChunks.value = await fetchDocumentChunks(document.id)
@@ -553,10 +559,7 @@ async function openChunkPreview(document: KnowledgeDoc) {
 
 async function openTaskChunkPreview(task: ImportTask) {
   const document = documents.value.find((item) => item.id === task.document_id)
-  if (!document) {
-    ElMessage.error('未找到对应资料记录')
-    return
-  }
+    || await fetchDocumentById(task.document_id)
   await openChunkPreview(document)
 }
 
@@ -588,6 +591,92 @@ function normalizeTagsInput(value: string) {
     .split(/[,\n，]/)
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function currentTagFragment(value: string) {
+  const parts = value.split(/[，,]/)
+  return (parts.at(-1) || '').trim()
+}
+
+function mergeTagSuggestion(rawValue: string, suggestion: string) {
+  const parts = rawValue.split(/([，,])/)
+  if (!parts.length) {
+    return suggestion
+  }
+
+  let sawContent = false
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (!parts[index].trim() && sawContent) {
+      continue
+    }
+    if (parts[index] === ',' || parts[index] === '，') {
+      parts.push(` ${suggestion}`)
+      return parts.join('').replace(/\s+/g, ' ').trim()
+    }
+    sawContent = true
+    parts[index] = suggestion
+    return parts.join('').replace(/\s+/g, ' ').trim()
+  }
+
+  return suggestion
+}
+
+async function fetchMetadataSuggestions(
+  field: 'chapter' | 'section' | 'tag',
+  queryString: string,
+  callback: (items: SuggestionItem[]) => void,
+  subject?: string,
+) {
+  const trimmedQuery = queryString.trim()
+  if (!trimmedQuery) {
+    callback([])
+    return
+  }
+
+  try {
+    const { data } = await api.get<string[]>('/knowledge/metadata-suggestions', {
+      params: {
+        field,
+        query: trimmedQuery,
+        subject: subject || undefined,
+        limit: 8,
+      },
+    })
+    callback(data.map((value) => ({ value })))
+  } catch (error) {
+    console.error(error)
+    callback([])
+  }
+}
+
+function fetchUploadChapterSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchMetadataSuggestions('chapter', queryString, callback, uploadForm.subject)
+}
+
+function fetchUploadSectionSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchMetadataSuggestions('section', queryString, callback, uploadForm.subject)
+}
+
+function fetchUploadTagSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  uploadTagDraft.value = queryString
+  void fetchMetadataSuggestions('tag', currentTagFragment(queryString), callback, uploadForm.subject)
+}
+
+function fetchFilterChapterSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchMetadataSuggestions('chapter', queryString, callback, documentSubjectFilter.value === 'all' ? undefined : documentSubjectFilter.value)
+}
+
+function fetchFilterSectionSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchMetadataSuggestions('section', queryString, callback, documentSubjectFilter.value === 'all' ? undefined : documentSubjectFilter.value)
+}
+
+function fetchFilterTagSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchMetadataSuggestions('tag', queryString, callback, documentSubjectFilter.value === 'all' ? undefined : documentSubjectFilter.value)
+}
+
+function applyUploadTagSuggestion(item: SuggestionItem) {
+  uploadForm.tags = mergeTagSuggestion(uploadTagDraft.value || uploadForm.tags, item.value)
+  uploadTagDraft.value = uploadForm.tags
 }
 
 function sanitizeUploadMetadata() {
@@ -638,15 +727,12 @@ function resetBatchForm() {
 }
 
 function syncSelectedDocuments() {
-  const selectableIds = new Set(
-    documents.value.filter((item) => !documentHasActiveTask(item.id)).map((item) => item.id),
-  )
-  selectedDocumentIds.value = selectedDocumentIds.value.filter((id) => selectableIds.has(id))
+  selectedDocumentIds.value = [...new Set(selectedDocumentIds.value)]
 }
 
-function selectFilteredDocuments() {
+function selectCurrentPageDocuments() {
   const next = new Set(selectedDocumentIds.value)
-  filteredSelectableDocuments.value.forEach((item) => next.add(item.id))
+  currentPageSelectableDocuments.value.forEach((item) => next.add(item.id))
   selectedDocumentIds.value = [...next]
 }
 
@@ -655,19 +741,80 @@ function clearSelectedDocuments() {
 }
 
 async function loadDocuments() {
-  const { data } = await api.get<KnowledgeDoc[]>('/knowledge/documents')
-  documents.value = data
+  const params: Record<string, string | number> = {
+    page: documentPage.value,
+    page_size: DOCUMENTS_PAGE_SIZE,
+  }
+  if (documentSubjectFilter.value !== 'all') {
+    params.subject = documentSubjectFilter.value
+  }
+  if (documentStatusFilter.value !== 'all') {
+    params.status_filter = documentStatusFilter.value
+  }
+  if (documentResourceTypeFilter.value !== 'all') {
+    params.resource_type = documentResourceTypeFilter.value
+  }
+  if (documentGradeFilter.value !== 'all') {
+    params.grade = documentGradeFilter.value
+  }
+  if (documentDifficultyFilter.value !== 'all') {
+    params.difficulty = documentDifficultyFilter.value
+  }
+  if (documentChapterFilter.value.trim()) {
+    params.chapter = documentChapterFilter.value.trim()
+  }
+  if (documentSectionFilter.value.trim()) {
+    params.section = documentSectionFilter.value.trim()
+  }
+  if (documentTagFilter.value.trim()) {
+    params.tag = documentTagFilter.value.trim()
+  }
+  if (documentKeyword.value.trim()) {
+    params.keyword = documentKeyword.value.trim()
+  }
+
+  const { data } = await api.get<PaginatedDocumentResponse>('/knowledge/documents', { params })
+  const nextPage = clampPage(documentPage.value, data.total, DOCUMENTS_PAGE_SIZE)
+  if (nextPage !== documentPage.value) {
+    documentPage.value = nextPage
+    return
+  }
+  documents.value = data.items
+  documentTotal.value = data.total
+  documentSummary.value = data.summary
 }
 
 async function loadTasks() {
-  const { data } = await api.get<ImportTask[]>('/knowledge/tasks', { params: { limit: 100 } })
-  tasks.value = data
-  latestTask.value = data[0] || null
+  const params: Record<string, string | number> = {
+    page: taskPage.value,
+    page_size: TASKS_PAGE_SIZE,
+  }
+  if (taskStatusFilter.value !== 'all') {
+    params.status_filter = taskStatusFilter.value
+  }
+
+  const { data } = await api.get<PaginatedTaskResponse>('/knowledge/tasks', { params })
+  const nextPage = clampPage(taskPage.value, data.total, TASKS_PAGE_SIZE)
+  if (nextPage !== taskPage.value) {
+    taskPage.value = nextPage
+    return
+  }
+  tasks.value = data.items
+  taskTotal.value = data.total
+  taskSummary.value = data.summary
+}
+
+async function loadLatestTask() {
+  const { data } = await api.get<PaginatedTaskResponse>('/knowledge/tasks', {
+    params: { page: 1, page_size: 1 },
+  })
+  latestTask.value = data.items[0] || null
+  taskSummary.value = data.summary
 }
 
 async function refreshData(silent = false) {
   try {
-    await Promise.all([loadTasks(), loadDocuments()])
+    await Promise.all([loadLatestTask(), loadTasks(), loadDocuments()])
     syncSelectedDocuments()
     refreshCachedChunkSummaries()
   } catch (error) {
@@ -682,7 +829,7 @@ function startPolling() {
   stopPolling()
   pollingTimer = window.setInterval(async () => {
     await refreshData(true)
-    const active = tasks.value.some((item) => isActiveStatus(item.status))
+    const active = taskSummary.value.active > 0
     if (!active) {
       stopPolling()
     }
@@ -854,7 +1001,7 @@ async function saveDocumentMetadata() {
 }
 
 function openBatchDialog() {
-  if (!selectedEditableDocuments.value.length) {
+  if (!selectedEditableDocumentIds.value.length) {
     ElMessage.error('请先选择至少一份可编辑资料')
     return
   }
@@ -863,15 +1010,16 @@ function openBatchDialog() {
 }
 
 async function saveBatchMetadata() {
-  if (!selectedEditableDocuments.value.length) {
+  if (!selectedEditableDocumentIds.value.length) {
     ElMessage.error('没有可批量编辑的资料')
     return
   }
 
   sanitizeBatchMetadata()
   const needsReingest = batchNeedsReingest.value
+  const selectedCount = selectedEditableDocumentCount.value
   const payload: Record<string, unknown> = {
-    document_ids: selectedEditableDocuments.value.map((item) => item.id),
+    document_ids: selectedEditableDocumentIds.value,
   }
   let fieldCount = 0
 
@@ -912,8 +1060,8 @@ async function saveBatchMetadata() {
     await refreshData(true)
     ElMessage.success(
       needsReingest
-        ? `已批量更新 ${selectedEditableDocuments.value.length} 份资料；资料类型变化不会自动重新切分，如需按新类型处理请删除后重新上传`
-        : `已批量更新 ${selectedEditableDocuments.value.length} 份资料`,
+        ? `已批量更新 ${selectedCount} 份资料；资料类型变化不会自动重新切分，如需按新类型处理请删除后重新上传`
+        : `已批量更新 ${selectedCount} 份资料`,
     )
   } catch (error) {
     console.error(error)
@@ -921,6 +1069,30 @@ async function saveBatchMetadata() {
   } finally {
     batchSaving.value = false
   }
+}
+
+async function deleteDocuments(documentIds: number[]) {
+  const failures: string[] = []
+  let deletedCount = 0
+
+  for (const documentId of documentIds) {
+    markBusy(deletingDocumentIds, documentId)
+    try {
+      await api.delete(`/knowledge/documents/${documentId}`)
+      delete chunkCache[documentId]
+      delete chunkSummaryCache[documentId]
+      selectedDocumentIds.value = selectedDocumentIds.value.filter((item) => item !== documentId)
+      deletedCount += 1
+    } catch (error) {
+      console.error(error)
+      failures.push(`${documentId}：${extractApiErrorDetail(error) || '删除失败'}`)
+    } finally {
+      clearBusy(deletingDocumentIds, documentId)
+    }
+  }
+
+  await refreshData(true)
+  return { deletedCount, failures }
 }
 
 async function deleteDocument(document: KnowledgeDoc) {
@@ -932,19 +1104,35 @@ async function deleteDocument(document: KnowledgeDoc) {
     return
   }
 
-  markBusy(deletingDocumentIds, document.id)
-  try {
-    await api.delete(`/knowledge/documents/${document.id}`)
-    delete chunkCache[document.id]
-    delete chunkSummaryCache[document.id]
-    await refreshData(true)
+  const { deletedCount, failures } = await deleteDocuments([document.id])
+  if (deletedCount) {
     ElMessage.success('资料已删除')
-  } catch (error) {
-    console.error(error)
-    ElMessage.error('删除资料失败')
-  } finally {
-    clearBusy(deletingDocumentIds, document.id)
+    return
   }
+  ElMessage.error(failures[0] || '删除资料失败')
+}
+
+async function deleteSelectedDocuments() {
+  if (!selectedEditableDocumentIds.value.length) {
+    ElMessage.error('请先选择至少一份可删除资料')
+    return
+  }
+
+  const documentIds = [...selectedEditableDocumentIds.value]
+  if (!window.confirm(`确认批量删除已选中的 ${documentIds.length} 份资料？这会同时删除原文件、索引片段和关联任务记录。`)) {
+    return
+  }
+
+  const { deletedCount, failures } = await deleteDocuments(documentIds)
+  if (!failures.length) {
+    ElMessage.success(`已批量删除 ${deletedCount} 份资料`)
+    return
+  }
+  if (deletedCount) {
+    ElMessage.warning(`已删除 ${deletedCount} 份，失败 ${failures.length} 份`)
+    return
+  }
+  ElMessage.error(failures[0] || '批量删除失败')
 }
 
 watch(
@@ -955,10 +1143,69 @@ watch(
   { immediate: true },
 )
 
+watch(taskStatusFilter, () => {
+  if (taskPage.value !== 1) {
+    taskPage.value = 1
+    return
+  }
+  void Promise.all([loadLatestTask(), loadTasks()]).catch((error) => {
+    console.error(error)
+    ElMessage.error('任务列表加载失败')
+  })
+})
+
+watch(taskPage, () => {
+  void Promise.all([loadLatestTask(), loadTasks()]).catch((error) => {
+    console.error(error)
+    ElMessage.error('任务列表加载失败')
+  })
+})
+
+watch(
+  [
+    documentSubjectFilter,
+    documentStatusFilter,
+    documentResourceTypeFilter,
+    documentGradeFilter,
+    documentDifficultyFilter,
+    documentChapterFilter,
+    documentSectionFilter,
+    documentTagFilter,
+    documentKeyword,
+  ],
+  () => {
+    if (documentPage.value !== 1) {
+      documentPage.value = 1
+      return
+    }
+    void loadDocuments()
+      .then(() => {
+        syncSelectedDocuments()
+        refreshCachedChunkSummaries()
+      })
+      .catch((error) => {
+        console.error(error)
+        ElMessage.error('资料列表加载失败')
+      })
+  },
+)
+
+watch(documentPage, () => {
+  void loadDocuments()
+    .then(() => {
+      syncSelectedDocuments()
+      refreshCachedChunkSummaries()
+    })
+    .catch((error) => {
+      console.error(error)
+      ElMessage.error('资料列表加载失败')
+    })
+})
+
 onMounted(async () => {
   await refreshData()
   await ensureLatestTaskSummary(latestTask.value)
-  if (tasks.value.some((item) => isActiveStatus(item.status))) {
+  if (taskSummary.value.active > 0) {
     startPolling()
   }
 })
@@ -996,19 +1243,26 @@ onBeforeUnmount(() => {
         >
           <el-option v-for="item in difficultyOptions" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
-        <el-input
+        <el-autocomplete
           v-if="uploadSupportsChapter"
           v-model="uploadForm.chapter"
+          :fetch-suggestions="fetchUploadChapterSuggestions"
+          :trigger-on-focus="false"
           placeholder="章节，例如：第二章 机械运动"
         />
-        <el-input
+        <el-autocomplete
           v-if="uploadSupportsChapter"
           v-model="uploadForm.section"
+          :fetch-suggestions="fetchUploadSectionSuggestions"
+          :trigger-on-focus="false"
           placeholder="小节，例如：2.1 匀变速直线运动"
         />
-        <el-input
+        <el-autocomplete
           v-model="uploadForm.tags"
+          :fetch-suggestions="fetchUploadTagSuggestions"
+          :trigger-on-focus="false"
           class="knowledge-meta-grid__wide"
+          @select="applyUploadTagSuggestion"
           placeholder="标签，多个标签用逗号分隔"
         />
       </div>
@@ -1106,7 +1360,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="table-like">
-        <article v-for="item in filteredTasks" :key="item.id" class="task-row">
+        <article v-for="item in tasks" :key="item.id" class="task-row">
           <div class="task-main">
             <strong>{{ item.document_filename || `文档 #${item.document_id}` }}</strong>
             <span>{{ item.document_subject || '-' }} · {{ statusLabel(item.status) }}</span>
@@ -1145,8 +1399,17 @@ onBeforeUnmount(() => {
             </details>
           </div>
         </article>
-        <p v-if="!filteredTasks.length" class="panel-subcopy">暂无匹配的任务记录。</p>
+        <p v-if="!tasks.length" class="panel-subcopy">暂无匹配的任务记录。</p>
       </div>
+      <el-pagination
+        v-if="taskTotal > TASKS_PAGE_SIZE"
+        v-model:current-page="taskPage"
+        class="table-pagination"
+        background
+        layout="total, prev, pager, next"
+        :page-size="TASKS_PAGE_SIZE"
+        :total="taskTotal"
+      />
     </section>
 
     <section class="panel">
@@ -1175,6 +1438,30 @@ onBeforeUnmount(() => {
             <el-option label="全部难度" value="all" />
             <el-option v-for="item in difficultyOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
+          <el-autocomplete
+            v-model="documentChapterFilter"
+            :fetch-suggestions="fetchFilterChapterSuggestions"
+            :trigger-on-focus="false"
+            clearable
+            class="toolbar-field"
+            placeholder="筛选章节"
+          />
+          <el-autocomplete
+            v-model="documentSectionFilter"
+            :fetch-suggestions="fetchFilterSectionSuggestions"
+            :trigger-on-focus="false"
+            clearable
+            class="toolbar-field"
+            placeholder="筛选小节"
+          />
+          <el-autocomplete
+            v-model="documentTagFilter"
+            :fetch-suggestions="fetchFilterTagSuggestions"
+            :trigger-on-focus="false"
+            clearable
+            class="toolbar-field"
+            placeholder="筛选标签"
+          />
           <el-input
             v-model="documentKeyword"
             clearable
@@ -1192,28 +1479,31 @@ onBeforeUnmount(() => {
       </div>
       <div class="selection-toolbar">
         <div class="detail-chip-group">
-          <span class="detail-chip">已选 {{ selectedEditableDocuments.length }} 份可编辑资料</span>
-          <span class="detail-chip">当前筛选结果可选 {{ filteredSelectableDocuments.length }} 份</span>
+          <span class="detail-chip">跨页已选 {{ selectedEditableDocumentCount }} 份资料</span>
+          <span class="detail-chip">当前页可选 {{ currentPageSelectableDocuments.length }} 份</span>
           <span class="detail-chip">导入中的资料需先取消任务后再编辑</span>
         </div>
         <div class="row-actions">
           <button
             class="ghost-button"
-            :disabled="!filteredSelectableDocuments.length || allFilteredSelectableSelected"
-            @click="selectFilteredDocuments"
+            :disabled="!currentPageSelectableDocuments.length || allCurrentPageSelectableSelected"
+            @click="selectCurrentPageDocuments"
           >
-            {{ allFilteredSelectableSelected ? '当前筛选结果已全选' : '选中当前筛选结果' }}
+            {{ allCurrentPageSelectableSelected ? '当前页已全选' : '选中当前页' }}
           </button>
           <button class="ghost-button" :disabled="!selectedDocumentIds.length" @click="clearSelectedDocuments">
             清空选择
           </button>
-          <button class="primary-button" :disabled="!selectedEditableDocuments.length" @click="openBatchDialog">
+          <button class="primary-button" :disabled="!selectedEditableDocumentCount" @click="openBatchDialog">
             批量编辑 metadata
+          </button>
+          <button class="ghost-button" :disabled="!selectedEditableDocumentCount" @click="deleteSelectedDocuments">
+            批量删除
           </button>
         </div>
       </div>
       <div class="table-like">
-        <article v-for="item in filteredDocuments" :key="item.id" class="table-row table-row-wrap table-row-selectable">
+        <article v-for="item in documents" :key="item.id" class="table-row table-row-wrap table-row-selectable">
           <label class="selection-toggle">
             <input
               v-model="selectedDocumentIds"
@@ -1274,13 +1564,22 @@ onBeforeUnmount(() => {
             </details>
           </div>
         </article>
-        <p v-if="!filteredDocuments.length" class="panel-subcopy">暂无匹配的资料记录。</p>
+        <p v-if="!documents.length" class="panel-subcopy">暂无匹配的资料记录。</p>
       </div>
+      <el-pagination
+        v-if="documentTotal > DOCUMENTS_PAGE_SIZE"
+        v-model:current-page="documentPage"
+        class="table-pagination"
+        background
+        layout="total, prev, pager, next"
+        :page-size="DOCUMENTS_PAGE_SIZE"
+        :total="documentTotal"
+      />
     </section>
 
     <el-dialog v-model="batchDialogVisible" title="批量编辑资料 metadata" width="760px">
       <p class="panel-subcopy">
-        将对已选中的 {{ selectedEditableDocuments.length }} 份资料生效。未勾选的字段保持不变；勾选后留空表示清空。
+        将对已选中的 {{ selectedEditableDocumentCount }} 份资料生效。未勾选的字段保持不变；勾选后留空表示清空。
       </p>
       <p class="panel-subcopy">
         章节/小节对拓展资料会自动忽略，难度仅对习题例题和题库试卷生效。

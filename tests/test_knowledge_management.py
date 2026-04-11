@@ -419,6 +419,94 @@ def test_list_tasks_promotes_waiting_pdf_queue(monkeypatch):
         session.close()
 
 
+def test_list_tasks_without_limit_returns_more_than_100_rows(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="数学",
+            filename="bulk.txt",
+            file_path="/tmp/bulk.txt",
+            mime_type="text/plain",
+            size_bytes=64,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add_all(
+            [
+                ImportTask(
+                    document_id=document.id,
+                    status=DocumentStatus.COMPLETED,
+                    progress=100,
+                    error_message=f"导入完成-{index}",
+                )
+                for index in range(101)
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: None)
+
+        result = knowledge_router.list_tasks(db=session, current_user=teacher)
+
+        assert len(result) == 101
+    finally:
+        session.close()
+
+
+def test_list_tasks_paginated_returns_total_and_summary(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="数学",
+            filename="paged.txt",
+            file_path="/tmp/paged.txt",
+            mime_type="text/plain",
+            size_bytes=64,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add_all(
+            [
+                ImportTask(document_id=document.id, status=DocumentStatus.COMPLETED, progress=100),
+                ImportTask(document_id=document.id, status=DocumentStatus.FAILED, progress=100),
+                ImportTask(document_id=document.id, status=DocumentStatus.PENDING, progress=0),
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: None)
+
+        result = knowledge_router.list_tasks(
+            db=session,
+            current_user=teacher,
+            page=1,
+            page_size=2,
+        )
+
+        assert result.total == 3
+        assert result.page == 1
+        assert result.page_size == 2
+        assert len(result.items) == 2
+        assert result.summary.total == 3
+        assert result.summary.active == 1
+        assert result.summary.completed == 1
+        assert result.summary.failed == 1
+    finally:
+        session.close()
+
+
 def test_cancel_waiting_pdf_task_accepts_legacy_queue_message(monkeypatch):
     session_local = build_session()
     session = session_local()
@@ -484,6 +572,180 @@ def test_list_documents_marks_orphan_pending_document_as_failed():
         refreshed = session.get(KnowledgeDocument, document.id)
         assert refreshed is not None
         assert refreshed.status == DocumentStatus.FAILED
+    finally:
+        session.close()
+
+
+def test_list_documents_paginated_returns_total_and_active_flag(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        active_document = KnowledgeDocument(
+            subject="英语",
+            filename="active.txt",
+            file_path="/tmp/active.txt",
+            mime_type="text/plain",
+            size_bytes=32,
+            status=DocumentStatus.PENDING,
+            created_by=teacher.id,
+        )
+        completed_document = KnowledgeDocument(
+            subject="英语",
+            filename="done.txt",
+            file_path="/tmp/done.txt",
+            mime_type="text/plain",
+            size_bytes=32,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+        )
+        session.add_all([active_document, completed_document])
+        session.commit()
+        session.refresh(active_document)
+        session.refresh(completed_document)
+
+        session.add(
+            ImportTask(
+                document_id=active_document.id,
+                status=DocumentStatus.PENDING,
+                progress=0,
+                error_message="处理中",
+            )
+        )
+        session.commit()
+
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: None)
+
+        result = knowledge_router.list_documents(
+            db=session,
+            current_user=teacher,
+            page=1,
+            page_size=10,
+            subject="英语",
+        )
+
+        assert result.total == 2
+        assert result.summary.total == 2
+        assert result.summary.active == 1
+        assert len(result.items) == 2
+        active_row = next(item for item in result.items if item.id == active_document.id)
+        done_row = next(item for item in result.items if item.id == completed_document.id)
+        assert active_row.has_active_task is True
+        assert done_row.has_active_task is False
+    finally:
+        session.close()
+
+
+def test_list_documents_paginated_supports_chapter_section_and_tag_filters(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        session.add_all(
+            [
+                KnowledgeDocument(
+                    subject="物理",
+                    filename="motion.txt",
+                    file_path="/tmp/motion.txt",
+                    mime_type="text/plain",
+                    size_bytes=32,
+                    status=DocumentStatus.COMPLETED,
+                    chapter="第二章 机械运动",
+                    section="2.1 匀变速直线运动",
+                    tags_json=["运动", "速度"],
+                    created_by=teacher.id,
+                ),
+                KnowledgeDocument(
+                    subject="物理",
+                    filename="force.txt",
+                    file_path="/tmp/force.txt",
+                    mime_type="text/plain",
+                    size_bytes=32,
+                    status=DocumentStatus.COMPLETED,
+                    chapter="第三章 牛顿运动定律",
+                    section="3.1 牛顿第一定律",
+                    tags_json=["受力", "惯性"],
+                    created_by=teacher.id,
+                ),
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: None)
+
+        result = knowledge_router.list_documents(
+            db=session,
+            current_user=teacher,
+            page=1,
+            page_size=10,
+            chapter="机械运动",
+            section="匀变速",
+            tag="速度",
+        )
+
+        assert result.total == 1
+        assert len(result.items) == 1
+        assert result.items[0].filename == "motion.txt"
+    finally:
+        session.close()
+
+
+def test_metadata_suggestions_returns_ranked_existing_values(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        session.add_all(
+            [
+                KnowledgeDocument(
+                    subject="数学",
+                    filename="a.txt",
+                    file_path="/tmp/a.txt",
+                    mime_type="text/plain",
+                    size_bytes=12,
+                    status=DocumentStatus.COMPLETED,
+                    chapter="第二章 函数",
+                    section="2.1 函数与映射",
+                    tags_json=["函数", "映射"],
+                    created_by=teacher.id,
+                ),
+                KnowledgeDocument(
+                    subject="数学",
+                    filename="b.txt",
+                    file_path="/tmp/b.txt",
+                    mime_type="text/plain",
+                    size_bytes=12,
+                    status=DocumentStatus.COMPLETED,
+                    chapter="第二章 函数综合",
+                    section="2.2 函数单调性",
+                    tags_json=["函数", "单调性"],
+                    created_by=teacher.id,
+                ),
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(knowledge_router, "dispatch_next_pdf_task", lambda db: None)
+
+        chapter_values = knowledge_router.list_metadata_suggestions(
+            field="chapter",
+            query="函数",
+            subject="数学",
+            db=session,
+            current_user=teacher,
+            limit=10,
+        )
+        tag_values = knowledge_router.list_metadata_suggestions(
+            field="tag",
+            query="函",
+            subject="数学",
+            db=session,
+            current_user=teacher,
+            limit=10,
+        )
+
+        assert chapter_values == ["第二章 函数", "第二章 函数综合"]
+        assert tag_values == ["函数"]
     finally:
         session.close()
 

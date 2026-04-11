@@ -136,6 +136,7 @@ class KnowledgeDocumentRead(BaseModel):
     difficulty: str | None = None
     tags: list[str] = Field(default_factory=list)
     status: DocumentStatus
+    has_active_task: bool = False
     error_message: str | None
     created_at: datetime
 
@@ -223,6 +224,30 @@ class ImportTaskRead(BaseModel):
     document_subject: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class StatusSummaryRead(BaseModel):
+    total: int = 0
+    active: int = 0
+    failed: int = 0
+    completed: int = 0
+    cancelled: int = 0
+
+
+class PaginatedImportTaskRead(BaseModel):
+    items: list[ImportTaskRead]
+    page: int
+    page_size: int
+    total: int
+    summary: StatusSummaryRead
+
+
+class PaginatedKnowledgeDocumentRead(BaseModel):
+    items: list[KnowledgeDocumentRead]
+    page: int
+    page_size: int
+    total: int
+    summary: StatusSummaryRead
 
 
 class AgentConfigCreate(BaseModel):
