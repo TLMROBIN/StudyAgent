@@ -2,6 +2,7 @@ from pathlib import Path
 import base64
 import zipfile
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -372,6 +373,79 @@ def test_extract_content_docx_and_txt_ignore_pdf_parser_backend(tmp_path, monkey
         )
     extracted = rag_service.extract_content(str(docx_file), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     assert "DOCX内容" in extracted.text
+
+
+def test_extract_content_question_docx_routes_to_mineru_native_parser(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+    docx_file = tmp_path / "questions.docx"
+    with zipfile.ZipFile(docx_file, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            """<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>DOCX内容</w:t></w:r></w:p></w:body></w:document>""",
+        )
+
+    fake_asset = ExtractedAsset(
+        asset_id="image-001",
+        filename="figure.png",
+        content_type="image/png",
+        storage_path="/tmp/figure.png",
+        public_url="/api/knowledge/documents/7/assets/figure.png",
+    )
+    recorded: dict[str, int | str] = {}
+
+    def fake_parse_docx(file_path: str, *, task_id: int, document_id: int) -> PDFParseResult:
+        recorded["file_path"] = file_path
+        recorded["task_id"] = task_id
+        recorded["document_id"] = document_id
+        return PDFParseResult(
+            text="1. 题干\n答案：A",
+            assets=[fake_asset],
+            parser_backend="pipeline",
+            parser_provenance={"runtime_artifact": "data/tasks/9/mineru-runtime.json"},
+        )
+
+    monkeypatch.setattr("backend.services.rag_service.mineru_service.parse_docx", fake_parse_docx)
+
+    extracted = rag_service.extract_content(
+        str(docx_file),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        document_id=7,
+        task_id=9,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    assert recorded == {"file_path": str(docx_file), "task_id": 9, "document_id": 7}
+    assert extracted.text == "1. 题干\n答案：A"
+    assert extracted.assets == [fake_asset]
+    assert extracted.parser_backend == "pipeline"
+    assert extracted.parser_provenance == {"runtime_artifact": "data/tasks/9/mineru-runtime.json"}
+    assert extracted.source_format == "docx"
+
+
+def test_extract_content_question_docx_rejects_legacy_mathtype_formula(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+    source_file = tmp_path / "legacy-question.docx"
+    build_legacy_docx(
+        source_file,
+        paragraphs=["电流有效值为{{OLE}}。"],
+        ole_payloads={
+            "oleObject1.bin": base64.b64decode(LEGACY_OLE_OBJECT_TEX_B64),
+        },
+    )
+
+    monkeypatch.setattr(
+        "backend.services.rag_service.mineru_service.parse_docx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy MathType DOCX should fail before MinerU parse")),
+    )
+
+    with pytest.raises(RuntimeError, match="MathType 类 legacy 公式"):
+        rag_service.extract_content(
+            str(source_file),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            document_id=7,
+            task_id=9,
+            resource_type=ResourceType.EXERCISE.value,
+        )
 
 
 def test_pdf_bridge_preserves_answer_explanation_and_asset_refs_when_building_prepared_chunks(tmp_path):

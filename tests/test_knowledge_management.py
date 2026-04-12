@@ -330,6 +330,46 @@ def test_upload_document_rejects_non_docx_question_resource(tmp_path, monkeypatc
         session.close()
 
 
+def test_upload_document_rejects_legacy_mathtype_question_docx_before_task_creation(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            knowledge_router.rag_service,
+            "ensure_question_resource_docx_supported",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                knowledge_router.UnsupportedQuestionDocxError(
+                    "检测到 MathType 类 legacy 公式，当前不支持；请改用微软公式（OMML）后重新导入"
+                )
+            ),
+        )
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="questions.docx",
+            payload=b"docx payload",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            run_upload_with_metadata(
+                session,
+                teacher,
+                upload,
+                subject="物理",
+                resource_type="question_set",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "MathType 类 legacy 公式" in exc_info.value.detail
+        assert session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "questions.docx")
+        ) is None
+        assert session.scalar(select(ImportTask)) is None
+    finally:
+        session.close()
+
+
 def test_upload_document_rejects_exercise_docx_without_resolved_chapter(tmp_path, monkeypatch):
     session_local = build_session()
     session = session_local()

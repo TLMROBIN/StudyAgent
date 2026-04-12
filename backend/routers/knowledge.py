@@ -39,7 +39,7 @@ from backend.models.schemas import (
 )
 from backend.services.audit_service import audit_service
 from backend.services.auto_tag_service import auto_tag_service
-from backend.services.rag_service import rag_service
+from backend.services.rag_service import UnsupportedQuestionDocxError, rag_service
 from backend.tasks.celery_app import celery_app
 from backend.tasks.ingest import (
     dispatch_import_task,
@@ -747,6 +747,15 @@ async def upload_document(
     saved_name = f"{now_beijing().strftime('%Y%m%d%H%M%S')}_{uuid4().hex}{Path(file.filename or '').suffix.lower()}"
     target_path = Path(settings.upload_path) / saved_name
     target_path.write_bytes(content)
+    if _requires_question_docx(resource_type):
+        try:
+            rag_service.ensure_question_resource_docx_supported(str(target_path))
+        except UnsupportedQuestionDocxError as exc:
+            target_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
     document = KnowledgeDocument(
         subject=subject,

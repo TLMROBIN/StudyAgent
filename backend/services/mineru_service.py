@@ -87,6 +87,22 @@ class MineruService:
     def parse_smoke(self, file_path: str, *, task_id: int, document_id: int) -> PDFParseResult:
         return self.parse_pdf(file_path, task_id=task_id, document_id=document_id, end_page=0)
 
+    def parse_docx(
+        self,
+        file_path: str,
+        *,
+        task_id: int,
+        document_id: int,
+    ) -> PDFParseResult:
+        return self._parse_content_list_document(
+            file_path,
+            task_id=task_id,
+            document_id=document_id,
+            requested_device="cpu",
+            start_page=0,
+            end_page=None,
+        )
+
     def parse_pdf(
         self,
         file_path: str,
@@ -98,6 +114,26 @@ class MineruService:
     ) -> PDFParseResult:
         if self.settings.pdf_parser_backend != "mineru":
             raise MineruStartupError("MinerU PDF parser backend is not enabled")
+        return self._parse_content_list_document(
+            file_path,
+            task_id=task_id,
+            document_id=document_id,
+            requested_device=self.settings.mineru_device,
+            start_page=start_page,
+            end_page=end_page,
+        )
+
+    def _parse_content_list_document(
+        self,
+        file_path: str,
+        *,
+        task_id: int,
+        document_id: int,
+        requested_device: str,
+        start_page: int,
+        end_page: int | None,
+    ) -> PDFParseResult:
+        suffix = Path(file_path).suffix.lower()
 
         task_dir = Path(self.settings.task_artifact_path) / str(task_id)
         mineru_dir = task_dir / "mineru"
@@ -106,7 +142,6 @@ class MineruService:
         shutil.rmtree(mineru_dir, ignore_errors=True)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        requested_device = self.settings.mineru_device
         runtime_device = self._resolve_runtime_device(requested_device)
 
         command = [
@@ -203,6 +238,7 @@ class MineruService:
             parser_provenance={
                 "task_id": task_id,
                 "runtime_artifact": str(runtime_artifact),
+                "source_format": suffix.lstrip(".") or None,
                 "requested_device": requested_device,
                 "effective_device": runtime_device,
                 "device": runtime_device,

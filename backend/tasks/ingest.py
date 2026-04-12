@@ -387,6 +387,7 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             document.mime_type,
             document_id=document.id,
             task_id=task.id,
+            resource_type=document.resource_type,
         )
         _ensure_gpu_requirement_satisfied(extracted)
         task, document = _ensure_not_cancelled(db, task_id, document_id)
@@ -404,6 +405,9 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             extracted.text,
             assets=extracted.assets,
             parsed_pdf=extracted.parsed_pdf,
+            parser_backend=extracted.parser_backend,
+            parser_provenance=extracted.parser_provenance,
+            source_format=extracted.source_format,
         )
         if not chunks:
             raise RuntimeError("文档未提取到可用文本，无法建立索引")

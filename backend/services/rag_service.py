@@ -35,6 +35,15 @@ CHAPTER_AWARE_RESOURCE_TYPES = {
     ResourceType.EXERCISE.value,
     ResourceType.QUESTION_SET.value,
 }
+LEGACY_QUESTION_DOCX_FORMULA_MESSAGE = (
+    "检测到 MathType 类 legacy 公式，当前不支持；请改用微软公式（OMML）后重新导入"
+)
+LEGACY_DOCX_OLE_PROG_IDS = {
+    "Equation.DSMT4",
+    "MathType 6.0 Equation",
+    "MathType 7.0 Equation",
+    "MathType EF",
+}
 CHAPTER_HEADING_PATTERNS = [
     re.compile(r"^(第[一二三四五六七八九十百零两0-9]+(?:章|单元|编|部分))(?:\s*[-—－:：]?\s*\S.*)?$"),
     re.compile(r"^(专题[一二三四五六七八九十百零两0-9]+.*)$"),
@@ -209,6 +218,13 @@ class ExtractionResult:
     text: str
     assets: list[ExtractedAsset] = field(default_factory=list)
     parsed_pdf: PDFParseResult | None = None
+    parser_backend: str | None = None
+    parser_provenance: dict[str, Any] | None = None
+    source_format: str | None = None
+
+
+class UnsupportedQuestionDocxError(RuntimeError):
+    """Raised when a question-resource DOCX contains unsupported legacy formulas."""
 
 
 @dataclass
@@ -465,12 +481,22 @@ class RagService:
         *,
         assets: list[ExtractedAsset] | None = None,
         parsed_pdf: PDFParseResult | None = None,
+        parser_backend: str | None = None,
+        parser_provenance: dict[str, Any] | None = None,
+        source_format: str | None = None,
     ) -> list[PreparedChunk]:
         if parsed_pdf is not None:
             return self.pdf_parse_bridge.prepare_chunks(document, parsed_pdf)
         asset_map = {asset.asset_id: asset for asset in assets or []}
         if (document.resource_type or ResourceType.KNOWLEDGE_NOTE.value) in QUESTION_RESOURCE_TYPES:
-            prepared_questions = self._prepare_question_chunks(document, text, asset_map)
+            prepared_questions = self._prepare_question_chunks(
+                document,
+                text,
+                asset_map,
+                source_format=source_format,
+                parser_backend=parser_backend,
+                parser_provenance=parser_provenance,
+            )
             if prepared_questions:
                 return prepared_questions
         segments = self._segment_text_with_context(text, document)
@@ -507,6 +533,7 @@ class RagService:
         *,
         document_id: int | None = None,
         task_id: int | None = None,
+        resource_type: ResourceType | str | None = None,
     ) -> ExtractionResult:
         mime = (mime_type or mimetypes.guess_type(file_path)[0] or "").lower()
         suffix = Path(file_path).suffix.lower()
@@ -521,13 +548,63 @@ class RagService:
                 if document_id is None or task_id is None:
                     raise RuntimeError("MinerU PDF parsing requires document_id and task_id")
                 parsed_pdf = mineru_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
-                return ExtractionResult(text=parsed_pdf.text, assets=parsed_pdf.assets, parsed_pdf=parsed_pdf)
+                return ExtractionResult(
+                    text=parsed_pdf.text,
+                    assets=parsed_pdf.assets,
+                    parsed_pdf=parsed_pdf,
+                    parser_backend=parsed_pdf.parser_backend,
+                    parser_provenance=parsed_pdf.parser_provenance,
+                    source_format="pdf",
+                )
             return ExtractionResult(text=self._extract_pdf_text(file_path))
 
         if suffix == ".docx" or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            if self._resource_type_value(resource_type) in QUESTION_RESOURCE_TYPES:
+                self.ensure_question_resource_docx_supported(file_path)
+                if document_id is None or task_id is None:
+                    raise RuntimeError("MinerU DOCX parsing requires document_id and task_id")
+                parsed_docx = mineru_service.parse_docx(file_path, task_id=task_id, document_id=document_id)
+                return ExtractionResult(
+                    text=parsed_docx.text,
+                    assets=parsed_docx.assets,
+                    parser_backend=parsed_docx.parser_backend,
+                    parser_provenance=parsed_docx.parser_provenance,
+                    source_format="docx",
+                )
             return self._extract_docx_content(file_path, document_id=document_id)
 
         raise RuntimeError(f"暂不支持解析文件类型：{suffix}")
+
+    def ensure_question_resource_docx_supported(self, file_path: str) -> None:
+        if self._docx_contains_legacy_formula_objects(file_path):
+            raise UnsupportedQuestionDocxError(LEGACY_QUESTION_DOCX_FORMULA_MESSAGE)
+
+    def _resource_type_value(self, resource_type: ResourceType | str | None) -> str:
+        if isinstance(resource_type, ResourceType):
+            return resource_type.value
+        return str(resource_type or "").strip()
+
+    def _docx_contains_legacy_formula_objects(self, file_path: str) -> bool:
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                for name in archive.namelist():
+                    normalized = str(name or "")
+                    if not normalized.startswith("word/") or not normalized.endswith(".xml"):
+                        continue
+                    try:
+                        root = ET.fromstring(archive.read(normalized))
+                    except (KeyError, ET.ParseError):
+                        continue
+                    for element in root.iter():
+                        if (
+                            self._xml_namespace(element.tag) == DOCX_OLE_NS
+                            and self._xml_local_name(element.tag) == "OLEObject"
+                            and str(element.attrib.get("ProgID") or "").strip() in LEGACY_DOCX_OLE_PROG_IDS
+                        ):
+                            return True
+        except (KeyError, zipfile.BadZipFile):
+            return False
+        return False
 
     def health_snapshot(self) -> dict[str, dict | str | bool]:
         return {
@@ -994,6 +1071,10 @@ class RagService:
         document: KnowledgeDocument,
         text: str,
         asset_map: dict[str, ExtractedAsset],
+        *,
+        source_format: str | None = None,
+        parser_backend: str | None = None,
+        parser_provenance: dict[str, Any] | None = None,
     ) -> list[PreparedChunk]:
         question_text, answer_bank = self._split_question_and_answer_sections(text)
         question_blocks = self._parse_numbered_blocks(
@@ -1032,7 +1113,10 @@ class RagService:
                     answer_text=clean_answer_text or None,
                     explanation_text=clean_explanation_text or None,
                     asset_refs=asset_refs,
+                    source_format=source_format,
                     source_locator=f"question:{number}",
+                    parser_backend=parser_backend,
+                    parser_provenance=parser_provenance,
                     raw_block_text=block_text,
                 )
             )
