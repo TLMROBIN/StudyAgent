@@ -133,7 +133,7 @@ class MineruService:
         start_page: int,
         end_page: int | None,
     ) -> PDFParseResult:
-        suffix = Path(file_path).suffix.lower()
+        source_suffix = Path(file_path).suffix.lower()
 
         task_dir = Path(self.settings.task_artifact_path) / str(task_id)
         mineru_dir = task_dir / "mineru"
@@ -238,7 +238,7 @@ class MineruService:
             parser_provenance={
                 "task_id": task_id,
                 "runtime_artifact": str(runtime_artifact),
-                "source_format": suffix.lstrip(".") or None,
+                "source_format": source_suffix.lstrip(".") or None,
                 "requested_device": requested_device,
                 "effective_device": runtime_device,
                 "device": runtime_device,

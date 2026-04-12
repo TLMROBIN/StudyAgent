@@ -1076,7 +1076,8 @@ class RagService:
         parser_backend: str | None = None,
         parser_provenance: dict[str, Any] | None = None,
     ) -> list[PreparedChunk]:
-        question_text, answer_bank = self._split_question_and_answer_sections(text)
+        normalized_text = self._normalize_question_source_text(text)
+        question_text, answer_bank = self._split_question_and_answer_sections(normalized_text or text)
         question_blocks = self._parse_numbered_blocks(
             question_text,
             keep_wrapped_subquestions=True,
@@ -1121,6 +1122,43 @@ class RagService:
                 )
             )
         return prepared_chunks
+
+    def _normalize_question_source_text(self, text: str) -> str:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return ""
+        normalized = self.pdf_parse_bridge._normalize_formula_text(raw_text)
+        normalized = self._drop_residual_mineru_formula_markers(normalized)
+        normalized = self.pdf_parse_bridge._strip_bound_asset_path_noise(
+            normalized,
+            asset_bound="[[asset:" in normalized,
+        )
+        return self._normalize_docx_block_text(normalized)
+
+    def _drop_residual_mineru_formula_markers(self, text: str) -> str:
+        lines = [line.rstrip() for line in str(text or "").splitlines()]
+        cleaned: list[str] = []
+        index = 0
+        while index < len(lines):
+            line = lines[index].strip()
+            lowered = line.lower()
+            if lowered not in {"equation_inline", "equation_display"}:
+                cleaned.append(lines[index])
+                index += 1
+                continue
+            next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+            if not next_line:
+                index += 1
+                continue
+            if QUESTION_START_PATTERN.match(next_line):
+                index += 1
+                continue
+            if self.pdf_parse_bridge._looks_like_formula_image_path(next_line):
+                index += 2
+                continue
+            cleaned.append(next_line)
+            index += 2
+        return "\n".join(cleaned)
 
     def _split_question_and_answer_sections(self, text: str) -> tuple[str, str | None]:
         lines = [line.rstrip() for line in text.split("\n")]

@@ -2345,6 +2345,78 @@ def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     assert "位移等于图像与坐标轴围成的面积" in prepared[1].content
 
 
+def test_prepare_question_chunks_normalizes_mineru_docx_formula_markers_and_prevents_false_splits(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=17,
+        subject="物理",
+        filename="mineru-question.docx",
+        file_path=str(tmp_path / "mineru-question.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+    assets = [
+        ExtractedAsset(
+            asset_id="image-001",
+            filename="image-001.png",
+            content_type="image/png",
+            storage_path="/tmp/image-001.png",
+            public_url="/api/knowledge/documents/17/assets/image-001.png",
+            title="交变电流图像",
+        )
+    ]
+    text = "\n".join(
+        [
+            "1．如图所示，周期和频率分别为（　　）",
+            "[[asset:image-001]]",
+            "images/9d7cd5b7cd4da2fb8c3d0878f89be5d9ba285413902a8c5902a05a8504b12f2d.png",
+            "A．1∶1\tB．",
+            "equation_inline",
+            r"\sqrt{2}:1",
+            "C．",
+            "equation_inline",
+            r"1:\sqrt{2}",
+            "D．2∶1",
+            "【答案】B",
+            "【详解】周期",
+            "equation_inline",
+            "T=0.02s",
+            "，频率",
+            "equation_display",
+            r"f=\frac{1}{T}=\frac{1}{0.02}Hz=50Hz",
+            "故选B。",
+            "2．下一题。",
+            "【答案】A",
+        ]
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        text,
+        assets=assets,
+        source_format="docx",
+        parser_backend="pipeline",
+        parser_provenance={"runtime_artifact": "data/tasks/17/mineru-runtime.json"},
+    )
+
+    assert len(prepared) == 2
+    first = prepared[0]
+    assert first.metadata["question_number"] == "1"
+    assert first.metadata["contains_images"] is True
+    assert first.metadata["image_count"] == 1
+    assert first.metadata["parser_backend"] == "pipeline"
+    assert first.metadata["parser_provenance"]["runtime_artifact"] == "data/tasks/17/mineru-runtime.json"
+    assert "images/" not in first.content
+    assert "equation_inline" not in first.content
+    assert "equation_display" not in first.content
+    assert r"$\sqrt{2}:1$" in first.content
+    assert r"$1:\sqrt{2}$" in first.content
+    assert "$T=0.02s$" in first.content
+    assert r"$$f=\frac{1}{T}=\frac{1}{0.02}Hz=50Hz$$" in first.content
+    assert "【附图1：交变电流图像】" in first.content
+
+
 def test_prepare_question_chunks_marks_missing_required_images_without_quality_score(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
