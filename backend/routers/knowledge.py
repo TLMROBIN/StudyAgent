@@ -16,6 +16,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy.orm import selectinload
 
 from backend.config import get_settings
 from backend.dependencies import CurrentTeacher, CurrentUser, DbSession
@@ -33,8 +34,11 @@ from backend.models.schemas import (
     KnowledgeDocumentBulkUpdate,
     KnowledgeDocumentRead,
     KnowledgeDocumentUpdate,
+    KnowledgeQuestionRead,
+    KnowledgeQuestionUpdate,
     PaginatedImportTaskRead,
     PaginatedKnowledgeDocumentRead,
+    PaginatedKnowledgeQuestionRead,
     StatusSummaryRead,
 )
 from backend.services.audit_service import audit_service
@@ -54,6 +58,7 @@ settings = get_settings()
 ACTIVE_TASK_STATUSES = {DocumentStatus.PENDING, DocumentStatus.PROCESSING}
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
 METADATA_SUGGESTION_FIELDS = {"chapter", "section", "tag"}
+QUESTION_METADATA_SUGGESTION_FIELDS = {"chapter", "tag"}
 GENERIC_UPLOAD_MIME_TYPES = {"", "application/octet-stream"}
 DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 UPLOAD_MIME_COMPATIBILITY = {
@@ -410,6 +415,180 @@ def _metadata_suggestions(
     return _rank_suggestions(values, query=query, limit=limit)
 
 
+def _question_row_matches(row: KnowledgeChunk) -> bool:
+    document = row.document
+    if not document:
+        return False
+    if (document.resource_type or ResourceType.KNOWLEDGE_NOTE.value) not in QUESTION_RESOURCE_TYPES:
+        return False
+    metadata = row.metadata_json or {}
+    return str(metadata.get("chunk_kind") or "").strip() == "question_item"
+
+
+def _metadata_or_document_value(
+    metadata: dict,
+    document: KnowledgeDocument | None,
+    key: str,
+) -> str | int | list[str] | None:
+    if key in metadata:
+        return metadata.get(key)
+    if document is None:
+        return None
+    if key == "tags":
+        return list(document.tags)
+    return getattr(document, key, None)
+
+
+def _question_text_value(row: KnowledgeChunk) -> str:
+    metadata = row.metadata_json or {}
+    return str(metadata.get("question_text") or row.content or "").strip()
+
+
+def _question_read(row: KnowledgeChunk) -> KnowledgeQuestionRead:
+    metadata = row.metadata_json or {}
+    document = row.document
+    tags_value = _metadata_or_document_value(metadata, document, "tags") or []
+    return KnowledgeQuestionRead(
+        id=row.id,
+        document_id=row.document_id,
+        document_filename=document.filename if document else None,
+        subject=row.subject,
+        resource_type=str(
+            metadata.get("resource_type")
+            or (document.resource_type if document else "")
+            or ""
+        ),
+        grade=_metadata_or_document_value(metadata, document, "grade"),
+        chapter=_metadata_or_document_value(metadata, document, "chapter"),
+        section=_metadata_or_document_value(metadata, document, "section"),
+        difficulty=_metadata_or_document_value(metadata, document, "difficulty"),
+        tags=list(tags_value) if isinstance(tags_value, list) else [],
+        question_number=str(metadata.get("question_number") or "").strip() or None,
+        question_text=_question_text_value(row),
+        is_disabled=bool(row.is_disabled),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _question_matches_filters(
+    row: KnowledgeChunk,
+    *,
+    difficulty: str | None,
+    chapter: str | None,
+    tag: str | None,
+    disabled: bool | None,
+    keyword: str | None,
+) -> bool:
+    if not _question_row_matches(row):
+        return False
+    metadata = row.metadata_json or {}
+    document = row.document
+
+    if disabled is not None and bool(row.is_disabled) != disabled:
+        return False
+
+    effective_difficulty = str(
+        _metadata_or_document_value(metadata, document, "difficulty") or ""
+    ).strip()
+    if difficulty and effective_difficulty != difficulty:
+        return False
+
+    effective_chapter = str(
+        _metadata_or_document_value(metadata, document, "chapter") or ""
+    ).strip()
+    if chapter and chapter.strip().lower() not in effective_chapter.lower():
+        return False
+
+    effective_tags = _metadata_or_document_value(metadata, document, "tags") or []
+    if tag and not _tags_match_query(
+        list(effective_tags) if isinstance(effective_tags, list) else [], tag
+    ):
+        return False
+
+    if keyword:
+        normalized_keyword = keyword.strip().lower()
+        haystacks = [
+            str(metadata.get("question_number") or "").strip().lower(),
+            _question_text_value(row).lower(),
+        ]
+        if not any(normalized_keyword in haystack for haystack in haystacks if haystack):
+            return False
+
+    return True
+
+
+def _question_rows(
+    db: DbSession,
+    *,
+    subject: str | None = None,
+    resource_type: str | None = None,
+) -> list[KnowledgeChunk]:
+    stmt = (
+        select(KnowledgeChunk)
+        .join(KnowledgeChunk.document)
+        .options(selectinload(KnowledgeChunk.document))
+        .where(KnowledgeDocument.resource_type.in_(tuple(QUESTION_RESOURCE_TYPES)))
+        .order_by(KnowledgeChunk.updated_at.desc(), KnowledgeChunk.id.desc())
+    )
+    if subject:
+        stmt = stmt.where(KnowledgeChunk.subject == subject)
+    if resource_type:
+        stmt = stmt.where(KnowledgeDocument.resource_type == resource_type)
+    return db.scalars(stmt).all()
+
+
+def _question_metadata_suggestions(
+    db: DbSession,
+    *,
+    field: str,
+    query: str | None,
+    subject: str | None,
+    resource_type: str | None,
+    disabled: bool | None,
+    limit: int,
+) -> list[str]:
+    if field not in QUESTION_METADATA_SUGGESTION_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported question metadata suggestion field",
+        )
+    if limit < 1 or limit > 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid suggestion limit",
+        )
+
+    values: list[str] = []
+    for row in _question_rows(
+        db,
+        subject=subject,
+        resource_type=resource_type,
+    ):
+        if not _question_matches_filters(
+            row,
+            difficulty=None,
+            chapter=None,
+            tag=None,
+            disabled=disabled,
+            keyword=None,
+        ):
+            continue
+        metadata = row.metadata_json or {}
+        document = row.document
+        if field == "chapter":
+            chapter_value = _metadata_or_document_value(metadata, document, "chapter")
+            if chapter_value:
+                values.append(str(chapter_value).strip())
+            continue
+        tags_value = _metadata_or_document_value(metadata, document, "tags") or []
+        if isinstance(tags_value, list):
+            values.extend(
+                str(item).strip() for item in tags_value if str(item).strip()
+            )
+    return _rank_suggestions(values, query=query, limit=limit)
+
+
 def _chunk_read(row: KnowledgeChunk) -> KnowledgeChunkRead:
     metadata = row.metadata_json or {}
     document = row.document
@@ -425,16 +604,16 @@ def _chunk_read(row: KnowledgeChunk) -> KnowledgeChunkRead:
             or ""
         ),
         grade=metadata.get("grade") or (document.grade if document else None),
-        chapter=metadata.get("chapter") or (document.chapter if document else None),
-        section=metadata.get("section") or (document.section if document else None),
-        difficulty=metadata.get("difficulty")
-        or (document.difficulty if document else None),
-        tags=list(metadata.get("tags") or (document.tags if document else [])),
+        chapter=_metadata_or_document_value(metadata, document, "chapter"),
+        section=_metadata_or_document_value(metadata, document, "section"),
+        difficulty=_metadata_or_document_value(metadata, document, "difficulty"),
+        tags=list(_metadata_or_document_value(metadata, document, "tags") or []),
         chunk_kind=metadata.get("chunk_kind"),
         question_number=metadata.get("question_number"),
         question_text=metadata.get("question_text"),
         answer_text=metadata.get("answer_text"),
         explanation_text=metadata.get("explanation_text"),
+        is_disabled=bool(row.is_disabled),
         contains_images=bool(metadata.get("contains_images")),
         image_count=int(metadata.get("image_count") or 0),
         assets=list(metadata.get("asset_refs") or []),
@@ -653,6 +832,74 @@ def list_metadata_suggestions(
     )
 
 
+@router.get("/questions", response_model=PaginatedKnowledgeQuestionRead)
+def list_questions(
+    db: DbSession,
+    current_user: CurrentTeacher,
+    page: int = 1,
+    page_size: int = 20,
+    subject: str | None = None,
+    resource_type: str | None = None,
+    difficulty: str | None = None,
+    chapter: str | None = None,
+    tag: str | None = None,
+    disabled: bool | None = None,
+    keyword: str | None = None,
+) -> PaginatedKnowledgeQuestionRead:
+    if page < 1 or page_size < 1 or page_size > 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid pagination parameters",
+        )
+
+    rows = [
+        row
+        for row in _question_rows(
+            db,
+            subject=subject,
+            resource_type=resource_type,
+        )
+        if _question_matches_filters(
+            row,
+            difficulty=difficulty,
+            chapter=chapter,
+            tag=tag,
+            disabled=disabled,
+            keyword=keyword,
+        )
+    ]
+    total = len(rows)
+    page_rows = rows[(page - 1) * page_size : page * page_size]
+    return PaginatedKnowledgeQuestionRead(
+        items=[_question_read(row) for row in page_rows],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.get("/questions/metadata-suggestions", response_model=list[str])
+def list_question_metadata_suggestions(
+    field: str,
+    db: DbSession,
+    current_user: CurrentTeacher,
+    query: str | None = None,
+    subject: str | None = None,
+    resource_type: str | None = None,
+    disabled: bool | None = None,
+    limit: int = 10,
+) -> list[str]:
+    return _question_metadata_suggestions(
+        db,
+        field=field,
+        query=query,
+        subject=subject,
+        resource_type=resource_type,
+        disabled=disabled,
+        limit=limit,
+    )
+
+
 @router.get("/documents/{document_id}", response_model=KnowledgeDocumentRead)
 def get_document(
     document_id: int, db: DbSession, current_user: CurrentTeacher
@@ -674,6 +921,189 @@ def get_document(
         )
     )
     return _document_read(document, has_active_task=has_active_task)
+
+
+def _rebuild_question_metadata(
+    *,
+    document: KnowledgeDocument,
+    row: KnowledgeChunk,
+    chapter: str | None,
+    section: str | None,
+    difficulty: str | None,
+    tags: list[str],
+) -> dict:
+    metadata = dict(row.metadata_json or {})
+    metadata.update(
+        {
+            "document_id": document.id,
+            "filename": document.filename,
+            "subject": document.subject,
+            "resource_type": document.resource_type
+            or ResourceType.KNOWLEDGE_NOTE.value,
+            "grade": document.grade,
+            "chapter": chapter,
+            "section": section,
+            "difficulty": difficulty,
+            "tags": tags,
+        }
+    )
+    for key in (
+        "chapter_key",
+        "section_key",
+        "structure_path",
+        "retrieval_metadata",
+        "diagnostic_metadata",
+        "ingestion_metadata",
+    ):
+        metadata.pop(key, None)
+    return rag_service._apply_metadata_layers(metadata)
+
+
+def _question_row_or_404(chunk_id: int, db: DbSession) -> KnowledgeChunk:
+    row = db.scalar(
+        select(KnowledgeChunk)
+        .options(selectinload(KnowledgeChunk.document))
+        .where(KnowledgeChunk.id == chunk_id)
+        .limit(1)
+    )
+    if not row or not _question_row_matches(row):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Question not found",
+        )
+    return row
+
+
+@router.put("/questions/{chunk_id}", response_model=KnowledgeQuestionRead)
+def update_question(
+    chunk_id: int,
+    payload: KnowledgeQuestionUpdate,
+    db: DbSession,
+    current_user: CurrentTeacher,
+    request: Request,
+) -> KnowledgeQuestionRead:
+    row = _question_row_or_404(chunk_id, db)
+    changes = payload.model_dump(exclude_unset=True, mode="json")
+    if not changes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No question metadata changes provided",
+        )
+
+    metadata = row.metadata_json or {}
+    document = row.document
+    assert document is not None
+    chapter = (
+        _normalize_optional_text(changes["chapter"])
+        if "chapter" in changes
+        else _metadata_or_document_value(metadata, document, "chapter")
+    )
+    section = (
+        _normalize_optional_text(changes["section"])
+        if "section" in changes
+        else _metadata_or_document_value(metadata, document, "section")
+    )
+    difficulty = (
+        _normalize_optional_text(changes["difficulty"])
+        if "difficulty" in changes
+        else _metadata_or_document_value(metadata, document, "difficulty")
+    )
+    tags = (
+        _normalize_tags(changes["tags"])
+        if "tags" in changes
+        else list(_metadata_or_document_value(metadata, document, "tags") or [])
+    )
+    row.metadata_json = _rebuild_question_metadata(
+        document=document,
+        row=row,
+        chapter=chapter,
+        section=section,
+        difficulty=difficulty,
+        tags=tags,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    rag_service.vector_store.upsert_chunks(document.subject, [row])
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="update_knowledge_question",
+        target_type="knowledge_chunk",
+        target_id=str(row.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={
+            "document_id": row.document_id,
+            "document_filename": document.filename,
+            "updated_fields": sorted(changes.keys()),
+            "chapter": row.metadata_json.get("chapter"),
+            "section": row.metadata_json.get("section"),
+            "difficulty": row.metadata_json.get("difficulty"),
+            "tags": row.metadata_json.get("tags") or [],
+        },
+    )
+    return _question_read(row)
+
+
+@router.post("/questions/{chunk_id}/disable", response_model=KnowledgeQuestionRead)
+def disable_question(
+    chunk_id: int,
+    db: DbSession,
+    current_user: CurrentTeacher,
+    request: Request,
+) -> KnowledgeQuestionRead:
+    row = _question_row_or_404(chunk_id, db)
+    row.is_disabled = True
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    document = row.document
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="disable_knowledge_question",
+        target_type="knowledge_chunk",
+        target_id=str(row.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={
+            "document_id": row.document_id,
+            "document_filename": document.filename if document else None,
+            "is_disabled": True,
+        },
+    )
+    return _question_read(row)
+
+
+@router.post("/questions/{chunk_id}/restore", response_model=KnowledgeQuestionRead)
+def restore_question(
+    chunk_id: int,
+    db: DbSession,
+    current_user: CurrentTeacher,
+    request: Request,
+) -> KnowledgeQuestionRead:
+    row = _question_row_or_404(chunk_id, db)
+    row.is_disabled = False
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    document = row.document
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="restore_knowledge_question",
+        target_type="knowledge_chunk",
+        target_id=str(row.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={
+            "document_id": row.document_id,
+            "document_filename": document.filename if document else None,
+            "is_disabled": False,
+        },
+    )
+    return _question_read(row)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[KnowledgeChunkRead])

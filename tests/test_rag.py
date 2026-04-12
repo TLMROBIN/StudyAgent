@@ -2253,6 +2253,72 @@ def test_recommend_questions_suppresses_same_document_legacy_fallback_when_quest
         session.close()
 
 
+def test_recommend_questions_excludes_disabled_question_rows(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            grade=2,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        disabled_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：斜面受力分析。",
+            is_disabled=True,
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "grade": 2,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "斜面受力分析。",
+            },
+        )
+        enabled_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=1,
+            content="第2题\n\n题目：匀速直线运动。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "grade": 2,
+                "chunk_kind": "question_item",
+                "question_number": "2",
+                "question_text": "匀速直线运动。",
+            },
+        )
+        session.add_all([disabled_row, enabled_row])
+        session.commit()
+
+        result = rag_service.recommend_questions(
+            session,
+            "物理",
+            "再给我一道受力或运动题",
+            student_grade=2,
+            limit=2,
+        )
+
+        assert [row.metadata_json.get("question_number") for row in result] == ["2"]
+        assert all(row.is_disabled is False for row in result)
+    finally:
+        session.close()
+
+
 def test_prepare_question_chunks_keeps_docx_images_and_pairs_answers(tmp_path):
     rag_service = build_rag_service(tmp_path)
     source_file = tmp_path / "question_bank.docx"
@@ -2772,5 +2838,70 @@ def test_retrieve_prefers_chunk_with_matching_chunk_level_structure(tmp_path):
 
         assert result.chunks
         assert result.chunks[0].id == matching.id
+    finally:
+        session.close()
+
+
+def test_retrieve_excludes_disabled_question_rows_from_final_context(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        disabled_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：斜面受力分析，求加速度。",
+            is_disabled=True,
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "斜面受力分析，求加速度。",
+            },
+        )
+        enabled_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=1,
+            content="第2题\n\n题目：匀变速直线运动，求位移。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "2",
+                "question_text": "匀变速直线运动，求位移。",
+            },
+        )
+        session.add_all([disabled_row, enabled_row])
+        session.commit()
+        session.refresh(disabled_row)
+        session.refresh(enabled_row)
+        rag_service.vector_store.upsert_chunks("物理", [disabled_row, enabled_row])
+
+        result = rag_service.retrieve(
+            session,
+            "物理",
+            "给我一道斜面受力分析或者位移计算题",
+        )
+
+        assert result.chunks
+        assert all(row.is_disabled is False for row in result.chunks)
+        assert "第1题" not in result.context
     finally:
         session.close()

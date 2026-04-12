@@ -194,9 +194,42 @@ class KnowledgeChunkRead(BaseModel):
     question_text: str | None = None
     answer_text: str | None = None
     explanation_text: str | None = None
+    is_disabled: bool = False
     contains_images: bool = False
     image_count: int = 0
     assets: list[KnowledgeAssetRead] = Field(default_factory=list)
+
+
+class KnowledgeQuestionRead(BaseModel):
+    id: int
+    document_id: int
+    document_filename: str | None = None
+    subject: str
+    resource_type: str
+    grade: int | None = None
+    chapter: str | None = None
+    section: str | None = None
+    difficulty: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    question_number: str | None = None
+    question_text: str
+    is_disabled: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeQuestionUpdate(BaseModel):
+    chapter: str | None = Field(default=None, max_length=255)
+    section: str | None = Field(default=None, max_length=255)
+    difficulty: DifficultyLevel | None = None
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PaginatedKnowledgeQuestionRead(BaseModel):
+    items: list[KnowledgeQuestionRead]
+    page: int
+    page_size: int
+    total: int
 
 
 class QuestionRecommendationRead(BaseModel):

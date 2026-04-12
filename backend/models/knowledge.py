@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum as SqlEnum, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Enum as SqlEnum, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -70,6 +70,7 @@ class KnowledgeChunk(TimestampMixin, Base):
     subject: Mapped[str] = mapped_column(String(32), index=True)
     chunk_index: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
+    is_disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
     document: Mapped[KnowledgeDocument] = relationship(back_populates="chunks")

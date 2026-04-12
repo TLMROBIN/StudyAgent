@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend.config import Settings
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
@@ -17,8 +19,10 @@ from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, Resource
 from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
 from backend.routers import chat as chat_router
-from backend.services.rag_service import RetrievalResult
+from backend.services.embed_service import EmbedService
+from backend.services.rag_service import RagService, RetrievalResult
 from backend.services.store_service import MemoryStore
+from backend.services.vector_store_service import VectorStoreService
 
 
 def _parse_sse(payload: str) -> list[tuple[str, dict]]:
@@ -47,6 +51,23 @@ def _build_session_factory():
     TestingSessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)
     return TestingSessionLocal
+
+
+def _build_rag_service(tmp_path: Path) -> RagService:
+    settings = Settings(
+        CHROMADB_MODE="persistent",
+        CHROMADB_PATH=str(tmp_path / "chromadb"),
+        CHROMADB_COLLECTION_PREFIX="studyagent-chat-test",
+        TASK_ARTIFACT_PATH=str(tmp_path / "tasks"),
+        UPLOAD_PATH=str(tmp_path / "uploads"),
+        EMBEDDING_MODEL_NAME="BAAI/bge-m3",
+        EMBEDDING_BACKEND="hash",
+        EMBEDDING_DEVICE="cpu",
+        EMBEDDING_FALLBACK_TO_HASH=True,
+    )
+    embedder = EmbedService(settings)
+    vector_store = VectorStoreService(settings, embedder)
+    return RagService(settings=settings, embedder=embedder, vector_store=vector_store)
 
 
 class FakeRequest:
@@ -546,5 +567,75 @@ def test_recommend_questions_can_include_solutions_for_teacher(monkeypatch):
         assert result[0].answer_text == "先配方"
         assert result[0].explanation_text == "利用二次函数顶点求最值。"
         assert result[0].assets == []
+    finally:
+        session.close()
+
+
+def test_recommend_questions_endpoint_excludes_disabled_rows(tmp_path, monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=128,
+            resource_type=ResourceType.QUESTION_SET.value,
+            grade=2,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        disabled_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：斜面受力分析。",
+            is_disabled=True,
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "grade": 2,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "斜面受力分析。",
+            },
+        )
+        enabled_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=1,
+            content="第2题\n\n题目：匀速直线运动。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "grade": 2,
+                "chunk_kind": "question_item",
+                "question_number": "2",
+                "question_text": "匀速直线运动。",
+            },
+        )
+        session.add_all([disabled_row, enabled_row])
+        session.commit()
+        session.refresh(enabled_row)
+
+        test_rag_service = _build_rag_service(tmp_path)
+        monkeypatch.setattr(chat_router, "rag_service", test_rag_service)
+
+        result = chat_router.recommend_questions(
+            QuestionRecommendationRequest(
+                subject="物理",
+                question="再来一道运动题",
+                limit=2,
+            ),
+            session,
+            current_user,
+        )
+
+        assert [item.chunk_id for item in result] == [enabled_row.id]
+        assert [item.question_number for item in result] == ["2"]
     finally:
         session.close()

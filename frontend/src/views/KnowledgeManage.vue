@@ -64,6 +64,13 @@ interface PaginatedDocumentResponse {
   summary: StatusSummary
 }
 
+interface PaginatedQuestionResponse {
+  items: KnowledgeQuestion[]
+  page: number
+  page_size: number
+  total: number
+}
+
 interface SuggestionItem {
   value: string
 }
@@ -85,9 +92,28 @@ interface KnowledgeChunk {
   question_text?: string | null
   answer_text?: string | null
   explanation_text?: string | null
+  is_disabled: boolean
   contains_images: boolean
   image_count: number
   assets: KnowledgeAsset[]
+}
+
+interface KnowledgeQuestion {
+  id: number
+  document_id: number
+  document_filename?: string | null
+  subject: string
+  resource_type: string
+  grade?: number | null
+  chapter?: string | null
+  section?: string | null
+  difficulty?: string | null
+  tags: string[]
+  question_number?: string | null
+  question_text: string
+  is_disabled: boolean
+  created_at: string
+  updated_at: string
 }
 
 interface ChunkPreviewSummary {
@@ -135,6 +161,7 @@ const statusOptions = [
 ]
 const TASKS_PAGE_SIZE = 10
 const DOCUMENTS_PAGE_SIZE = 20
+const QUESTIONS_PAGE_SIZE = 20
 const emptySummary = (): StatusSummary => ({
   total: 0,
   active: 0,
@@ -184,6 +211,7 @@ const batchForm = reactive({
 })
 
 const documents = ref<KnowledgeDoc[]>([])
+const questions = ref<KnowledgeQuestion[]>([])
 const tasks = ref<ImportTask[]>([])
 const latestTask = ref<ImportTask | null>(null)
 const previewDialogVisible = ref(false)
@@ -205,6 +233,14 @@ const documentSectionFilter = ref('')
 const documentTagFilter = ref('')
 const documentKeyword = ref('')
 const documentPage = ref(1)
+const questionSubjectFilter = ref('all')
+const questionResourceTypeFilter = ref<'all' | 'exercise' | 'question_set'>('all')
+const questionDifficultyFilter = ref('all')
+const questionDisabledFilter = ref<'all' | 'enabled' | 'disabled'>('all')
+const questionChapterFilter = ref('')
+const questionTagFilter = ref('')
+const questionKeyword = ref('')
+const questionPage = ref(1)
 const uploading = ref(false)
 const uploadRef = ref<UploadInstance | null>(null)
 const selectedUploadFiles = ref<UploadUserFile[]>([])
@@ -215,10 +251,22 @@ const chunkCache = reactive<Record<number, KnowledgeChunk[]>>({})
 const chunkSummaryCache = reactive<Record<number, ChunkPreviewSummary>>({})
 const taskTotal = ref(0)
 const documentTotal = ref(0)
+const questionTotal = ref(0)
 const taskSummary = ref<StatusSummary>(emptySummary())
 const documentSummary = ref<StatusSummary>(emptySummary())
 let pollingTimer: number | null = null
 const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
+
+const questionEditDialogVisible = ref(false)
+const questionEditSaving = ref(false)
+const editingQuestionId = ref<number | null>(null)
+const questionActionIds = ref<number[]>([])
+const questionEditForm = reactive({
+  chapter: '',
+  section: '',
+  difficulty: '',
+  tags: '',
+})
 
 const uploadSupportsDifficulty = computed(() => questionResourceTypes.has(uploadForm.resource_type))
 const uploadSupportsChapter = computed(() => uploadForm.resource_type !== 'extension')
@@ -231,6 +279,7 @@ const editSupportsDifficulty = computed(() => questionResourceTypes.has(editForm
 const editSupportsChapter = computed(() => editForm.resource_type !== 'extension')
 const batchResourceTypeSupportsDifficulty = computed(() => questionResourceTypes.has(batchForm.resource_type))
 const batchResourceTypeSupportsChapter = computed(() => batchForm.resource_type !== 'extension')
+const questionFilterResourceOptions = computed(() => resourceTypeOptions.filter((item) => questionResourceTypes.has(item.value)))
 
 const selectedEditableDocumentIds = computed(() => [...selectedDocumentIds.value])
 const selectedEditableDocumentCount = computed(() => selectedEditableDocumentIds.value.length)
@@ -258,6 +307,7 @@ const previewDocument = computed(() => {
   }
   return documents.value.find((item) => item.id === previewDocumentId.value) || previewDocumentSnapshot.value
 })
+const editingQuestion = computed(() => questions.value.find((item) => item.id === editingQuestionId.value) || null)
 const previewSummary = computed(() => {
   if (previewDocumentId.value === null) {
     return null
@@ -325,6 +375,10 @@ function formatDateTime(value?: string | null) {
   })
 }
 
+function questionActionPending(questionId: number) {
+  return questionActionIds.value.includes(questionId)
+}
+
 function progressStatus(status: string) {
   if (status === 'failed') {
     return 'exception'
@@ -340,13 +394,13 @@ function clampPage(page: number, total: number, pageSize: number) {
   return Math.min(Math.max(page, 1), maxPage)
 }
 
-function markBusy(target: typeof deletingTaskIds | typeof deletingDocumentIds, id: number) {
+function markBusy(target: { value: number[] }, id: number) {
   if (!target.value.includes(id)) {
     target.value = [...target.value, id]
   }
 }
 
-function clearBusy(target: typeof deletingTaskIds | typeof deletingDocumentIds, id: number) {
+function clearBusy(target: { value: number[] }, id: number) {
   target.value = target.value.filter((item) => item !== id)
 }
 
@@ -686,6 +740,45 @@ function fetchFilterTagSuggestions(queryString: string, callback: (items: Sugges
   void fetchMetadataSuggestions('tag', queryString, callback, documentSubjectFilter.value === 'all' ? undefined : documentSubjectFilter.value)
 }
 
+async function fetchQuestionMetadataSuggestions(
+  field: 'chapter' | 'tag',
+  queryString: string,
+  callback: (items: SuggestionItem[]) => void,
+) {
+  const trimmedQuery = queryString.trim()
+  if (!trimmedQuery) {
+    callback([])
+    return
+  }
+
+  try {
+    const { data } = await api.get<string[]>('/knowledge/questions/metadata-suggestions', {
+      params: {
+        field,
+        query: trimmedQuery,
+        subject: questionSubjectFilter.value === 'all' ? undefined : questionSubjectFilter.value,
+        resource_type: questionResourceTypeFilter.value === 'all' ? undefined : questionResourceTypeFilter.value,
+        disabled: questionDisabledFilter.value === 'all'
+          ? undefined
+          : questionDisabledFilter.value === 'disabled',
+        limit: 8,
+      },
+    })
+    callback(data.map((value) => ({ value })))
+  } catch (error) {
+    console.error(error)
+    callback([])
+  }
+}
+
+function fetchQuestionChapterSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchQuestionMetadataSuggestions('chapter', queryString, callback)
+}
+
+function fetchQuestionTagSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
+  void fetchQuestionMetadataSuggestions('tag', queryString, callback)
+}
+
 function applyUploadTagSuggestion(item: SuggestionItem) {
   uploadForm.tags = mergeTagSuggestion(uploadTagDraft.value || uploadForm.tags, item.value)
   uploadTagDraft.value = uploadForm.tags
@@ -796,6 +889,43 @@ async function loadDocuments() {
   documentSummary.value = data.summary
 }
 
+async function loadQuestions() {
+  const params: Record<string, string | number | boolean> = {
+    page: questionPage.value,
+    page_size: QUESTIONS_PAGE_SIZE,
+  }
+  if (questionSubjectFilter.value !== 'all') {
+    params.subject = questionSubjectFilter.value
+  }
+  if (questionResourceTypeFilter.value !== 'all') {
+    params.resource_type = questionResourceTypeFilter.value
+  }
+  if (questionDifficultyFilter.value !== 'all') {
+    params.difficulty = questionDifficultyFilter.value
+  }
+  if (questionDisabledFilter.value !== 'all') {
+    params.disabled = questionDisabledFilter.value === 'disabled'
+  }
+  if (questionChapterFilter.value.trim()) {
+    params.chapter = questionChapterFilter.value.trim()
+  }
+  if (questionTagFilter.value.trim()) {
+    params.tag = questionTagFilter.value.trim()
+  }
+  if (questionKeyword.value.trim()) {
+    params.keyword = questionKeyword.value.trim()
+  }
+
+  const { data } = await api.get<PaginatedQuestionResponse>('/knowledge/questions', { params })
+  const nextPage = clampPage(questionPage.value, data.total, QUESTIONS_PAGE_SIZE)
+  if (nextPage !== questionPage.value) {
+    questionPage.value = nextPage
+    return
+  }
+  questions.value = data.items
+  questionTotal.value = data.total
+}
+
 async function loadTasks() {
   const params: Record<string, string | number> = {
     page: taskPage.value,
@@ -826,7 +956,7 @@ async function loadLatestTask() {
 
 async function refreshData(silent = false) {
   try {
-    await Promise.all([loadLatestTask(), loadTasks(), loadDocuments()])
+    await Promise.all([loadLatestTask(), loadTasks(), loadDocuments(), loadQuestions()])
     syncSelectedDocuments()
     refreshCachedChunkSummaries()
   } catch (error) {
@@ -1155,6 +1285,69 @@ async function deleteSelectedDocuments() {
   ElMessage.error(failures[0] || '批量删除失败')
 }
 
+function openQuestionEditDialog(question: KnowledgeQuestion) {
+  editingQuestionId.value = question.id
+  Object.assign(questionEditForm, {
+    chapter: question.chapter || '',
+    section: question.section || '',
+    difficulty: question.difficulty || '',
+    tags: question.tags.join(', '),
+  })
+  questionEditDialogVisible.value = true
+}
+
+async function saveQuestionMetadata() {
+  if (editingQuestionId.value === null) {
+    return
+  }
+  questionEditSaving.value = true
+  try {
+    const response = await api.put<KnowledgeQuestion>(`/knowledge/questions/${editingQuestionId.value}`, {
+      chapter: questionEditForm.chapter || null,
+      section: questionEditForm.section || null,
+      difficulty: questionEditForm.difficulty || null,
+      tags: normalizeTagsInput(questionEditForm.tags),
+    })
+    const updatedQuestion = response.data
+    questions.value = questions.value.map((item) => (item.id === updatedQuestion.id ? updatedQuestion : item))
+    delete chunkCache[updatedQuestion.document_id]
+    delete chunkSummaryCache[updatedQuestion.document_id]
+    questionEditDialogVisible.value = false
+    await loadQuestions()
+    ElMessage.success('题目 metadata 已更新')
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('保存题目 metadata 失败')
+  } finally {
+    questionEditSaving.value = false
+  }
+}
+
+async function toggleQuestionDisabled(question: KnowledgeQuestion) {
+  const actionLabel = question.is_disabled ? '恢复' : '停用'
+  if (!window.confirm(`确认${actionLabel}题目“${question.question_number ? `第${question.question_number}题` : question.question_text.slice(0, 20)}”？`)) {
+    return
+  }
+  markBusy(questionActionIds, question.id)
+  try {
+    const endpoint = question.is_disabled
+      ? `/knowledge/questions/${question.id}/restore`
+      : `/knowledge/questions/${question.id}/disable`
+    const response = await api.post<KnowledgeQuestion>(endpoint)
+    const updatedQuestion = response.data
+    questions.value = questions.value.map((item) => (item.id === updatedQuestion.id ? updatedQuestion : item))
+    delete chunkCache[updatedQuestion.document_id]
+    delete chunkSummaryCache[updatedQuestion.document_id]
+    await loadQuestions()
+    ElMessage.success(question.is_disabled ? '题目已恢复' : '题目已停用')
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(question.is_disabled ? '恢复题目失败' : '停用题目失败')
+  } finally {
+    clearBusy(questionActionIds, question.id)
+  }
+}
+
 watch(
   () => latestTask.value ? `${latestTask.value.document_id}-${latestTask.value.status}` : '',
   () => {
@@ -1220,6 +1413,35 @@ watch(documentPage, () => {
       console.error(error)
       ElMessage.error('资料列表加载失败')
     })
+})
+
+watch(
+  [
+    questionSubjectFilter,
+    questionResourceTypeFilter,
+    questionDifficultyFilter,
+    questionDisabledFilter,
+    questionChapterFilter,
+    questionTagFilter,
+    questionKeyword,
+  ],
+  () => {
+    if (questionPage.value !== 1) {
+      questionPage.value = 1
+      return
+    }
+    void loadQuestions().catch((error) => {
+      console.error(error)
+      ElMessage.error('题目总表加载失败')
+    })
+  },
+)
+
+watch(questionPage, () => {
+  void loadQuestions().catch((error) => {
+    console.error(error)
+    ElMessage.error('题目总表加载失败')
+  })
 })
 
 onMounted(async () => {
@@ -1597,6 +1819,118 @@ onBeforeUnmount(() => {
       />
     </section>
 
+    <section class="panel">
+      <div class="panel-header panel-header--stack">
+        <div>
+          <p class="eyebrow">Question Bank</p>
+          <h2>题目总表</h2>
+        </div>
+        <div class="toolbar toolbar-wrap toolbar-end">
+          <el-select v-model="questionSubjectFilter" class="toolbar-field" placeholder="筛选学科">
+            <el-option label="全部学科" value="all" />
+            <el-option v-for="item in subjectOptions" :key="item" :label="item" :value="item" />
+          </el-select>
+          <el-select v-model="questionResourceTypeFilter" class="toolbar-field" placeholder="筛选题库类型">
+            <el-option label="全部题库类型" value="all" />
+            <el-option
+              v-for="item in questionFilterResourceOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+          <el-select v-model="questionDifficultyFilter" class="toolbar-field" placeholder="筛选难度">
+            <el-option label="全部难度" value="all" />
+            <el-option v-for="item in difficultyOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+          <el-select v-model="questionDisabledFilter" class="toolbar-field" placeholder="筛选状态">
+            <el-option label="全部状态" value="all" />
+            <el-option label="已启用" value="enabled" />
+            <el-option label="已停用" value="disabled" />
+          </el-select>
+          <el-autocomplete
+            v-model="questionChapterFilter"
+            :fetch-suggestions="fetchQuestionChapterSuggestions"
+            :trigger-on-focus="false"
+            clearable
+            class="toolbar-field"
+            placeholder="筛选章节"
+          />
+          <el-autocomplete
+            v-model="questionTagFilter"
+            :fetch-suggestions="fetchQuestionTagSuggestions"
+            :trigger-on-focus="false"
+            clearable
+            class="toolbar-field"
+            placeholder="筛选标签"
+          />
+          <el-input
+            v-model="questionKeyword"
+            clearable
+            class="toolbar-field toolbar-field--wide"
+            placeholder="按题号、题干搜索"
+          />
+        </div>
+      </div>
+      <div class="detail-chip-group">
+        <span class="detail-chip">题目总数 {{ questionTotal }}</span>
+        <span class="detail-chip">当前页 {{ questions.length }} 题</span>
+        <span class="detail-chip">停用题目仍对教师/管理员可见，可恢复</span>
+      </div>
+      <div class="table-like">
+        <article v-for="item in questions" :key="item.id" class="table-row table-row-wrap">
+          <div class="table-main table-main--grow">
+            <strong>{{ item.question_number ? `第${item.question_number}题` : `题目 #${item.id}` }}</strong>
+            <span>{{ item.subject }} · {{ resourceTypeLabel(item.resource_type) }} · 来源 {{ item.document_filename || `资料 #${item.document_id}` }}</span>
+            <span>{{ item.question_text }}</span>
+            <span>最后更新 {{ formatDateTime(item.updated_at) }}</span>
+          </div>
+          <div class="row-actions row-actions--wide row-actions--grow">
+            <div class="detail-chip-group">
+              <span class="detail-chip">{{ item.is_disabled ? '已停用' : '已启用' }}</span>
+              <span v-if="item.grade" class="detail-chip">{{ gradeLabel(item.grade) }}</span>
+              <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
+              <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
+              <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>
+              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="detail-chip">#{{ tag }}</span>
+            </div>
+            <div class="row-actions">
+              <button
+                class="ghost-button"
+                :disabled="questionActionPending(item.id)"
+                @click="openQuestionEditDialog(item)"
+              >
+                编辑 metadata
+              </button>
+              <button
+                class="ghost-button"
+                :disabled="questionActionPending(item.id)"
+                @click="toggleQuestionDisabled(item)"
+              >
+                {{
+                  questionActionPending(item.id)
+                    ? '处理中...'
+                    : item.is_disabled
+                      ? '恢复题目'
+                      : '停用题目'
+                }}
+              </button>
+            </div>
+          </div>
+        </article>
+        <p v-if="!questions.length" class="panel-subcopy">暂无匹配的题目记录。</p>
+      </div>
+      <el-pagination
+        v-if="questionTotal > QUESTIONS_PAGE_SIZE"
+        v-model:current-page="questionPage"
+        class="table-pagination"
+        background
+        layout="total, prev, pager, next"
+        :page-size="QUESTIONS_PAGE_SIZE"
+        :total="questionTotal"
+      />
+    </section>
+
     <el-dialog v-model="batchDialogVisible" title="批量编辑资料 metadata" width="760px">
       <p class="panel-subcopy">
         将对已选中的 {{ selectedEditableDocumentCount }} 份资料生效。未勾选的字段保持不变；勾选后留空表示清空。
@@ -1711,6 +2045,43 @@ onBeforeUnmount(() => {
           <button class="ghost-button" @click="editDialogVisible = false">取消</button>
           <button class="primary-button" :disabled="editSaving" @click="saveDocumentMetadata">
             {{ editSaving ? '保存中...' : '保存 metadata' }}
+          </button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="questionEditDialogVisible" title="编辑题目 metadata" width="720px">
+      <div v-if="editingQuestion" class="panel-subcopy">
+        {{ editingQuestion.question_number ? `第${editingQuestion.question_number}题` : `题目 #${editingQuestion.id}` }}
+        · {{ editingQuestion.document_filename || `资料 #${editingQuestion.document_id}` }}
+      </div>
+      <div class="knowledge-meta-grid">
+        <el-select
+          v-model="questionEditForm.difficulty"
+          clearable
+          placeholder="题目难度"
+        >
+          <el-option v-for="item in difficultyOptions" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+        <el-input
+          v-model="questionEditForm.chapter"
+          placeholder="章节，例如：第二章 机械运动"
+        />
+        <el-input
+          v-model="questionEditForm.section"
+          placeholder="小节，例如：2.1 匀变速直线运动"
+        />
+        <el-input
+          v-model="questionEditForm.tags"
+          class="knowledge-meta-grid__wide"
+          placeholder="标签，多个标签用逗号分隔"
+        />
+      </div>
+      <template #footer>
+        <div class="row-actions">
+          <button class="ghost-button" @click="questionEditDialogVisible = false">取消</button>
+          <button class="primary-button" :disabled="questionEditSaving" @click="saveQuestionMetadata">
+            {{ questionEditSaving ? '保存中...' : '保存 metadata' }}
           </button>
         </div>
       </template>

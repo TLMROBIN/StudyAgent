@@ -54,6 +54,12 @@ class FakeRagService:
         self.deleted_documents: list[int] = []
         self.synced_documents: list[int] = []
         self.cleared_artifacts: list[int] = []
+        self.upserted_chunks: list[tuple[str, list[int]]] = []
+        self.vector_store = SimpleNamespace(
+            upsert_chunks=lambda subject, rows: self.upserted_chunks.append(
+                (subject, [row.id for row in rows])
+            )
+        )
 
     def purge_document_index(self, db: Session, document: KnowledgeDocument) -> None:
         self.deleted_documents.append(document.id)
@@ -68,6 +74,9 @@ class FakeRagService:
 
     def document_asset_dir(self, document_id: int) -> Path:
         return Path("/tmp") / "studyagent-test-assets" / str(document_id)
+
+    def _apply_metadata_layers(self, metadata: dict) -> dict:
+        return metadata
 
 
 class FakeUploadFile:
@@ -1071,6 +1080,332 @@ def test_list_document_chunks_returns_question_metadata():
         assert result[0].assets[0].filename == "image-001.png"
         assert result[0].assets[0].url == "/api/knowledge/documents/1/assets/image-001.png"
         assert result[0].assets[0].title == "受力图"
+    finally:
+        session.close()
+
+
+def test_list_questions_returns_question_rows_with_filters():
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        question_document = KnowledgeDocument(
+            subject="物理",
+            filename="question-set.docx",
+            file_path="/tmp/question-set.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=256,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            tags_json=["文档标签"],
+            created_by=teacher.id,
+        )
+        note_document = KnowledgeDocument(
+            subject="物理",
+            filename="notes.txt",
+            file_path="/tmp/notes.txt",
+            mime_type="text/plain",
+            size_bytes=64,
+            status=DocumentStatus.COMPLETED,
+            resource_type="knowledge_note",
+            created_by=teacher.id,
+        )
+        session.add_all([question_document, note_document])
+        session.commit()
+        session.refresh(question_document)
+        session.refresh(note_document)
+
+        session.add_all(
+            [
+                KnowledgeChunk(
+                    document_id=question_document.id,
+                    subject="物理",
+                    chunk_index=0,
+                    content="第1题\n\n题目：匀速直线运动求位移。",
+                    metadata_json={
+                        "document_id": question_document.id,
+                        "resource_type": "question_set",
+                        "chunk_kind": "question_item",
+                        "question_number": "1",
+                        "question_text": "匀速直线运动求位移。",
+                        "difficulty": "advanced",
+                        "chapter": "第二章 机械运动",
+                        "tags": ["速度", "位移"],
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=question_document.id,
+                    subject="物理",
+                    chunk_index=1,
+                    content="第2题\n\n题目：牛顿第二定律。",
+                    is_disabled=True,
+                    metadata_json={
+                        "document_id": question_document.id,
+                        "resource_type": "question_set",
+                        "chunk_kind": "question_item",
+                        "question_number": "2",
+                        "question_text": "牛顿第二定律。",
+                        "difficulty": "basic",
+                        "chapter": "第三章 牛顿运动定律",
+                        "tags": ["受力分析"],
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=note_document.id,
+                    subject="物理",
+                    chunk_index=0,
+                    content="知识点讲义",
+                    metadata_json={
+                        "document_id": note_document.id,
+                        "resource_type": "knowledge_note",
+                    },
+                ),
+            ]
+        )
+        session.commit()
+
+        result = knowledge_router.list_questions(
+            db=session,
+            current_user=teacher,
+            page=1,
+            page_size=10,
+            subject="物理",
+            difficulty="advanced",
+            chapter="机械运动",
+            tag="速度",
+            disabled=False,
+            keyword="位移",
+        )
+
+        assert result.total == 1
+        assert len(result.items) == 1
+        assert result.items[0].document_filename == "question-set.docx"
+        assert result.items[0].question_number == "1"
+        assert result.items[0].question_text == "匀速直线运动求位移。"
+        assert result.items[0].is_disabled is False
+    finally:
+        session.close()
+
+
+def test_list_question_metadata_suggestions_uses_question_scope():
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        question_document = KnowledgeDocument(
+            subject="数学",
+            filename="question-set.docx",
+            file_path="/tmp/question-set.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=256,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            chapter="文档章节",
+            tags_json=["文档标签"],
+            created_by=teacher.id,
+        )
+        session.add(question_document)
+        session.commit()
+        session.refresh(question_document)
+
+        session.add_all(
+            [
+                KnowledgeChunk(
+                    document_id=question_document.id,
+                    subject="数学",
+                    chunk_index=0,
+                    content="第1题",
+                    metadata_json={
+                        "document_id": question_document.id,
+                        "resource_type": "question_set",
+                        "chunk_kind": "question_item",
+                        "question_number": "1",
+                        "question_text": "函数单调性",
+                        "chapter": "第二章 函数",
+                        "tags": ["单调性", "函数"],
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=question_document.id,
+                    subject="数学",
+                    chunk_index=1,
+                    content="第2题",
+                    metadata_json={
+                        "document_id": question_document.id,
+                        "resource_type": "question_set",
+                        "chunk_kind": "question_item",
+                        "question_number": "2",
+                        "question_text": "函数奇偶性",
+                        "chapter": "第二章 函数综合",
+                        "tags": ["奇偶性"],
+                    },
+                ),
+            ]
+        )
+        session.commit()
+
+        chapter_values = knowledge_router.list_question_metadata_suggestions(
+            field="chapter",
+            query="函数",
+            subject="数学",
+            resource_type="question_set",
+            db=session,
+            current_user=teacher,
+            limit=10,
+        )
+        tag_values = knowledge_router.list_question_metadata_suggestions(
+            field="tag",
+            query="函",
+            subject="数学",
+            resource_type="question_set",
+            db=session,
+            current_user=teacher,
+            limit=10,
+        )
+
+        assert chapter_values == ["第二章 函数", "第二章 函数综合"]
+        assert tag_values == ["函数"]
+    finally:
+        session.close()
+
+
+def test_update_question_metadata_updates_chunk_only_and_reindexes(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        fake_rag_service = FakeRagService()
+        monkeypatch.setattr(knowledge_router, "rag_service", fake_rag_service)
+
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=256,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            chapter="第二章 机械运动",
+            tags_json=["文档标签"],
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        row = KnowledgeChunk(
+            document_id=document.id,
+            subject=document.subject,
+            chunk_index=0,
+            content="第1题\n\n题目：匀速直线运动求位移。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "匀速直线运动求位移。",
+                "answer_text": "B",
+                "explanation_text": "依据位移公式。",
+                "chapter": "第二章 机械运动",
+                "section": "2.1 匀速直线运动",
+                "difficulty": "basic",
+                "tags": ["速度"],
+            },
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        result = knowledge_router.update_question(
+            row.id,
+            payload=knowledge_router.KnowledgeQuestionUpdate(
+                chapter="第二章 机械运动综合",
+                section="2.2 综合应用",
+                difficulty="advanced",
+                tags=["速度", "位移"],
+            ),
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+
+        refreshed = session.get(KnowledgeChunk, row.id)
+        assert refreshed is not None
+        assert result.chapter == "第二章 机械运动综合"
+        assert result.section == "2.2 综合应用"
+        assert result.difficulty == "advanced"
+        assert result.tags == ["速度", "位移"]
+        assert refreshed.metadata_json["question_text"] == "匀速直线运动求位移。"
+        assert refreshed.metadata_json["answer_text"] == "B"
+        assert refreshed.metadata_json["explanation_text"] == "依据位移公式。"
+        assert document.chapter == "第二章 机械运动"
+        assert fake_rag_service.upserted_chunks == [("物理", [row.id])]
+    finally:
+        session.close()
+
+
+def test_disable_and_restore_question_keeps_row_visible_to_staff(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        monkeypatch.setattr(knowledge_router, "rag_service", FakeRagService())
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="化学",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=256,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        row = KnowledgeChunk(
+            document_id=document.id,
+            subject=document.subject,
+            chunk_index=0,
+            content="第1题\n\n题目：化学平衡。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "化学平衡。",
+            },
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        disabled = knowledge_router.disable_question(
+            row.id,
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+        disabled_rows = knowledge_router.list_questions(
+            db=session,
+            current_user=teacher,
+            page=1,
+            page_size=10,
+            disabled=True,
+        )
+        restored = knowledge_router.restore_question(
+            row.id,
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+
+        assert disabled.is_disabled is True
+        assert disabled_rows.total == 1
+        assert disabled_rows.items[0].id == row.id
+        assert restored.is_disabled is False
+        assert session.get(KnowledgeChunk, row.id).is_disabled is False
     finally:
         session.close()
 

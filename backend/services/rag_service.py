@@ -297,6 +297,7 @@ class RagService:
                     scored_rows=scored_rows,
                     student_grade=student_grade,
                 )
+                ordered_rows = self._exclude_disabled_question_rows(ordered_rows)
                 if ordered_rows:
                     return RetrievalResult(context=self._format_context(ordered_rows), chunks=ordered_rows)
         except Exception:
@@ -318,6 +319,7 @@ class RagService:
             .options(selectinload(KnowledgeChunk.document))
             .where(KnowledgeChunk.subject == subject)
         ).all()
+        rows = self._exclude_disabled_question_rows(rows)
         preferred_rows = [row for row in rows if self._question_row_tier(row) == "preferred"]
         if not preferred_rows and not any(self._question_row_tier(row) == "fallback" for row in rows):
             return []
@@ -380,6 +382,7 @@ class RagService:
             scored_rows=scored_rows,
             student_grade=student_grade,
         )
+        best = self._exclude_disabled_question_rows(best)
         return RetrievalResult(context=self._format_context(best), chunks=best)
 
     def ingest_document_text(self, db: Session, document: KnowledgeDocument, text: str) -> int:
@@ -1702,7 +1705,18 @@ class RagService:
     def _is_question_row(self, row: KnowledgeChunk) -> bool:
         return self._question_row_tier(row) is not None
 
+    def _question_row_is_disabled(self, row: KnowledgeChunk) -> bool:
+        return bool(getattr(row, "is_disabled", False))
+
+    def _exclude_disabled_question_rows(
+        self,
+        rows: list[KnowledgeChunk],
+    ) -> list[KnowledgeChunk]:
+        return [row for row in rows if not self._question_row_is_disabled(row)]
+
     def _question_row_tier(self, row: KnowledgeChunk) -> str | None:
+        if self._question_row_is_disabled(row):
+            return None
         document = row.document
         if not document:
             return None
