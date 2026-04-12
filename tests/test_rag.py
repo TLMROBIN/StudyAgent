@@ -2160,6 +2160,109 @@ def test_prepare_question_chunks_marks_missing_required_images_without_quality_s
     assert "quality_score" not in metadata
 
 
+def test_prepare_question_chunks_extracts_difficulty_and_tags_without_polluting_answer(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=12,
+        subject="物理",
+        filename="交流电.docx",
+        file_path=str(tmp_path / "交流电.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+        chapter="第十一章 交变电流",
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1. 某正弦式交变电流的有效值是多少？",
+                "【答案】D",
+                "【难度】0.72",
+                "【知识点】正弦式交流电,有效值",
+                "【详解】由有效值定义可得。",
+            ]
+        ),
+    )
+
+    assert len(prepared) == 1
+    metadata = prepared[0].metadata
+    assert metadata["answer_text"] == "D"
+    assert metadata["difficulty"] == "advanced"
+    assert metadata["tags"] == ["正弦式交流电", "有效值"]
+    assert metadata["chapter"] == "第十一章 交变电流"
+    assert "【难度】" not in prepared[0].content
+    assert "【知识点】" not in prepared[0].content
+    assert metadata["explanation_text"] == "由有效值定义可得。"
+
+
+def test_prepare_question_chunks_keeps_wrapped_subquestions_in_same_question(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=13,
+        subject="物理",
+        filename="subquestions.docx",
+        file_path=str(tmp_path / "subquestions.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1. 已知某题。",
+                "（1）求加速度。",
+                "（2）求位移。",
+                "【答案】略",
+                "2. 下一题。",
+                "【答案】A",
+            ]
+        ),
+    )
+
+    assert len(prepared) == 2
+    assert "（1）求加速度。" in prepared[0].metadata["question_text"]
+    assert "（2）求位移。" in prepared[0].metadata["question_text"]
+    assert prepared[0].metadata["question_number"] == "1"
+    assert prepared[1].metadata["question_number"] == "2"
+
+
+def test_prepare_question_chunks_drops_question_category_heading_between_questions(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=14,
+        subject="物理",
+        filename="sections.docx",
+        file_path=str(tmp_path / "sections.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "20. 上一题题干",
+                "【答案】AC",
+                "【详解】上一题解析",
+                "三、解答题",
+                "21. 下一题题干",
+                "【答案】BD",
+                "【详解】下一题解析",
+            ]
+        ),
+    )
+
+    assert len(prepared) == 2
+    assert "三、解答题" not in prepared[0].content
+    assert prepared[0].metadata["question_number"] == "20"
+    assert prepared[1].metadata["question_number"] == "21"
+
+
 def test_vector_store_metadata_whitelists_structure_retrieval_fields(tmp_path):
     rag_service = build_rag_service(tmp_path)
     row = KnowledgeChunk(
@@ -2195,6 +2298,60 @@ def test_vector_store_metadata_whitelists_structure_retrieval_fields(tmp_path):
     assert metadata["structure_path_text"] == "第一章运动的描述 > 1.质点参考系"
     assert "parser_provenance" not in metadata
     assert "diagnostic_metadata" not in metadata
+
+
+def test_sync_document_metadata_preserves_question_level_contract_fields(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            chapter="第十一章 交变电流",
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        row = KnowledgeChunk(
+            document_id=document.id,
+            subject=document.subject,
+            chunk_index=0,
+            content="第1题\n\n题目：某正弦式交变电流的有效值是多少？",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "某正弦式交变电流的有效值是多少？",
+                "answer_text": "D",
+                "explanation_text": "由有效值定义可得。",
+                "difficulty": "advanced",
+                "tags": ["正弦式交流电", "有效值"],
+                "chapter": "第十一章 交变电流",
+                "section": "第一节 交变电流",
+            },
+        )
+        session.add(row)
+        session.commit()
+
+        rag_service.sync_document_metadata(session, document)
+
+        refreshed = session.get(KnowledgeChunk, row.id)
+        assert refreshed is not None
+        assert refreshed.metadata_json["difficulty"] == "advanced"
+        assert refreshed.metadata_json["tags"] == ["正弦式交流电", "有效值"]
+        assert refreshed.metadata_json["chapter"] == "第十一章 交变电流"
+        assert refreshed.metadata_json["section"] == "第一节 交变电流"
+    finally:
+        session.close()
 
 
 def test_retrieve_prefers_chunk_with_matching_chunk_level_structure(tmp_path):

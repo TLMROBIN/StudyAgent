@@ -120,13 +120,22 @@ QUESTION_SECTION_HEADING_PATTERN = re.compile(
     r"^\s*(?:【)?(?:参考)?(?:答案(?:与解析)?|答案及解析|解答|参考解答|参考解析|解析|详解)(?:】)?\s*$"
 )
 ANSWER_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:参考)?答案(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
-EXPLANATION_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:解析|详解|解答|思路(?:点拨)?|点拨|说明)(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+EXPLANATION_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:解析|详解|解答|思路(?:点拨)?|点拨|说明|分析|点睛)(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+DIFFICULTY_LINE_PATTERN = re.compile(r"^\s*(?:【)?难度(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+KNOWLEDGE_POINTS_LINE_PATTERN = re.compile(r"^\s*(?:【)?知识点(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+QUESTION_CATEGORY_HEADING_PATTERN = re.compile(
+    r"^\s*[一二三四五六七八九十]+[、.．]\s*(?:单选题|多选题|填空题|选择题|判断题|解答题|计算题|实验题|综合题|简答题)\s*$"
+)
 QUESTION_METADATA_PRESERVE_KEYS = {
     "chunk_kind",
     "question_number",
     "question_text",
     "answer_text",
     "explanation_text",
+    "difficulty",
+    "tags",
+    "chapter",
+    "section",
     "contains_images",
     "asset_refs",
     "image_count",
@@ -916,6 +925,7 @@ class RagService:
         page_end: int | None = None,
         source_pages: list[int] | None = None,
         source_block_types: list[str] | None = None,
+        raw_block_text: str | None = None,
     ) -> PreparedChunk:
         question_metadata = self.question_bank_post_processor.build_metadata(
             document,
@@ -924,6 +934,7 @@ class RagService:
                 question_text=question_text,
                 answer_text=answer_text,
                 explanation_text=explanation_text,
+                raw_block_text=raw_block_text,
                 asset_refs=list(asset_refs or []),
                 source_format=source_format,
                 source_locator=source_locator,
@@ -955,7 +966,10 @@ class RagService:
         asset_map: dict[str, ExtractedAsset],
     ) -> list[PreparedChunk]:
         question_text, answer_bank = self._split_question_and_answer_sections(text)
-        question_blocks = self._parse_numbered_blocks(question_text)
+        question_blocks = self._parse_numbered_blocks(
+            question_text,
+            keep_wrapped_subquestions=True,
+        )
         if not question_blocks:
             return []
 
@@ -989,6 +1003,7 @@ class RagService:
                     explanation_text=clean_explanation_text or None,
                     asset_refs=asset_refs,
                     source_locator=f"question:{number}",
+                    raw_block_text=block_text,
                 )
             )
         return prepared_chunks
@@ -1011,7 +1026,12 @@ class RagService:
                     return head, tail
         return text, None
 
-    def _parse_numbered_blocks(self, text: str) -> list[tuple[str, str]]:
+    def _parse_numbered_blocks(
+        self,
+        text: str,
+        *,
+        keep_wrapped_subquestions: bool = False,
+    ) -> list[tuple[str, str]]:
         lines = [line.rstrip() for line in text.split("\n")]
         blocks: list[tuple[str, list[str]]] = []
         current_number: str | None = None
@@ -1022,8 +1042,16 @@ class RagService:
                 if current_lines:
                     current_lines.append("")
                 continue
+            if current_number and QUESTION_CATEGORY_HEADING_PATTERN.match(stripped):
+                if any(item.strip() for item in current_lines):
+                    blocks.append((current_number, current_lines[:]))
+                current_number = None
+                current_lines = []
+                continue
             matched = QUESTION_START_PATTERN.match(stripped)
-            if matched:
+            if matched and not (
+                keep_wrapped_subquestions and matched.group("wrapped") and current_number
+            ):
                 if current_number and any(item.strip() for item in current_lines):
                     blocks.append((current_number, current_lines[:]))
                 current_number = self._question_number_from_match(matched)
@@ -1063,6 +1091,8 @@ class RagService:
                 continue
             answer_match = ANSWER_LINE_PATTERN.match(stripped)
             explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
+            if DIFFICULTY_LINE_PATTERN.match(stripped) or KNOWLEDGE_POINTS_LINE_PATTERN.match(stripped):
+                continue
             if answer_match:
                 current_section = "answer"
                 inline_body = (answer_match.group("body") or "").strip()
@@ -1097,6 +1127,8 @@ class RagService:
                 continue
             explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
             answer_match = ANSWER_LINE_PATTERN.match(stripped)
+            if DIFFICULTY_LINE_PATTERN.match(stripped) or KNOWLEDGE_POINTS_LINE_PATTERN.match(stripped):
+                continue
             if explanation_match:
                 current_section = "explanation"
                 inline_body = (explanation_match.group("body") or "").strip()

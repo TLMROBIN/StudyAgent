@@ -205,6 +205,41 @@ class TestAutoTag:
             )
             assert result == ["重力势能"]
 
+    def test_match_textbook_structure_returns_parent_chapter_and_section(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第十一章 交变电流",
+                section="第一节 交变电流",
+            )
+
+            result = svc.match_textbook_structure(db, "交变电流.docx", "物理")
+
+            assert result == {
+                "chapter": "第十一章 交变电流",
+                "section": "第一节 交变电流",
+            }
+
+    def test_match_textbook_structure_returns_none_when_title_misses_catalog(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第十一章 交变电流",
+                section="第一节 交变电流",
+            )
+
+            result = svc.match_textbook_structure(db, "完全不匹配.docx", "物理")
+
+            assert result == {"chapter": None, "section": None}
+
 
 class TestCache:
     def test_cache_reuses_within_ttl(self):

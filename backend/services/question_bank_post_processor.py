@@ -5,7 +5,7 @@ from hashlib import sha1
 import re
 from typing import Any
 
-from backend.models.knowledge import KnowledgeDocument
+from backend.models.knowledge import DifficultyLevel, KnowledgeDocument
 
 REQUIRED_IMAGE_HINTS = (
     "如图",
@@ -30,6 +30,8 @@ INLINE_QUESTION_MARKER_PATTERN = re.compile(
     r"(?:^|\n)\s*(?:第\s*\d+\s*题|\d{1,3}\s*[.．、:：)]|[（(]\d{1,3}[)）])\s*"
 )
 ANSWER_PAIRING_SUSPECT_PATTERN = re.compile(r"(?:^|\n)\s*\d{1,3}\s*[.．、:：)]\s*答案")
+DIFFICULTY_LINE_PATTERN = re.compile(r"^\s*(?:【)?难度(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+KNOWLEDGE_POINTS_LINE_PATTERN = re.compile(r"^\s*(?:【)?知识点(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
 
 
 @dataclass(slots=True)
@@ -38,6 +40,7 @@ class QuestionBankChunkCandidate:
     question_text: str
     answer_text: str | None = None
     explanation_text: str | None = None
+    raw_block_text: str | None = None
     asset_refs: list[dict[str, Any]] = field(default_factory=list)
     source_format: str | None = None
     source_locator: str | None = None
@@ -60,6 +63,8 @@ class QuestionBankPostProcessor:
         question_text = str(candidate.question_text or "").strip()
         answer_text = self._clean_optional_text(candidate.answer_text)
         explanation_text = self._clean_optional_text(candidate.explanation_text)
+        difficulty = self._extract_difficulty(candidate.raw_block_text)
+        tags = self._extract_knowledge_tags(candidate.raw_block_text)
         asset_refs = self._dedupe_asset_refs(candidate.asset_refs)
         structure_path = [str(item).strip() for item in candidate.structure_path if str(item or "").strip()]
         source_pages = sorted({int(page) for page in candidate.source_pages if page})
@@ -76,12 +81,13 @@ class QuestionBankPostProcessor:
         )
         question_uid = f"qb:{document.id}:{source_locator or question_number or 'unknown'}"
 
-        return {
+        metadata = {
             "chunk_kind": "question_item",
             "question_number": question_number or None,
             "question_text": question_text or None,
             "answer_text": answer_text,
             "explanation_text": explanation_text,
+            "difficulty": difficulty,
             "contains_images": bool(asset_refs),
             "asset_refs": asset_refs,
             "image_count": len(asset_refs),
@@ -99,6 +105,9 @@ class QuestionBankPostProcessor:
             "quality_flags": quality_flags,
             "question_uid": question_uid,
         }
+        if tags:
+            metadata["tags"] = tags
+        return metadata
 
     def _clean_optional_text(self, value: str | None) -> str | None:
         if value is None:
@@ -206,3 +215,67 @@ class QuestionBankPostProcessor:
             seen.add(key)
             deduped.append(asset)
         return deduped
+
+    def _extract_difficulty(self, raw_block_text: str | None) -> str | None:
+        if not raw_block_text:
+            return None
+        for line in raw_block_text.split("\n"):
+            matched = DIFFICULTY_LINE_PATTERN.match(line.strip())
+            if not matched:
+                continue
+            body = str(matched.group("body") or "").strip()
+            if not body:
+                return None
+            return self._normalize_difficulty(body)
+        return None
+
+    def _normalize_difficulty(self, value: str) -> str | None:
+        normalized = str(value or "").strip().lower()
+        direct_map = {
+            "basic": DifficultyLevel.BASIC.value,
+            "基础": DifficultyLevel.BASIC.value,
+            "standard": DifficultyLevel.STANDARD.value,
+            "标准": DifficultyLevel.STANDARD.value,
+            "advanced": DifficultyLevel.ADVANCED.value,
+            "提高": DifficultyLevel.ADVANCED.value,
+            "challenge": DifficultyLevel.CHALLENGE.value,
+            "挑战": DifficultyLevel.CHALLENGE.value,
+        }
+        if normalized in direct_map:
+            return direct_map[normalized]
+        numeric_match = re.search(r"\d+(?:\.\d+)?", normalized)
+        if not numeric_match:
+            return None
+        score = float(numeric_match.group(0))
+        if score > 1:
+            score /= 100
+        if score >= 0.85:
+            return DifficultyLevel.CHALLENGE.value
+        if score >= 0.70:
+            return DifficultyLevel.ADVANCED.value
+        if score >= 0.45:
+            return DifficultyLevel.STANDARD.value
+        return DifficultyLevel.BASIC.value
+
+    def _extract_knowledge_tags(self, raw_block_text: str | None) -> list[str]:
+        if not raw_block_text:
+            return []
+        tags: list[str] = []
+        seen: set[str] = set()
+        for line in raw_block_text.split("\n"):
+            matched = KNOWLEDGE_POINTS_LINE_PATTERN.match(line.strip())
+            if not matched:
+                continue
+            body = str(matched.group("body") or "").strip()
+            if not body:
+                continue
+            for item in re.split(r"[、,，;；]+", body):
+                normalized = str(item or "").strip()
+                if not normalized:
+                    continue
+                key = normalized.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                tags.append(normalized[:32])
+        return tags[:20]

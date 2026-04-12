@@ -116,6 +116,11 @@ def configure_upload_router(
     settings.ensure_storage()
     monkeypatch.setattr(knowledge_router, "settings", settings)
     monkeypatch.setattr(knowledge_router.auto_tag_service, "auto_tag", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        knowledge_router.auto_tag_service,
+        "match_textbook_structure",
+        lambda *args, **kwargs: {"chapter": None, "section": None},
+    )
     dispatched: list[tuple[str, int]] = []
     audit_details: list[dict] = []
     monkeypatch.setattr(
@@ -140,6 +145,34 @@ def run_upload(session: Session, teacher: User, upload: FakeUploadFile, subject:
             grade=None,
             chapter=None,
             section=None,
+            difficulty=None,
+            tags=None,
+            file=upload,
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+    )
+
+
+def run_upload_with_metadata(
+    session: Session,
+    teacher: User,
+    upload: FakeUploadFile,
+    *,
+    subject: str,
+    resource_type: str,
+    chapter: str | None = None,
+    section: str | None = None,
+):
+    return asyncio.run(
+        knowledge_router.upload_document(
+            background_tasks=BackgroundTasks(),
+            subject=subject,
+            resource_type=resource_type,
+            grade=None,
+            chapter=chapter,
+            section=section,
             difficulty=None,
             tags=None,
             file=upload,
@@ -263,6 +296,136 @@ def test_upload_document_rejects_unsupported_extension(tmp_path, monkeypatch):
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "Unsupported file type"
         assert session.scalar(select(KnowledgeDocument).where(KnowledgeDocument.filename == "notes.exe")) is None
+    finally:
+        session.close()
+
+
+def test_upload_document_rejects_non_docx_question_resource(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="questions.pdf",
+            payload=b"%PDF-1.4",
+            content_type="application/pdf",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            run_upload_with_metadata(
+                session,
+                teacher,
+                upload,
+                subject="物理",
+                resource_type="question_set",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Question resources require DOCX files"
+        assert session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "questions.pdf")
+        ) is None
+    finally:
+        session.close()
+
+
+def test_upload_document_rejects_exercise_docx_without_resolved_chapter(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="exercise.docx",
+            payload=b"docx payload",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            run_upload_with_metadata(
+                session,
+                teacher,
+                upload,
+                subject="物理",
+                resource_type="exercise",
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Chapter is required for exercise DOCX uploads"
+        assert session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "exercise.docx")
+        ) is None
+        assert session.scalar(select(ImportTask)) is None
+    finally:
+        session.close()
+
+
+def test_upload_document_accepts_exercise_docx_with_manual_chapter(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        upload_context = configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="exercise.docx",
+            payload=b"docx payload",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        result = run_upload_with_metadata(
+            session,
+            teacher,
+            upload,
+            subject="物理",
+            resource_type="exercise",
+            chapter="第二章 机械运动",
+        )
+
+        document = session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "exercise.docx")
+        )
+        assert document is not None
+        assert document.resource_type == "exercise"
+        assert document.chapter == "第二章 机械运动"
+        task = session.scalar(select(ImportTask).where(ImportTask.document_id == document.id))
+        assert task is not None
+        assert upload_context["dispatched"] == [("exercise.docx", task.id)]
+        assert result.document_id == document.id
+    finally:
+        session.close()
+
+
+def test_upload_document_accepts_question_set_docx_without_resolved_chapter(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        upload_context = configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="question-set.docx",
+            payload=b"docx payload",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        result = run_upload_with_metadata(
+            session,
+            teacher,
+            upload,
+            subject="物理",
+            resource_type="question_set",
+        )
+
+        document = session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "question-set.docx")
+        )
+        assert document is not None
+        assert document.resource_type == "question_set"
+        assert document.chapter is None
+        task = session.scalar(select(ImportTask).where(ImportTask.document_id == document.id))
+        assert task is not None
+        assert upload_context["dispatched"] == [("question-set.docx", task.id)]
+        assert result.document_id == document.id
     finally:
         session.close()
 
@@ -921,9 +1084,9 @@ def test_update_document_metadata_persists_fields_and_triggers_sync(monkeypatch)
         teacher = create_teacher(session)
         document = KnowledgeDocument(
             subject="物理",
-            filename="meta.txt",
-            file_path="/tmp/meta.txt",
-            mime_type="text/plain",
+            filename="meta.docx",
+            file_path="/tmp/meta.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             size_bytes=12,
             status=DocumentStatus.COMPLETED,
             created_by=teacher.id,
@@ -958,6 +1121,45 @@ def test_update_document_metadata_persists_fields_and_triggers_sync(monkeypatch)
         session.close()
 
 
+def test_update_document_rejects_non_docx_resource_type_conversion(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        fake_rag_service = FakeRagService()
+        monkeypatch.setattr(knowledge_router, "rag_service", fake_rag_service)
+
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="meta.txt",
+            file_path="/tmp/meta.txt",
+            mime_type="text/plain",
+            size_bytes=12,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        with pytest.raises(HTTPException) as exc_info:
+            knowledge_router.update_document(
+                document.id,
+                payload=knowledge_router.KnowledgeDocumentUpdate(
+                    resource_type="question_set"
+                ),
+                db=session,
+                current_user=teacher,
+                request=build_request(),
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Question resources require DOCX documents"
+        assert fake_rag_service.synced_documents == []
+    finally:
+        session.close()
+
+
 def test_bulk_update_documents_updates_multiple_rows_and_preserves_unspecified_fields(monkeypatch):
     session_local = build_session()
     session = session_local()
@@ -968,9 +1170,9 @@ def test_bulk_update_documents_updates_multiple_rows_and_preserves_unspecified_f
         teacher = create_teacher(session)
         first = KnowledgeDocument(
             subject="物理",
-            filename="set-a.txt",
-            file_path="/tmp/set-a.txt",
-            mime_type="text/plain",
+            filename="set-a.docx",
+            file_path="/tmp/set-a.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             size_bytes=12,
             status=DocumentStatus.COMPLETED,
             chapter="第二章 电场",
@@ -978,9 +1180,9 @@ def test_bulk_update_documents_updates_multiple_rows_and_preserves_unspecified_f
         )
         second = KnowledgeDocument(
             subject="物理",
-            filename="set-b.txt",
-            file_path="/tmp/set-b.txt",
-            mime_type="text/plain",
+            filename="set-b.docx",
+            file_path="/tmp/set-b.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             size_bytes=18,
             status=DocumentStatus.COMPLETED,
             chapter="第三章 磁场",
@@ -1017,6 +1219,55 @@ def test_bulk_update_documents_updates_multiple_rows_and_preserves_unspecified_f
         session.close()
 
 
+def test_bulk_update_documents_rejects_non_docx_question_resource_conversion(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        fake_rag_service = FakeRagService()
+        monkeypatch.setattr(knowledge_router, "rag_service", fake_rag_service)
+
+        teacher = create_teacher(session)
+        first = KnowledgeDocument(
+            subject="物理",
+            filename="set-a.txt",
+            file_path="/tmp/set-a.txt",
+            mime_type="text/plain",
+            size_bytes=12,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+        )
+        second = KnowledgeDocument(
+            subject="物理",
+            filename="set-b.docx",
+            file_path="/tmp/set-b.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=18,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+        )
+        session.add_all([first, second])
+        session.commit()
+        session.refresh(first)
+        session.refresh(second)
+
+        with pytest.raises(HTTPException) as exc_info:
+            knowledge_router.bulk_update_documents(
+                payload=knowledge_router.KnowledgeDocumentBulkUpdate(
+                    document_ids=[first.id, second.id],
+                    resource_type="question_set",
+                ),
+                db=session,
+                current_user=teacher,
+                request=build_request(),
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Question resources require DOCX documents"
+        assert fake_rag_service.synced_documents == []
+    finally:
+        session.close()
+
+
 def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkeypatch):
     session_local = build_session()
     session = session_local()
@@ -1027,9 +1278,9 @@ def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkey
         teacher = create_teacher(session)
         document = KnowledgeDocument(
             subject="物理",
-            filename="questions.pdf",
-            file_path=str(tmp_path / "questions.pdf"),
-            mime_type="application/pdf",
+            filename="questions.docx",
+            file_path=str(tmp_path / "questions.docx"),
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             size_bytes=256,
             status=DocumentStatus.COMPLETED,
             resource_type="question_set",
@@ -1058,7 +1309,7 @@ def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkey
                     "asset_refs": [],
                     "parser_backend": "pipeline",
                     "parser_provenance": {"runtime_artifact": "data/tasks/123/mineru-runtime.json"},
-                    "source_format": "pdf",
+                    "source_format": "docx",
                     "source_locator": "page:1/question:1",
                     "image_expectation": "required",
                     "image_binding_status": "missing_required",
@@ -1089,12 +1340,94 @@ def test_update_document_preserves_parser_provenance_after_sync(tmp_path, monkey
         assert row is not None
         assert row.metadata_json.get("parser_backend") == "pipeline"
         assert row.metadata_json.get("parser_provenance", {}).get("runtime_artifact") == "data/tasks/123/mineru-runtime.json"
-        assert row.metadata_json.get("source_format") == "pdf"
+        assert row.metadata_json.get("source_format") == "docx"
         assert row.metadata_json.get("source_locator") == "page:1/question:1"
         assert row.metadata_json.get("image_expectation") == "required"
         assert row.metadata_json.get("image_binding_status") == "missing_required"
         assert row.metadata_json.get("quality_flags") == ["missing_required_image"]
         assert row.metadata_json.get("question_uid") == f"{document.id}:page:1/question:1"
+    finally:
+        session.close()
+
+
+def test_update_document_rejects_legacy_non_docx_question_resource(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        fake_rag_service = FakeRagService()
+        monkeypatch.setattr(knowledge_router, "rag_service", fake_rag_service)
+
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.pdf",
+            file_path="/tmp/questions.pdf",
+            mime_type="application/pdf",
+            size_bytes=256,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        with pytest.raises(HTTPException) as exc_info:
+            knowledge_router.update_document(
+                document.id,
+                payload=knowledge_router.KnowledgeDocumentUpdate(
+                    resource_type="question_set",
+                    chapter="第二章 机械运动",
+                ),
+                db=session,
+                current_user=teacher,
+                request=build_request(),
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Question resources require DOCX documents"
+        assert fake_rag_service.synced_documents == []
+    finally:
+        session.close()
+
+
+def test_bulk_update_documents_rejects_legacy_non_docx_question_resource(monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        fake_rag_service = FakeRagService()
+        monkeypatch.setattr(knowledge_router, "rag_service", fake_rag_service)
+
+        teacher = create_teacher(session)
+        legacy = KnowledgeDocument(
+            subject="物理",
+            filename="legacy.pdf",
+            file_path="/tmp/legacy.pdf",
+            mime_type="application/pdf",
+            size_bytes=128,
+            status=DocumentStatus.COMPLETED,
+            resource_type="question_set",
+            created_by=teacher.id,
+        )
+        session.add(legacy)
+        session.commit()
+        session.refresh(legacy)
+
+        with pytest.raises(HTTPException) as exc_info:
+            knowledge_router.bulk_update_documents(
+                payload=knowledge_router.KnowledgeDocumentBulkUpdate(
+                    document_ids=[legacy.id],
+                    resource_type="question_set",
+                    tags=["综合"],
+                ),
+                db=session,
+                current_user=teacher,
+                request=build_request(),
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Question resources require DOCX documents"
+        assert fake_rag_service.synced_documents == []
     finally:
         session.close()
 

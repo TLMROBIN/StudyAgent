@@ -49,6 +49,7 @@ _FILENAME_NOISE_PATTERNS = [
 class AutoTagService:
     def __init__(self, cache_ttl: int = 300) -> None:
         self._cache: dict[str, list[str]] = {}
+        self._structure_cache: dict[str, list[dict[str, str | None]]] = {}
         self._cache_time: float = 0
         self._cache_ttl = cache_ttl
 
@@ -79,7 +80,45 @@ class AutoTagService:
         return merged[:20]
 
     def invalidate_cache(self) -> None:
+        self._structure_cache = {}
         self._cache_time = 0
+
+    def match_textbook_structure(
+        self,
+        db: Session,
+        title: str,
+        subject: str,
+    ) -> dict[str, str | None]:
+        now = time.time()
+        if now - self._cache_time > self._cache_ttl:
+            self._refresh_cache(db)
+        clean_title = self._clean_title(title)
+        normalized_title = self._normalize_title_tag_candidate(clean_title) or self._normalize_tag_candidate(clean_title)
+        if not normalized_title:
+            return {"chapter": None, "section": None}
+
+        title_key = normalized_title.lower()
+        best_match: tuple[int, int, dict[str, str | None]] | None = None
+        for entry in self._structure_cache.get(subject, []):
+            normalized_label = str(entry.get("normalized") or "").lower()
+            if not normalized_label:
+                continue
+            score = self._structure_match_score(title_key, normalized_label, kind=str(entry.get("kind") or "chapter"))
+            if score is None:
+                continue
+            candidate = (score, len(normalized_label), entry)
+            if best_match is None or candidate > best_match:
+                best_match = candidate
+
+        if best_match is None:
+            return {"chapter": None, "section": None}
+
+        entry = best_match[2]
+        chapter = str(entry.get("chapter") or "").strip() or None
+        section = None
+        if str(entry.get("kind") or "") == "section" and title_key == str(entry.get("normalized") or "").lower():
+            section = str(entry.get("section") or "").strip() or None
+        return {"chapter": chapter, "section": section}
 
     def _get_vocabulary(self, db: Session, subject: str) -> list[str]:
         now = time.time()
@@ -111,10 +150,14 @@ class AutoTagService:
         ).all()
 
         by_subject: dict[str, set[str]] = {}
+        structure_by_subject: dict[str, list[dict[str, str | None]]] = {}
+        seen_structure_entries: dict[str, set[tuple[str, str, str]]] = {}
         for tags_json, subject, chapter, section in document_rows:
             if not subject:
                 continue
             by_subject.setdefault(subject, set())
+            structure_by_subject.setdefault(subject, [])
+            seen_structure_entries.setdefault(subject, set())
             for candidate in [
                 *(tags_json or []),
                 chapter,
@@ -123,11 +166,29 @@ class AutoTagService:
                 normalized = self._normalize_tag_candidate(candidate)
                 if normalized:
                     by_subject[subject].add(normalized)
+            self._append_structure_entry(
+                structure_by_subject[subject],
+                seen_structure_entries[subject],
+                chapter=chapter,
+                section=None,
+                label=chapter,
+                kind="chapter",
+            )
+            self._append_structure_entry(
+                structure_by_subject[subject],
+                seen_structure_entries[subject],
+                chapter=chapter,
+                section=section,
+                label=section,
+                kind="section",
+            )
 
         for metadata_json, subject in chunk_rows:
             if not subject or not metadata_json:
                 continue
             by_subject.setdefault(subject, set())
+            structure_by_subject.setdefault(subject, [])
+            seen_structure_entries.setdefault(subject, set())
             for candidate in [
                 metadata_json.get("chapter"),
                 metadata_json.get("section"),
@@ -135,10 +196,37 @@ class AutoTagService:
                 normalized = self._normalize_tag_candidate(candidate)
                 if normalized:
                     by_subject[subject].add(normalized)
+            self._append_structure_entry(
+                structure_by_subject[subject],
+                seen_structure_entries[subject],
+                chapter=metadata_json.get("chapter"),
+                section=None,
+                label=metadata_json.get("chapter"),
+                kind="chapter",
+            )
+            self._append_structure_entry(
+                structure_by_subject[subject],
+                seen_structure_entries[subject],
+                chapter=metadata_json.get("chapter"),
+                section=metadata_json.get("section"),
+                label=metadata_json.get("section"),
+                kind="section",
+            )
 
         self._cache = {}
+        self._structure_cache = {}
         for subject, tags in by_subject.items():
             self._cache[subject] = sorted(tags, key=len, reverse=True)
+        for subject, entries in structure_by_subject.items():
+            self._structure_cache[subject] = sorted(
+                entries,
+                key=lambda item: (
+                    str(item.get("kind") or "") != "section",
+                    -len(str(item.get("normalized") or "")),
+                    str(item.get("chapter") or ""),
+                    str(item.get("section") or ""),
+                ),
+            )
 
         self._cache_time = time.time()
         total = sum(len(v) for v in self._cache.values())
@@ -147,6 +235,49 @@ class AutoTagService:
             len(self._cache),
             total,
         )
+
+    def _append_structure_entry(
+        self,
+        entries: list[dict[str, str | None]],
+        seen: set[tuple[str, str, str]],
+        *,
+        chapter: str | None,
+        section: str | None,
+        label: str | None,
+        kind: str,
+    ) -> None:
+        normalized_label = self._normalize_tag_candidate(label)
+        normalized_chapter = self._normalize_tag_candidate(chapter)
+        if not normalized_label or not normalized_chapter:
+            return
+        if kind == "section" and not self._normalize_tag_candidate(section):
+            return
+        key = (kind, normalized_chapter, normalized_label)
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append(
+            {
+                "kind": kind,
+                "chapter": str(chapter).strip() if str(chapter or "").strip() else None,
+                "section": str(section).strip() if str(section or "").strip() else None,
+                "label": str(label).strip() if str(label or "").strip() else None,
+                "normalized": normalized_label,
+            }
+        )
+
+    def _structure_match_score(self, title_key: str, label_key: str, *, kind: str) -> int | None:
+        if not title_key or not label_key:
+            return None
+        exact_bonus = 40 if kind == "section" else 0
+        partial_bonus = 15 if kind == "chapter" else 0
+        if title_key == label_key:
+            return 300 + exact_bonus
+        if label_key in title_key:
+            return 220 + partial_bonus
+        if title_key in label_key and len(title_key) >= _MIN_TAG_LENGTH + 1:
+            return 180 + partial_bonus
+        return None
 
     def _clean_title(self, filename: str) -> str:
         title = filename

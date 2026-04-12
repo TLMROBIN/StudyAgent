@@ -55,14 +55,13 @@ ACTIVE_TASK_STATUSES = {DocumentStatus.PENDING, DocumentStatus.PROCESSING}
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
 METADATA_SUGGESTION_FIELDS = {"chapter", "section", "tag"}
 GENERIC_UPLOAD_MIME_TYPES = {"", "application/octet-stream"}
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 UPLOAD_MIME_COMPATIBILITY = {
     ".pdf": {
         "accepted": {"application/pdf"},
     },
     ".docx": {
-        "accepted": {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        },
+        "accepted": {DOCX_MIME_TYPE},
     },
     ".txt": {
         "accepted": {"text/plain"},
@@ -105,13 +104,78 @@ def _resolve_upload_mime_type(file: UploadFile) -> tuple[str, str]:
     )
 
 
-def _validate_upload(file: UploadFile) -> tuple[str, str]:
+def _resource_type_value(resource_type: ResourceType | str | None) -> str:
+    if isinstance(resource_type, ResourceType):
+        return resource_type.value
+    return str(resource_type or "").strip()
+
+
+def _requires_question_docx(resource_type: ResourceType | str | None) -> bool:
+    return _resource_type_value(resource_type) in QUESTION_RESOURCE_TYPES
+
+
+def _is_docx_mime_type(content_type: str | None) -> bool:
+    return str(content_type or "").strip().lower() == DOCX_MIME_TYPE
+
+
+def _is_docx_document(document: KnowledgeDocument) -> bool:
+    suffix = Path(document.filename or document.file_path or "").suffix.lower()
+    return suffix == ".docx" and _is_docx_mime_type(document.mime_type)
+
+
+def _validate_upload(
+    file: UploadFile, *, resource_type: ResourceType | str | None = None
+) -> tuple[str, str]:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in settings.upload_extension_list:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type"
         )
-    return _resolve_upload_mime_type(file)
+    raw_content_type, effective_content_type = _resolve_upload_mime_type(file)
+    if _requires_question_docx(resource_type) and (
+        suffix != ".docx" or not _is_docx_mime_type(effective_content_type)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Question resources require DOCX files",
+        )
+    return raw_content_type, effective_content_type
+
+
+def _resolve_question_resource_structure(
+    db: DbSession,
+    *,
+    subject: str,
+    resource_type: ResourceType | str | None,
+    filename: str,
+    chapter: str | None,
+    section: str | None,
+) -> tuple[str | None, str | None]:
+    normalized_chapter = _normalize_optional_text(chapter)
+    normalized_section = _normalize_optional_text(section)
+    if not _requires_question_docx(resource_type):
+        return normalized_chapter, normalized_section
+    if normalized_chapter:
+        return normalized_chapter, normalized_section
+    matched = auto_tag_service.match_textbook_structure(db, filename, subject)
+    matched_chapter = _normalize_optional_text(matched.get("chapter"))
+    matched_section = _normalize_optional_text(matched.get("section"))
+    if _resource_type_value(resource_type) == ResourceType.EXERCISE.value and not matched_chapter:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Chapter is required for exercise DOCX uploads",
+        )
+    return matched_chapter, normalized_section or matched_section
+
+
+def _ensure_question_resource_document_is_docx(
+    document: KnowledgeDocument, *, target_resource_type: ResourceType | str | None
+) -> None:
+    if _requires_question_docx(target_resource_type) and not _is_docx_document(document):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Question resources require DOCX documents",
+        )
 
 
 def _upload_detail(
@@ -665,7 +729,15 @@ async def upload_document(
     current_user: CurrentTeacher = None,
     request: Request = None,
 ) -> ImportTaskRead:
-    raw_content_type, content_type = _validate_upload(file)
+    raw_content_type, content_type = _validate_upload(file, resource_type=resource_type)
+    resolved_chapter, resolved_section = _resolve_question_resource_structure(
+        db,
+        subject=subject,
+        resource_type=resource_type,
+        filename=file.filename or "",
+        chapter=chapter,
+        section=section,
+    )
     content = await file.read()
     if len(content) > settings.upload_max_bytes:
         raise HTTPException(
@@ -689,8 +761,8 @@ async def upload_document(
         document,
         resource_type=resource_type,
         grade=grade,
-        chapter=chapter,
-        section=section,
+        chapter=resolved_chapter,
+        section=resolved_section,
         difficulty=difficulty,
         tags=tags,
     )
@@ -779,6 +851,10 @@ def bulk_update_documents(
         )
 
     for document in ordered_documents:
+        _ensure_question_resource_document_is_docx(
+            document,
+            target_resource_type=changes.get("resource_type", document.resource_type),
+        )
         _merge_document_metadata(document, changes)
         db.add(document)
     db.commit()
@@ -835,6 +911,10 @@ def update_document(
             detail="Document has active import task",
         )
 
+    _ensure_question_resource_document_is_docx(
+        document,
+        target_resource_type=payload.resource_type,
+    )
     _merge_document_metadata(document, payload.model_dump(mode="json"))
     db.add(document)
     db.commit()

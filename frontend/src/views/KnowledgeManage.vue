@@ -222,6 +222,11 @@ const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 
 const uploadSupportsDifficulty = computed(() => questionResourceTypes.has(uploadForm.resource_type))
 const uploadSupportsChapter = computed(() => uploadForm.resource_type !== 'extension')
+const uploadAccept = computed(() => (
+  questionResourceTypes.has(uploadForm.resource_type)
+    ? '.docx'
+    : '.pdf,.docx,.txt,.md,.tex'
+))
 const editSupportsDifficulty = computed(() => questionResourceTypes.has(editForm.resource_type))
 const editSupportsChapter = computed(() => editForm.resource_type !== 'extension')
 const batchResourceTypeSupportsDifficulty = computed(() => questionResourceTypes.has(batchForm.resource_type))
@@ -881,6 +886,10 @@ function clearSelectedUploadFiles() {
   uploadRef.value?.clearFiles()
 }
 
+function isDocxFileName(filename: string) {
+  return filename.trim().toLowerCase().endsWith('.docx')
+}
+
 function handleUploadSelection(_file: UploadFile, fileList: UploadFiles) {
   selectedUploadFiles.value = [...fileList]
 }
@@ -896,6 +905,10 @@ async function submitSelectedUploads() {
 
   if (!files.length) {
     ElMessage.error('请先选择资料')
+    return
+  }
+  if (questionResourceTypes.has(uploadForm.resource_type) && files.some((file) => !isDocxFileName(file.name))) {
+    ElMessage.error('习题例题和题库试卷仅支持 DOCX 文件')
     return
   }
 
@@ -1280,7 +1293,7 @@ onBeforeUnmount(() => {
           :show-file-list="true"
           :auto-upload="false"
           multiple
-          accept=".pdf,.docx,.txt,.md,.tex"
+          :accept="uploadAccept"
           :on-change="handleUploadSelection"
           :on-remove="handleUploadRemove"
         >
