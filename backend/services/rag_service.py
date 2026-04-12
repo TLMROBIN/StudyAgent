@@ -7,6 +7,7 @@ import mimetypes
 import posixpath
 import re
 import shutil
+import struct
 from typing import Any, Callable
 from xml.etree import ElementTree as ET
 import zipfile
@@ -83,6 +84,35 @@ DOCX_WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 DOCX_MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 DOCX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 DOCX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+DOCX_OLE_NS = "urn:schemas-microsoft-com:office:office"
+DOCX_VML_NS = "urn:schemas-microsoft-com:vml"
+OLE_END_OF_CHAIN = 0xFFFFFFFE
+OLE_FREE_SECTOR = 0xFFFFFFFF
+OLE_UINT32_SIZE = 4
+OLE_CF_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+OLE_METADATA_STRINGS = {
+    "MathType 6.0 Equation",
+    "MathType 7.0 Equation",
+    "MathType EF",
+    "Equation.DSMT4",
+    "DSMT6",
+    "DSMT7",
+    "WinAllBasicCodePages",
+    "WinAllCodePages",
+    "Times New Roman",
+    "Symbol",
+    "Courier New",
+    "MT Extra",
+    "Root Entry",
+    "Ole",
+    "CompObj",
+    "ObjInfo",
+    "Equation Native",
+    "OlePres000",
+    "AppsMFCC",
+    "Design Science, Inc.",
+    "System",
+}
 OMML_OPERATOR_MAP = {
     "∑": r"\sum",
     "∏": r"\prod",
@@ -1776,6 +1806,8 @@ class RagService:
         namespace = self._xml_namespace(element.tag)
         if namespace == DOCX_MATH_NS and local_name in {"oMath", "oMathPara"}:
             return self._omml_to_latex(element)
+        if namespace == DOCX_WORD_NS and local_name == "object":
+            return self._docx_ole_object_text(element, context)
         if namespace == DOCX_WORD_NS and local_name in {"drawing", "pict"}:
             return self._docx_image_marker(element, context)
 
@@ -1794,6 +1826,197 @@ class RagService:
             if child.tail and child.tail.strip():
                 parts.append(child.tail)
         return "".join(parts)
+
+    def _docx_ole_object_text(self, element: ET.Element, context: dict[str, Any]) -> str:
+        formula_text = self._docx_extract_ole_formula_text(element, context)
+        if formula_text:
+            wrapped = self._wrap_formula(formula_text, display=False)
+            return f" {wrapped} " if wrapped else ""
+        fallback = self._docx_ole_object_fallback_label(element)
+        if fallback:
+            return f" {fallback} "
+        return ""
+
+    def _docx_extract_ole_formula_text(self, element: ET.Element, context: dict[str, Any]) -> str | None:
+        embed_id = None
+        prog_id = None
+        for descendant in element.iter():
+            if self._xml_namespace(descendant.tag) == DOCX_OLE_NS and self._xml_local_name(descendant.tag) == "OLEObject":
+                embed_id = self._xml_attr(descendant, "id") or embed_id
+                prog_id = descendant.attrib.get("ProgID") or prog_id
+                break
+        if not embed_id or not prog_id or prog_id != "Equation.DSMT4":
+            return None
+        target_path = context["relationships"].get(embed_id)
+        if not target_path:
+            return None
+        archive: zipfile.ZipFile = context["archive"]
+        try:
+            payload = archive.read(target_path)
+        except KeyError:
+            return None
+        return self._extract_legacy_equation_text(payload)
+
+    def _docx_ole_object_fallback_label(self, element: ET.Element) -> str | None:
+        for descendant in element.iter():
+            if self._xml_namespace(descendant.tag) == DOCX_VML_NS and self._xml_local_name(descendant.tag) == "shape":
+                alt = descendant.attrib.get("alt")
+                if alt:
+                    return "【公式对象】"
+            if self._xml_namespace(descendant.tag) == DOCX_VML_NS and self._xml_local_name(descendant.tag) == "imagedata":
+                title = self._xml_attr(descendant, "title")
+                if title:
+                    return "【公式对象】"
+        return "【公式对象】"
+
+    def _extract_legacy_equation_text(self, payload: bytes) -> str | None:
+        stream = self._extract_ole_stream(payload, "Equation Native")
+        if not stream:
+            return None
+        tex_text = self._extract_equation_tex_text(stream)
+        if tex_text:
+            return tex_text
+        return self._extract_equation_char_fallback(stream)
+
+    def _extract_ole_stream(self, payload: bytes, stream_name: str) -> bytes | None:
+        if len(payload) < 512 or not payload.startswith(OLE_CF_MAGIC):
+            return None
+        try:
+            sector_size = 1 << self._ole_u16(payload, 30)
+            mini_sector_size = 1 << self._ole_u16(payload, 32)
+            directory_start = self._ole_u32(payload, 48)
+            mini_stream_cutoff = self._ole_u32(payload, 56)
+            mini_fat_start = self._ole_u32(payload, 60)
+            difat = [
+                self._ole_u32(payload, 76 + index * OLE_UINT32_SIZE)
+                for index in range(109)
+            ]
+            fat: list[int] = []
+            for sector in [item for item in difat if item != OLE_FREE_SECTOR]:
+                offset = 512 + sector * sector_size
+                fat.extend(
+                    struct.unpack(
+                        "<" + "I" * (sector_size // OLE_UINT32_SIZE),
+                        payload[offset : offset + sector_size],
+                    )
+                )
+            directory_bytes = b"".join(
+                payload[512 + sector * sector_size : 512 + (sector + 1) * sector_size]
+                for sector in self._ole_sector_chain(fat, directory_start)
+            )
+            entries: dict[str, tuple[int, int, int]] = {}
+            for index in range(0, len(directory_bytes), 128):
+                entry = directory_bytes[index : index + 128]
+                name_length = self._ole_u16(entry, 64)
+                if name_length < 2:
+                    continue
+                name = entry[: name_length - 2].decode("utf-16le", "ignore")
+                entries[name] = (
+                    entry[66],
+                    self._ole_u32(entry, 116),
+                    struct.unpack_from("<Q", entry, 120)[0],
+                )
+            if "Root Entry" not in entries or stream_name not in entries:
+                return None
+            mini_fat: list[int] = []
+            for sector in self._ole_sector_chain(fat, mini_fat_start):
+                offset = 512 + sector * sector_size
+                mini_fat.extend(
+                    struct.unpack(
+                        "<" + "I" * (sector_size // OLE_UINT32_SIZE),
+                        payload[offset : offset + sector_size],
+                    )
+                )
+            _, root_start, root_size = entries["Root Entry"]
+            root_stream = b"".join(
+                payload[512 + sector * sector_size : 512 + (sector + 1) * sector_size]
+                for sector in self._ole_sector_chain(fat, root_start)
+            )[:root_size]
+            _, stream_start, stream_size = entries[stream_name]
+            if stream_size < mini_stream_cutoff:
+                chunks: list[bytes] = []
+                sector = stream_start
+                seen: set[int] = set()
+                while sector not in {OLE_END_OF_CHAIN, OLE_FREE_SECTOR} and sector not in seen:
+                    seen.add(sector)
+                    offset = sector * mini_sector_size
+                    chunks.append(root_stream[offset : offset + mini_sector_size])
+                    sector = mini_fat[sector]
+                return b"".join(chunks)[:stream_size]
+            return b"".join(
+                payload[512 + sector * sector_size : 512 + (sector + 1) * sector_size]
+                for sector in self._ole_sector_chain(fat, stream_start)
+            )[:stream_size]
+        except (IndexError, KeyError, struct.error, ValueError):
+            return None
+
+    def _ole_sector_chain(self, fat: list[int], start_sector: int) -> list[int]:
+        chain: list[int] = []
+        seen: set[int] = set()
+        sector = start_sector
+        while sector not in {OLE_END_OF_CHAIN, OLE_FREE_SECTOR} and sector not in seen:
+            if sector < 0 or sector >= len(fat):
+                break
+            seen.add(sector)
+            chain.append(sector)
+            sector = fat[sector]
+        return chain
+
+    def _ole_u32(self, buffer: bytes, offset: int) -> int:
+        return struct.unpack_from("<I", buffer, offset)[0]
+
+    def _ole_u16(self, buffer: bytes, offset: int) -> int:
+        return struct.unpack_from("<H", buffer, offset)[0]
+
+    def _extract_equation_tex_text(self, stream: bytes) -> str | None:
+        decoded = stream.decode("latin1", "ignore")
+        matched = re.search(r"TeX Input Language\x00([^\x00]{1,200})\x00", decoded)
+        if not matched:
+            return None
+        return self._normalize_legacy_formula_text(matched.group(1))
+
+    def _extract_equation_char_fallback(self, stream: bytes) -> str | None:
+        printable = []
+        for byte in stream:
+            if 32 <= byte < 127:
+                printable.append(chr(byte))
+            else:
+                printable.append("\n")
+        lines = [line.strip() for line in re.sub(r"\n+", "\n", "".join(printable)).split("\n") if line.strip()]
+        if not lines:
+            return None
+        filtered_lines = [line for line in lines if line not in OLE_METADATA_STRINGS]
+        if not filtered_lines:
+            return None
+        tail: list[str] = []
+        for line in reversed(filtered_lines):
+            if len(line) == 1 and re.fullmatch(r"[A-Za-z0-9=+\-*/()\\]", line):
+                tail.append(line)
+                continue
+            break
+        if tail:
+            return self._normalize_legacy_formula_text("".join(reversed(tail)))
+        candidates = [
+            line
+            for line in filtered_lines
+            if re.search(r"[A-Za-z0-9]", line)
+            and any(token in line for token in ("\\", "=", "(", ")", "+", "-", "*", "/"))
+        ]
+        if candidates:
+            return self._normalize_legacy_formula_text(candidates[-1])
+        if len(filtered_lines[-1]) <= 16 and re.search(r"[A-Za-z0-9]", filtered_lines[-1]):
+            return self._normalize_legacy_formula_text(filtered_lines[-1])
+        return None
+
+    def _normalize_legacy_formula_text(self, text: str) -> str | None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return None
+        normalized = normalized.replace("\xa0", " ")
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = re.sub(r"(?<=[A-Za-z])==(?=[A-Za-z0-9])", "=", normalized)
+        normalized = normalized.replace("\\\\", "\\")
+        return normalized.strip() or None
 
     def _docx_image_marker(self, element: ET.Element, context: dict[str, Any]) -> str:
         embed_id = self._docx_embed_id(element)

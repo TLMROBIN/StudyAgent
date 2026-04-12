@@ -14,6 +14,15 @@ from backend.services.pdf_parse_types import ExtractedAsset, PDFBlock, PDFParseR
 from backend.services.rag_service import RagService
 from backend.services.vector_store_service import VectorStoreService
 
+LEGACY_OLE_OBJECT_FALLBACK_B64 = (
+    "0M8R4KGxGuEAAAAAAAAAAAAAAAAAAAAAIQADAP7/CQAGAAAAAAAAAAAAAAABAAAAAwAAAAAAAAAAEAAAAgAAAAEA"
+    "AAD+////AAAAAAUAAAD///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8BAAACCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQD+/wMKAAD/////A84CAAAAAADAAAAAAAAARhYAAABNYXRoVHlwZSA2LjAgRXF1YXRpb24ADAAAAE1hdGhUeXBlIEVGAA8AAABFcXVhdGlvbi5EU01UNAD0ObJxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAIAjcFIAQAAlDkoAPDXVAAAAAAAHAAoAAUBAAYJRFNNVDYAARNXaW5BbGxCYXNpY0NvZGVQYWdlcwARBVRpbWVzIE5ldyBSb21hbgARA1N5bWJvbAARBUNvdXJpZXIgTmV3ABEETVQgRXh0cmEAE1dpbkFsbENvZGVQYWdlcwARBsvOzOUAEgAIIS8n8l8hjyEvR19BUPIfHkFQ9BUPQQD0RfQl9I9CX0EA9BAPQ19BAPIfIKXyCiX0jyH0EA9BAPQPSPQX9I9BAPIaX0RfRfRfRfRfQQ8MAQABAAECAgICAAIAAQEBAAMAAQAEAAUACgEAEAAAAAAAAAAPAQIAg3UAAgSGPQA9AgCIMQACAIgxAAIAiDAAAwAKAAAPAAEADwECAIgyAAALAQEACgICgnMAAgCCaQACAIJuAAIAiDIAAgCIMAACAIHAAwIAg3QAAgCCKAACAIFWAAIAgikAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/v///wIAAAD+/////v///wUAAAAGAAAABwAAAAgAAAAJAAAA/v///wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSAG8AbwB0ACAARQBuAHQAcgB5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFgAFAf//////////AQAAAAPOAgAAAAAAwAAAAAAAAEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAgAAAAAAAAEATwBsAGUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAIB/////wIAAAD/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAQBDAG8AbQBwAE8AYgBqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIAAgH/////AwAAAP////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAaQAAAAAAAAADAE8AYgBqAEkAbgBmAG8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEgACAf////8EAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAGAAAAAAAAAEUAcQB1AGEAdABpAG8AbgAgAE4AYQB0AGkAdgBlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAIB////////////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAGQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH///////////////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf///////////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB////////////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAP7////+////BAAAAP7////9//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8="
+)
+LEGACY_OLE_OBJECT_TEX_B64 = (
+    "0M8R4KGxGuEAAAAAAAAAAAAAAAAAAAAAIQADAP7/CQAGAAAAAAAAAAAAAAABAAAABQAAAAAAAAAAEAAABAAAAAEA"
+    "AAD+////AAAAAAcAAAD///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8BAAACCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQD+/wMKAAD/////A84CAAAAAADAAAAAAAAARhYAAABNYXRoVHlwZSA2LjAgRXF1YXRpb24ADAAAAE1hdGhUeXBlIEVGAA8AAABFcXVhdGlvbi5EU01UNAD0ObJxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wMAAAAEAAAAAQAAAP////8AAAAAAAAAAP8DAAA0AgAA6AMAAAEACQAAA/QBAAAHAK0AAAAAAAUAAAACAQEAAAAFAAAAAQL///8ABQAAAC4BGQAAAAUAAAALAgAAAAAFAAAADAIAAqADCwAAACYGDwAMAE1hdGhUeXBlAAAwABIAAAAmBg8AGgD/////AAAQAAAAwP///6r///9gAwAAqgEAAAgAAAD6AgAAAAAAAAAAAAIEAAAALQEAAAUAAAAUAkkB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AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUgBvAG8AdAAgAEUAbgB0AHIAeQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABYABQH//////////wEAAAADzgIAAAAAAMAAAAAAAABGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAYAAAAAAAABAE8AbABlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgACAf////8CAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAEAQwBvAG0AcABPAGIAagAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASAAIB/////wMAAAD/////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAGkAAAAAAAAAAwBPAGIAagBJAG4AZgBvAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIAAgH/////BAAAAP////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAABgAAAAAAAAACAE8AbABlAFAAcgBlAHMAMAAwADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGAACAf////8FAAAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAQBAAAAAAAAEUAcQB1AGEAdABpAG8AbgAgAE4AYQB0AGkAdgBlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAIB////////////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFQAAAEQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH///////////////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf///////////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAACAAAAAwAAAP7////+////BgAAAP7////9////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
+)
+
 
 def build_rag_service(tmp_path: Path) -> RagService:
     settings = Settings(
@@ -30,6 +39,71 @@ def build_rag_service(tmp_path: Path) -> RagService:
     embedder = EmbedService(settings)
     vector_store = VectorStoreService(settings, embedder)
     return RagService(settings=settings, embedder=embedder, vector_store=vector_store)
+
+
+def build_legacy_docx(
+    path: Path,
+    *,
+    paragraphs: list[str],
+    ole_payloads: dict[str, bytes] | None = None,
+    include_math_block: bool = False,
+) -> None:
+    body_parts: list[str] = []
+    object_index = 1
+    for paragraph in paragraphs:
+        segments = paragraph.split("{{OLE}}")
+        parts: list[str] = ['<w:p>']
+        for index, segment in enumerate(segments):
+            if segment:
+                parts.append(f"<w:r><w:t>{segment}</w:t></w:r>")
+            if index < len(segments) - 1:
+                rid = f"rIdOle{object_index}"
+                parts.append(
+                    "<w:r><w:object>"
+                    f'<v:shape id="_x0000_i{1024 + object_index}" type="#_x0000_t75" alt="legacy-equation-{object_index}" o:ole="">'
+                    f'<v:imagedata o:title="legacy-equation-{object_index}" />'
+                    "</v:shape>"
+                    f'<o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_x0000_i{1024 + object_index}" DrawAspect="Content" r:id="{rid}" />'
+                    "</w:object></w:r>"
+                )
+                object_index += 1
+        parts.append("</w:p>")
+        body_parts.append("".join(parts))
+    if include_math_block:
+        body_parts.append(
+            "<w:p>"
+            "<w:r><w:t>混合公式：</w:t></w:r>"
+            "<m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>"
+            "</w:p>"
+        )
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document '
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:v="urn:schemas-microsoft-com:vml" '
+        'xmlns:o="urn:schemas-microsoft-com:office:office" '
+        'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+        f'<w:body>{"".join(body_parts)}</w:body>'
+        '</w:document>'
+    )
+    rels = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    ]
+    ole_payloads = ole_payloads or {}
+    for index, name in enumerate(ole_payloads, start=1):
+        rels.append(
+            f'<Relationship Id="rIdOle{index}" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+            f'Target="embeddings/{name}" />'
+        )
+    rels.append("</Relationships>")
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/_rels/document.xml.rels", "".join(rels))
+        for name, payload in ole_payloads.items():
+            archive.writestr(f"word/embeddings/{name}", payload)
 
 
 def test_embedding_normalization_expands_common_latex_tokens():
@@ -1772,6 +1846,68 @@ def test_extract_text_supports_native_docx_equations(tmp_path):
     assert "动能近似：" in extracted
     assert "${x}^{2}+\\frac{1}{2}$" in extracted
     assert "$$\\sqrt{a+b}$$" in extracted
+
+
+def test_extract_text_supports_legacy_docx_equation_objects(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    source_file = tmp_path / "legacy-equation.docx"
+    build_legacy_docx(
+        source_file,
+        paragraphs=["电流有效值为{{OLE}}。"],
+        ole_payloads={
+            "oleObject1.bin": base64.b64decode(LEGACY_OLE_OBJECT_TEX_B64),
+        },
+    )
+
+    extracted = rag_service.extract_text(
+        str(source_file),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    assert "电流有效值为" in extracted
+    assert "$2\\sqrt{2}A$" in extracted
+
+
+def test_extract_text_supports_mixed_docx_legacy_objects_and_omml(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    source_file = tmp_path / "mixed-equation.docx"
+    build_legacy_docx(
+        source_file,
+        paragraphs=["交流电表达式{{OLE}}"],
+        ole_payloads={
+            "oleObject1.bin": base64.b64decode(LEGACY_OLE_OBJECT_TEX_B64),
+        },
+        include_math_block=True,
+    )
+
+    extracted = rag_service.extract_text(
+        str(source_file),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    assert "$2\\sqrt{2}A$" in extracted
+    assert "${x}^{2}$" in extracted
+    assert extracted.index("$2\\sqrt{2}A$") < extracted.index("${x}^{2}$")
+
+
+def test_extract_text_legacy_docx_equation_char_fallback_keeps_formula_like_text(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    source_file = tmp_path / "legacy-fallback.docx"
+    build_legacy_docx(
+        source_file,
+        paragraphs=["电压{{OLE}}变化规律为{{OLE}}。"],
+        ole_payloads={
+            "oleObject1.bin": base64.b64decode(LEGACY_OLE_OBJECT_FALLBACK_B64),
+            "oleObject2.bin": base64.b64decode(LEGACY_OLE_OBJECT_FALLBACK_B64),
+        },
+    )
+
+    extracted = rag_service.extract_text(
+        str(source_file),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    assert "$u=1102sin20t(V)$" in extracted
 
 
 def test_recommend_questions_prefers_question_chunks_with_matching_grade_and_images(tmp_path):
