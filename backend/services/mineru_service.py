@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import threading
@@ -321,13 +322,15 @@ class MineruService:
         if value is None:
             return ""
         if isinstance(value, str):
-            return value.strip()
+            return self._strip_office_text_style_artifacts(value.strip())
         if isinstance(value, list):
+            if self._looks_like_inline_content_list(value):
+                return self._flatten_inline_content(value)
             parts = [self._flatten_content(item) for item in value]
             return "\n".join(part for part in parts if part).strip()
         if isinstance(value, dict):
             if value.get("type") == "text":
-                return str(value.get("content") or "").strip()
+                return self._strip_office_text_style_artifacts(str(value.get("content") or "").strip())
             item_type = str(value.get("type") or "").strip().lower()
             if item_type in {"equation_inline", "inline_equation"}:
                 payload = str(value.get("content") or "").strip()
@@ -363,6 +366,71 @@ class MineruService:
                 parts = [self._flatten_content(item) for item in value.values()]
             return "\n".join(part for part in parts if part).strip()
         return str(value).strip()
+
+    def _looks_like_inline_content_list(self, value: list[Any]) -> bool:
+        saw_inline = False
+        for item in value:
+            if isinstance(item, str):
+                if item.strip():
+                    saw_inline = True
+                continue
+            if not isinstance(item, dict):
+                return False
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type in {
+                "text",
+                "equation_inline",
+                "inline_equation",
+                "equation_interline",
+                "interline_equation",
+            } or item.get("math_content"):
+                saw_inline = True
+                continue
+            return False
+        return saw_inline
+
+    def _flatten_inline_content(self, value: list[Any]) -> str:
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                if item:
+                    parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                rendered = self._flatten_content(item)
+                if rendered:
+                    parts.append(rendered)
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type == "text":
+                raw_text = str(item.get("content") or "")
+                if raw_text:
+                    parts.append(raw_text)
+                continue
+            if item_type in {"equation_inline", "inline_equation", "equation_interline", "interline_equation"} or item.get("math_content"):
+                rendered = self._flatten_content(item)
+                if rendered:
+                    parts.append(f"\n{rendered}\n")
+                continue
+            rendered = self._flatten_content(item)
+            if rendered:
+                parts.append(rendered)
+        normalized = self._strip_office_text_style_artifacts("".join(parts))
+        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+        normalized = re.sub(r"\n[ \t]+", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
+
+    def _strip_office_text_style_artifacts(self, text: str) -> str:
+        normalized = str(text or "")
+        if "<text" not in normalized.lower() and "</text>" not in normalized.lower() and 'style="' not in normalized.lower():
+            return normalized.strip()
+        normalized = re.sub(r'(?i)<+\s*/?\s*text(?:\s+style="[^"]*")?\s*>', "", normalized)
+        normalized = re.sub(r"(?i)</\s*text\s*>", "", normalized)
+        normalized = re.sub(r'(?i)(?:text|ext|xt)\s+style="[^"]*">', "", normalized)
+        normalized = re.sub(r"(?i)<[^>\n]*text[^>\n]*>", "", normalized)
+        normalized = normalized.replace("<", "").replace(">", "")
+        return normalized.strip()
 
     def _extract_image_path(self, item: dict[str, Any]) -> str | None:
         content = item.get("content") or {}

@@ -2368,7 +2368,7 @@ def test_prepare_question_chunks_normalizes_mineru_docx_formula_markers_and_prev
     ]
     text = "\n".join(
         [
-            "1．如图所示，周期和频率分别为（　　）",
+            '1．如图<<text style="italic">xoy</text>平面所示，周期和频率分别为（　　）',
             "[[asset:image-001]]",
             "images/9d7cd5b7cd4da2fb8c3d0878f89be5d9ba285413902a8c5902a05a8504b12f2d.png",
             "A．1∶1\tB．",
@@ -2408,13 +2408,47 @@ def test_prepare_question_chunks_normalizes_mineru_docx_formula_markers_and_prev
     assert first.metadata["parser_backend"] == "pipeline"
     assert first.metadata["parser_provenance"]["runtime_artifact"] == "data/tasks/17/mineru-runtime.json"
     assert "images/" not in first.content
+    assert "<text" not in first.content
+    assert "xoy平面" in first.content
     assert "equation_inline" not in first.content
     assert "equation_display" not in first.content
+    assert "\nA．1∶1\nB．" in first.content
     assert r"$\sqrt{2}:1$" in first.content
     assert r"$1:\sqrt{2}$" in first.content
     assert "$T=0.02s$" in first.content
     assert r"$$f=\frac{1}{T}=\frac{1}{0.02}Hz=50Hz$$" in first.content
     assert "【附图1：交变电流图像】" in first.content
+
+
+def test_prepare_question_chunks_formats_compound_judgement_answers_on_new_lines(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=18,
+        subject="物理",
+        filename="judgement.docx",
+        file_path=str(tmp_path / "judgement.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1．判断正误。",
+                "（1）交流电压表测量的是有效值。(    )",
+                "（2）交变电流的有效值一定是峰值的0.707倍。(    )",
+                "【答案】正确     错误",
+                "【详解】（1）正确。（2）错误。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 1
+    assert "答案：\n（1）正确\n（2）错误" in prepared[0].content
+    assert prepared[0].metadata["answer_text"] == "（1）正确\n（2）错误"
 
 
 def test_prepare_question_chunks_marks_missing_required_images_without_quality_score(tmp_path):

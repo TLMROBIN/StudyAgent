@@ -1105,13 +1105,26 @@ class RagService:
             clean_explanation_text, _ = self._finalize_chunk_text_and_assets(merged_explanation or "", asset_map)
             if question_assets and not asset_refs:
                 asset_refs = question_assets
+            readable_question_text = self._normalize_question_readability_layout(
+                clean_question_text or finalized_text
+            )
+            readable_answer_text = self._format_compound_judgement_answers(
+                readable_question_text,
+                clean_answer_text or None,
+            )
+            finalized_text = self._compose_question_chunk_text(
+                number=number,
+                question_text=readable_question_text,
+                answer_text=readable_answer_text,
+                explanation_text=clean_explanation_text or None,
+            )
             prepared_chunks.append(
                 self._build_question_bank_chunk(
                     document,
                     content=finalized_text,
                     question_number=number,
-                    question_text=clean_question_text or finalized_text,
-                    answer_text=clean_answer_text or None,
+                    question_text=readable_question_text or finalized_text,
+                    answer_text=readable_answer_text,
                     explanation_text=clean_explanation_text or None,
                     asset_refs=asset_refs,
                     source_format=source_format,
@@ -1127,13 +1140,15 @@ class RagService:
         raw_text = str(text or "").strip()
         if not raw_text:
             return ""
+        raw_text = self._strip_office_text_style_artifacts(raw_text)
         normalized = self.pdf_parse_bridge._normalize_formula_text(raw_text)
         normalized = self._drop_residual_mineru_formula_markers(normalized)
         normalized = self.pdf_parse_bridge._strip_bound_asset_path_noise(
             normalized,
             asset_bound="[[asset:" in normalized,
         )
-        return self._normalize_docx_block_text(normalized)
+        normalized = self._normalize_docx_block_text(normalized)
+        return self._normalize_question_readability_layout(normalized)
 
     def _drop_residual_mineru_formula_markers(self, text: str) -> str:
         lines = [line.rstrip() for line in str(text or "").splitlines()]
@@ -1160,23 +1175,67 @@ class RagService:
             index += 2
         return "\n".join(cleaned)
 
+    def _normalize_question_readability_layout(self, text: str) -> str:
+        normalized = str(text or "").replace("\t", "\n")
+        normalized = re.sub(r"(?<!\n)(?=(?:[A-H]|[TtFf])\s*[．.、])", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
+
+    def _format_compound_judgement_answers(self, question_text: str, answer_text: str | None) -> str | None:
+        if not answer_text:
+            return None
+        stripped = str(answer_text).strip()
+        if not stripped or "\n" in stripped:
+            return stripped or None
+        markers = re.findall(r"[（(](\d{1,2})[)）]", str(question_text or ""))
+        if len(markers) < 2:
+            return stripped
+        tokens = [token for token in re.split(r"\s+", stripped) if token]
+        if len(tokens) != len(markers):
+            return stripped
+        if not all(token in {"正确", "错误", "对", "错", "√", "×", "T", "F"} for token in tokens):
+            return stripped
+        return "\n".join(f"（{marker}）{token}" for marker, token in zip(markers, tokens))
+
+    def _strip_office_text_style_artifacts(self, text: str) -> str:
+        normalized = str(text or "")
+        if "<text" not in normalized.lower() and "</text>" not in normalized.lower() and 'style="' not in normalized.lower():
+            return normalized.strip()
+        normalized = re.sub(r'(?i)<+\s*/?\s*text(?:\s+style="[^"]*")?\s*>', "", normalized)
+        normalized = re.sub(r"(?i)</\s*text\s*>", "", normalized)
+        normalized = re.sub(r'(?i)(?:text|ext|xt)\s+style="[^"]*">', "", normalized)
+        normalized = re.sub(r"(?i)<[^>\n]*text[^>\n]*>", "", normalized)
+        normalized = normalized.replace("<", "").replace(">", "")
+        return normalized.strip()
+
     def _split_question_and_answer_sections(self, text: str) -> tuple[str, str | None]:
         lines = [line.rstrip() for line in text.split("\n")]
-        question_line_count = sum(1 for line in lines if QUESTION_START_PATTERN.match(line.strip()))
+        question_line_count = sum(1 for line in lines if self._looks_like_top_level_question_start(line))
         if question_line_count < 2:
             return text, None
         for index, line in enumerate(lines):
             if not QUESTION_SECTION_HEADING_PATTERN.match(line.strip()):
                 continue
+            head_lines = lines[:index]
+            if any(
+                ANSWER_LINE_PATTERN.match(item.strip()) or EXPLANATION_LINE_PATTERN.match(item.strip())
+                for item in head_lines
+                if item.strip()
+            ):
+                continue
             tail = "\n".join(lines[index + 1 :]).strip()
             if not tail:
                 continue
-            tail_question_count = sum(1 for item in tail.split("\n") if QUESTION_START_PATTERN.match(item.strip()))
+            tail_question_count = sum(1 for item in tail.split("\n") if self._looks_like_top_level_question_start(item))
             if tail_question_count >= max(1, question_line_count // 3):
-                head = "\n".join(lines[:index]).strip()
+                head = "\n".join(head_lines).strip()
                 if head:
                     return head, tail
         return text, None
+
+    def _looks_like_top_level_question_start(self, text: str) -> bool:
+        matched = QUESTION_START_PATTERN.match(str(text or "").strip())
+        return bool(matched and (matched.group("ordinal") or matched.group("plain")))
 
     def _parse_numbered_blocks(
         self,

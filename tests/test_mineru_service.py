@@ -83,3 +83,27 @@ def test_parse_pdf_fails_closed_when_cuda_runtime_drops(tmp_path, monkeypatch):
         service.parse_pdf(str(source_file), task_id=12, document_id=23)
 
     assert calls == ["cuda"]
+
+
+def test_flatten_content_repairs_split_office_textstyle_runs_and_keeps_formula_markers(tmp_path):
+    service = build_service(tmp_path)
+
+    content = [
+        {"type": "text", "content": "7．如图<<text st"},
+        {"type": "text", "content": "y", "style": ["italic"]},
+        {"type": "text", "content": 'le="italic">t</text>e'},
+        {"type": "text", "content": "x", "style": ["italic"]},
+        {"type": "text", "content": 't style="italic">xoy</text>平面'},
+        {"type": "equation_inline", "content": r"\frac{\pi}{d}"},
+        {"type": "text", "content": '与<text style="italic">MNPQ</text>线框'},
+    ]
+
+    flattened = service._flatten_content(content)
+
+    assert "<<text" not in flattened
+    assert "</text>" not in flattened
+    assert 'style="italic"' not in flattened
+    assert "xoy平面" in flattened
+    assert "MNPQ线框" in flattened
+    assert "equation_inline" in flattened
+    assert r"\frac{\pi}{d}" in flattened
