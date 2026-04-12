@@ -1178,6 +1178,7 @@ class RagService:
     def _normalize_question_readability_layout(self, text: str) -> str:
         normalized = str(text or "").replace("\t", "\n")
         normalized = re.sub(r"(?<!\n)(?=(?:[A-H]|[TtFf])\s*[．.、])", "\n", normalized)
+        normalized = re.sub(r"\n(?=[（(]\d{1,2}[)）])", "\n\n", normalized)
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
         return normalized.strip()
 

@@ -561,6 +561,8 @@ class PDFParseBridge:
     def _repair_formula_spacing(self, text: str) -> str:
         normalized = str(text or "").strip()
         normalized = re.sub(r"\s+", " ", normalized)
+        normalized = normalized.replace(r"\overbar", r"\overline")
+        normalized = normalized.replace("^{'}", "'")
         normalized = re.sub(r"\\(begin|end)\s*\{\s*([A-Za-z*]+)\s*\}", r"\\\1{\2}", normalized)
         normalized = re.sub(r"\s*_\s*\{\s*", "_{", normalized)
         normalized = re.sub(r"\s*\^\s*\{\s*", "^{", normalized)

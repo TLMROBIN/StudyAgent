@@ -2449,6 +2449,41 @@ def test_prepare_question_chunks_formats_compound_judgement_answers_on_new_lines
     assert len(prepared) == 1
     assert "答案：\n（1）正确\n（2）错误" in prepared[0].content
     assert prepared[0].metadata["answer_text"] == "（1）正确\n（2）错误"
+    assert "题目：\n判断正误。\n\n（1）交流电压表测量的是有效值。(    )\n\n（2）交变电流的有效值一定是峰值的0.707倍。(    )" in prepared[0].content
+
+
+def test_prepare_question_chunks_normalizes_prime_and_overbar_formulas(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=19,
+        subject="物理",
+        filename="formula-fix.docx",
+        file_path=str(tmp_path / "formula-fix.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1．某题。",
+                "【答案】A",
+                "【详解】根据有效值定义得",
+                "equation_display",
+                r"I^{2}RT=I^{'}^{2}R\frac{T}{2}",
+                "平均电压",
+                "equation_inline",
+                r"\overbar{U}=n\frac{\Delta \varphi}{\Delta t}",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 1
+    assert r"$$I^{2}RT=I'^{2}R\frac{T}{2}$$" in prepared[0].content
+    assert r"$\overline{U}=n\frac{\Delta \varphi}{\Delta t}$" in prepared[0].content
 
 
 def test_prepare_question_chunks_marks_missing_required_images_without_quality_score(tmp_path):
