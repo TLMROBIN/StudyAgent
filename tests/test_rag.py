@@ -1984,7 +1984,7 @@ def test_extract_text_legacy_docx_equation_char_fallback_keeps_formula_like_text
     assert "$u=1102sin20t(V)$" in extracted
 
 
-def test_recommend_questions_prefers_question_chunks_with_matching_grade_and_images(tmp_path):
+def test_recommend_questions_prefers_matching_grade_and_images_without_filler(tmp_path):
     rag_service = build_rag_service(tmp_path)
     engine = create_engine("sqlite:///:memory:")
     TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
@@ -2076,7 +2076,7 @@ def test_recommend_questions_prefers_question_chunks_with_matching_grade_and_ima
 
         result = rag_service.recommend_questions(session, "物理", "如图所示这道受力分析题怎么练", student_grade=2, limit=2)
 
-        assert len(result) == 2
+        assert len(result) == 1
         assert result[0].document_id == grade2_doc.id
         assert result[0].metadata_json.get("contains_images") is True
         assert all(row.document.resource_type in {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value} for row in result)
@@ -2315,6 +2315,192 @@ def test_recommend_questions_excludes_disabled_question_rows(tmp_path):
 
         assert [row.metadata_json.get("question_number") for row in result] == ["2"]
         assert all(row.is_disabled is False for row in result)
+    finally:
+        session.close()
+
+
+def test_recommend_questions_returns_empty_when_no_candidate_passes_relevance_gate(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="数学",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add_all(
+            [
+                KnowledgeChunk(
+                    document_id=document.id,
+                    subject="数学",
+                    chunk_index=0,
+                    content="第1题\n\n题目：圆周率近似值。",
+                    metadata_json={
+                        "document_id": document.id,
+                        "resource_type": document.resource_type,
+                        "chunk_kind": "question_item",
+                        "question_number": "1",
+                        "question_text": "圆周率近似值。",
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=document.id,
+                    subject="数学",
+                    chunk_index=1,
+                    content="第2题\n\n题目：古诗词默写。",
+                    metadata_json={
+                        "document_id": document.id,
+                        "resource_type": document.resource_type,
+                        "chunk_kind": "question_item",
+                        "question_number": "2",
+                        "question_text": "古诗词默写。",
+                    },
+                ),
+            ]
+        )
+        session.commit()
+
+        result = rag_service.recommend_questions(
+            session,
+            "数学",
+            "牛顿第二定律的受力分析题",
+            limit=3,
+        )
+
+        assert result == []
+    finally:
+        session.close()
+
+
+def test_recommend_questions_allows_semantic_rescue_when_metadata_is_missing(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：斜面受力分析，求加速度。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "斜面受力分析，求加速度。",
+            },
+        )
+        session.add(row)
+        session.commit()
+
+        result = rag_service.recommend_questions(
+            session,
+            "物理",
+            "斜面受力分析，求加速度。",
+            limit=3,
+        )
+
+        assert [item.id for item in result] == [row.id]
+    finally:
+        session.close()
+
+
+def test_recommend_questions_switches_within_same_relevant_pool_by_difficulty(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="/tmp/questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            resource_type=ResourceType.QUESTION_SET.value,
+            chapter="第三章 牛顿运动定律",
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        basic_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：牛顿第二定律基础题。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "1",
+                "question_text": "牛顿第二定律基础题。",
+                "chapter": "第三章 牛顿运动定律",
+                "difficulty": "basic",
+                "tags": ["牛顿第二定律", "受力分析"],
+            },
+        )
+        advanced_row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=1,
+            content="第2题\n\n题目：牛顿第二定律综合提高题。",
+            metadata_json={
+                "document_id": document.id,
+                "resource_type": document.resource_type,
+                "chunk_kind": "question_item",
+                "question_number": "2",
+                "question_text": "牛顿第二定律综合提高题。",
+                "chapter": "第三章 牛顿运动定律",
+                "difficulty": "advanced",
+                "tags": ["牛顿第二定律", "受力分析"],
+            },
+        )
+        session.add_all([basic_row, advanced_row])
+        session.commit()
+
+        easy_result = rag_service.recommend_questions(
+            session,
+            "物理",
+            "第三章牛顿第二定律受力分析题",
+            limit=3,
+            difficulty_preference="basic",
+        )
+        hard_result = rag_service.recommend_questions(
+            session,
+            "物理",
+            "第三章牛顿第二定律受力分析题",
+            limit=3,
+            difficulty_preference="advanced",
+        )
+
+        assert [item.id for item in easy_result][:1] == [basic_row.id]
+        assert [item.id for item in hard_result] == [advanced_row.id]
     finally:
         session.close()
 

@@ -250,6 +250,17 @@ class QuestionProfile:
     prefer_extension: bool = False
 
 
+@dataclass
+class QuestionRecommendationCandidate:
+    score: float
+    row: KnowledgeChunk
+    semantic_score: float
+    metadata_matches: int
+    tag_matches: int
+    chapter_match: bool
+    section_match: bool
+
+
 class RagService:
     def __init__(
         self,
@@ -313,6 +324,7 @@ class RagService:
         *,
         student_grade: int | None = None,
         limit: int = 3,
+        difficulty_preference: str = DifficultyLevel.BASIC.value,
     ) -> list[KnowledgeChunk]:
         rows = db.scalars(
             select(KnowledgeChunk)
@@ -326,16 +338,17 @@ class RagService:
 
         query_embedding = self.embedder.embed_text(question)
         profile = self._recommendation_profile(question)
-        selected_rows: list[KnowledgeChunk] = []
+        selected_candidates: list[QuestionRecommendationCandidate] = []
         seen_keys: set[tuple[int, str]] = set()
-        for _, row in self._score_question_rows(preferred_rows, question, student_grade, query_embedding, profile):
-            key = self._question_row_key(row)
+        for candidate in self._filter_recommendation_candidates(
+            self._score_question_rows(preferred_rows, question, student_grade, query_embedding, profile),
+            tier="preferred",
+        ):
+            key = self._question_row_key(candidate.row)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            selected_rows.append(row)
-            if len(selected_rows) >= limit:
-                return selected_rows
+            selected_candidates.append(candidate)
 
         preferred_document_ids = {row.document_id for row in preferred_rows}
         fallback_rows = [
@@ -343,15 +356,20 @@ class RagService:
             for row in rows
             if self._question_row_tier(row) == "fallback" and row.document_id not in preferred_document_ids
         ]
-        for _, row in self._score_question_rows(fallback_rows, question, student_grade, query_embedding, profile):
-            key = self._question_row_key(row)
+        for candidate in self._filter_recommendation_candidates(
+            self._score_question_rows(fallback_rows, question, student_grade, query_embedding, profile),
+            tier="fallback",
+        ):
+            key = self._question_row_key(candidate.row)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            selected_rows.append(row)
-            if len(selected_rows) >= limit:
-                break
-        return selected_rows
+            selected_candidates.append(candidate)
+        return self._select_recommendation_rows_by_difficulty(
+            selected_candidates,
+            limit=limit,
+            difficulty_preference=difficulty_preference,
+        )
 
     def _fallback_retrieve(
         self,
@@ -1688,7 +1706,13 @@ class RagService:
         elif retrieval_metadata.get("structure_source") == "toc_page_map":
             score += 0.01
         score += self._grade_match_score(row, student_grade, recommendation_mode=recommendation_mode)
-        for tag in document.tags[:5]:
+        tag_candidates = list(document.tags)
+        metadata_tags = metadata.get("tags")
+        if isinstance(metadata_tags, list):
+            tag_candidates.extend(
+                str(tag).strip() for tag in metadata_tags if str(tag).strip()
+            )
+        for tag in list(dict.fromkeys(tag_candidates))[:8]:
             if tag.lower() in question_lowered:
                 score += 0.08
         return score
@@ -1738,20 +1762,151 @@ class RagService:
         student_grade: int | None,
         query_embedding: list[float],
         profile: QuestionProfile,
-    ) -> list[tuple[float, KnowledgeChunk]]:
+    ) -> list[QuestionRecommendationCandidate]:
         if not rows:
             return []
         candidate_texts = [self._question_candidate_text(row) for row in rows]
         candidate_embeddings = self.embedder.embed_texts(candidate_texts)
-        scored_rows: list[tuple[float, KnowledgeChunk]] = []
+        scored_rows: list[QuestionRecommendationCandidate] = []
         for row, candidate_text, candidate_embedding in zip(rows, candidate_texts, candidate_embeddings):
-            score = self.embedder.cosine_similarity(query_embedding, candidate_embedding)
-            score += sum(1 for char in question[:16] if char and char in candidate_text) / 24.0
+            semantic_score = self.embedder.cosine_similarity(query_embedding, candidate_embedding)
+            semantic_score += sum(1 for char in question[:16] if char and char in candidate_text) / 24.0
+            metadata_matches, tag_matches, chapter_match, section_match = self._recommendation_metadata_matches(row, question)
+            score = semantic_score
             score += self._metadata_score(row, question, profile, student_grade, recommendation_mode=True)
             score += self._question_recommendation_bonus(row, question)
-            scored_rows.append((score, row))
-        scored_rows.sort(key=lambda item: item[0], reverse=True)
+            scored_rows.append(
+                QuestionRecommendationCandidate(
+                    score=score,
+                    row=row,
+                    semantic_score=semantic_score,
+                    metadata_matches=metadata_matches,
+                    tag_matches=tag_matches,
+                    chapter_match=chapter_match,
+                    section_match=section_match,
+                )
+            )
+        scored_rows.sort(key=lambda item: item.score, reverse=True)
         return scored_rows
+
+    def _recommendation_metadata_matches(
+        self,
+        row: KnowledgeChunk,
+        question: str,
+    ) -> tuple[int, int, bool, bool]:
+        metadata = row.metadata_json or {}
+        retrieval_metadata = self._retrieval_structure(metadata, row.document)
+        question_lowered = question.lower()
+        question_key = self._structure_key(question_lowered) or ""
+
+        chapter = str(retrieval_metadata.get("chapter") or "").strip()
+        section = str(retrieval_metadata.get("section") or "").strip()
+        chapter_key = str(retrieval_metadata.get("chapter_key") or "").strip()
+        section_key = str(retrieval_metadata.get("section_key") or "").strip()
+
+        chapter_match = bool(
+            (chapter and chapter.lower() in question_lowered)
+            or (chapter_key and chapter_key in question_key)
+        )
+        section_match = bool(
+            (section and section.lower() in question_lowered)
+            or (section_key and section_key in question_key)
+        )
+
+        tag_candidates: list[str] = []
+        document = row.document
+        if document:
+            tag_candidates.extend(document.tags)
+        metadata_tags = metadata.get("tags")
+        if isinstance(metadata_tags, list):
+            tag_candidates.extend(
+                str(tag).strip() for tag in metadata_tags if str(tag).strip()
+            )
+        tag_matches = sum(
+            1 for tag in dict.fromkeys(tag_candidates) if tag and tag.lower() in question_lowered
+        )
+        metadata_matches = tag_matches + int(chapter_match) + int(section_match)
+        return metadata_matches, tag_matches, chapter_match, section_match
+
+    def _filter_recommendation_candidates(
+        self,
+        candidates: list[QuestionRecommendationCandidate],
+        *,
+        tier: str,
+    ) -> list[QuestionRecommendationCandidate]:
+        if not candidates:
+            return []
+        top_score = candidates[0].score
+        accepted: list[QuestionRecommendationCandidate] = []
+        for candidate in candidates:
+            if candidate.score < self._recommendation_min_score(tier=tier):
+                continue
+            if candidate.score < top_score - self._recommendation_relative_window(tier=tier):
+                continue
+            if candidate.metadata_matches > 0:
+                accepted.append(candidate)
+                continue
+            if candidate.semantic_score >= self._recommendation_semantic_rescue_floor(tier=tier):
+                accepted.append(candidate)
+        return accepted
+
+    def _recommendation_min_score(self, *, tier: str) -> float:
+        return 1.15 if tier == "preferred" else 1.28
+
+    def _recommendation_relative_window(self, *, tier: str) -> float:
+        return 0.22 if tier == "preferred" else 0.16
+
+    def _recommendation_semantic_rescue_floor(self, *, tier: str) -> float:
+        return 0.18 if tier == "preferred" else 0.28
+
+    def _select_recommendation_rows_by_difficulty(
+        self,
+        candidates: list[QuestionRecommendationCandidate],
+        *,
+        limit: int,
+        difficulty_preference: str,
+    ) -> list[KnowledgeChunk]:
+        if not candidates:
+            return []
+        minimum_rank = {
+            DifficultyLevel.BASIC.value: 0,
+            DifficultyLevel.STANDARD.value: 1,
+            DifficultyLevel.ADVANCED.value: 2,
+        }.get(difficulty_preference, 0)
+        filtered_candidates = [
+            candidate
+            for candidate in candidates
+            if self._difficulty_rank_for_row(candidate.row) >= minimum_rank
+        ]
+        if not filtered_candidates:
+            return []
+        filtered_candidates.sort(
+            key=lambda candidate: (
+                self._difficulty_rank_for_row(candidate.row),
+                -candidate.score,
+            )
+        )
+        return [candidate.row for candidate in filtered_candidates[:limit]]
+
+    def _difficulty_rank_for_row(self, row: KnowledgeChunk) -> int:
+        difficulty = self._question_row_difficulty(row)
+        mapping = {
+            DifficultyLevel.BASIC.value: 0,
+            DifficultyLevel.STANDARD.value: 1,
+            DifficultyLevel.ADVANCED.value: 2,
+            DifficultyLevel.CHALLENGE.value: 3,
+        }
+        return mapping.get(difficulty or DifficultyLevel.STANDARD.value, 1)
+
+    def _question_row_difficulty(self, row: KnowledgeChunk) -> str | None:
+        metadata = row.metadata_json or {}
+        document = row.document
+        value = metadata.get("difficulty")
+        if value:
+            return str(value)
+        if document and document.difficulty:
+            return str(document.difficulty)
+        return None
 
     def _grade_match_score(self, row: KnowledgeChunk, student_grade: int | None, *, recommendation_mode: bool) -> float:
         if student_grade is None or student_grade not in HIGH_SCHOOL_GRADE_LABELS:

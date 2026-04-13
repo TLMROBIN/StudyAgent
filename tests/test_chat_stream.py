@@ -639,3 +639,34 @@ def test_recommend_questions_endpoint_excludes_disabled_rows(tmp_path, monkeypat
         assert [item.question_number for item in result] == ["2"]
     finally:
         session.close()
+
+
+def test_recommend_questions_passes_difficulty_preference_to_rag(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    captured: dict[str, object] = {}
+    try:
+        monkeypatch.setattr(
+            chat_router.rag_service,
+            "recommend_questions",
+            lambda db, subject, question, **kwargs: captured.update(
+                {"subject": subject, "question": question, **kwargs}
+            ) or [],
+        )
+
+        result = chat_router.recommend_questions(
+            QuestionRecommendationRequest(
+                subject="物理",
+                question="牛顿第二定律练习题",
+                difficulty_preference="advanced",
+            ),
+            session,
+            current_user,
+        )
+
+        assert result == []
+        assert captured["difficulty_preference"] == "advanced"
+        assert captured["student_grade"] == 2
+    finally:
+        session.close()

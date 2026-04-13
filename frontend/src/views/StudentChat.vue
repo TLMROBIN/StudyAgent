@@ -25,8 +25,13 @@ interface ConversationSummary {
   resolved: boolean
 }
 
-const RECOMMENDATION_FETCH_LIMIT = 6
+const RECOMMENDATION_FETCH_LIMIT = 3
 const RECOMMENDATION_PAGE_SIZE = 3
+const recommendationDifficultyOptions = [
+  { value: 'basic', label: '简单优先' },
+  { value: 'standard', label: '标准题' },
+  { value: 'advanced', label: '更难题' },
+] as const
 const GUIDANCE_STAGE_LABELS: Record<string, string> = {
   initial_guidance: '初始引导',
   scaffold_hint: '逐步提示',
@@ -60,6 +65,7 @@ const recommendationOffset = ref(0)
 const recommendationSeed = ref('')
 const recommendationLoading = ref(false)
 const recommendationError = ref('')
+const recommendationDifficulty = ref<'basic' | 'standard' | 'advanced'>('basic')
 const chatStreamRef = ref<HTMLElement | null>(null)
 let streamAbortController: AbortController | null = null
 let stopRequested = false
@@ -281,6 +287,7 @@ async function loadRecommendations(seedText: string, options: { silent?: boolean
       subject: form.subject,
       question: seed,
       limit: RECOMMENDATION_FETCH_LIMIT,
+      difficulty_preference: recommendationDifficulty.value,
     })
     recommendationPool.value = data
     await preloadAssets(data.flatMap((item) => item.assets))
@@ -303,6 +310,14 @@ async function loadRecommendations(seedText: string, options: { silent?: boolean
 
 function refreshRecommendations() {
   void loadRecommendations(activeRecommendationSeed.value)
+}
+
+function switchRecommendationDifficulty(nextDifficulty: 'basic' | 'standard' | 'advanced') {
+  if (recommendationDifficulty.value === nextDifficulty || recommendationLoading.value) {
+    return
+  }
+  recommendationDifficulty.value = nextDifficulty
+  void loadRecommendations(activeRecommendationSeed.value, { silent: true })
 }
 
 function rotateRecommendations() {
@@ -492,6 +507,17 @@ onMounted(async () => {
             </p>
           </div>
           <div class="row-actions">
+            <div class="row-actions">
+              <button
+                v-for="item in recommendationDifficultyOptions"
+                :key="item.value"
+                class="ghost-button"
+                :disabled="recommendationLoading || recommendationDifficulty === item.value"
+                @click="switchRecommendationDifficulty(item.value)"
+              >
+                {{ item.label }}
+              </button>
+            </div>
             <button
               class="ghost-button"
               :disabled="recommendationLoading || !activeRecommendationSeed"

@@ -45,6 +45,7 @@ export interface QuestionRecommendationRequest {
   limit?: number
   student_grade?: number | null
   include_solutions?: boolean
+  difficulty_preference?: 'basic' | 'standard' | 'advanced'
 }
 
 export interface QuestionRecommendation {

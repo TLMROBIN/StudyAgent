@@ -250,6 +250,7 @@ def recommend_questions(
         payload.question,
         student_grade=_effective_recommendation_grade(current_user, payload),
         limit=payload.limit,
+        difficulty_preference=payload.difficulty_preference,
     )
     return [_recommendation_read(row, include_solutions=include_solutions) for row in rows]
 
