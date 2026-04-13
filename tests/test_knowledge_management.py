@@ -1127,10 +1127,20 @@ def test_list_questions_returns_question_rows_with_filters():
                         "resource_type": "question_set",
                         "chunk_kind": "question_item",
                         "question_number": "1",
-                        "question_text": "匀速直线运动求位移。",
+                        "question_text": "匀速直线运动求位移，位移公式为 $s=vt$，如图[[asset:image-001]]。",
                         "difficulty": "advanced",
                         "chapter": "第二章 机械运动",
                         "tags": ["速度", "位移"],
+                        "contains_images": True,
+                        "image_count": 1,
+                        "asset_refs": [
+                            {
+                                "asset_id": "image-001",
+                                "filename": "image-001.png",
+                                "content_type": "image/png",
+                                "url": "/api/knowledge/documents/1/assets/image-001.png",
+                            }
+                        ],
                     },
                 ),
                 KnowledgeChunk(
@@ -1181,8 +1191,11 @@ def test_list_questions_returns_question_rows_with_filters():
         assert len(result.items) == 1
         assert result.items[0].document_filename == "question-set.docx"
         assert result.items[0].question_number == "1"
-        assert result.items[0].question_text == "匀速直线运动求位移。"
+        assert "$s=vt$" in result.items[0].question_text
         assert result.items[0].is_disabled is False
+        assert result.items[0].contains_images is True
+        assert result.items[0].image_count == 1
+        assert result.items[0].assets[0].filename == "image-001.png"
     finally:
         session.close()
 

@@ -448,6 +448,7 @@ def _question_read(row: KnowledgeChunk) -> KnowledgeQuestionRead:
     metadata = row.metadata_json or {}
     document = row.document
     tags_value = _metadata_or_document_value(metadata, document, "tags") or []
+    asset_refs = list(metadata.get("asset_refs") or [])
     return KnowledgeQuestionRead(
         id=row.id,
         document_id=row.document_id,
@@ -466,6 +467,9 @@ def _question_read(row: KnowledgeChunk) -> KnowledgeQuestionRead:
         question_number=str(metadata.get("question_number") or "").strip() or None,
         question_text=_question_text_value(row),
         is_disabled=bool(row.is_disabled),
+        contains_images=bool(metadata.get("contains_images")),
+        image_count=int(metadata.get("image_count") or 0),
+        assets=asset_refs,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

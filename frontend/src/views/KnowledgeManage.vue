@@ -112,6 +112,9 @@ interface KnowledgeQuestion {
   question_number?: string | null
   question_text: string
   is_disabled: boolean
+  contains_images: boolean
+  image_count: number
+  assets: KnowledgeAsset[]
   created_at: string
   updated_at: string
 }
@@ -1882,7 +1885,7 @@ onBeforeUnmount(() => {
           <div class="table-main table-main--grow">
             <strong>{{ item.question_number ? `第${item.question_number}题` : `题目 #${item.id}` }}</strong>
             <span>{{ item.subject }} · {{ resourceTypeLabel(item.resource_type) }} · 来源 {{ item.document_filename || `资料 #${item.document_id}` }}</span>
-            <span>{{ item.question_text }}</span>
+            <div class="message-body" v-html="renderChunkBody(item.question_text, item.assets)"></div>
             <span>最后更新 {{ formatDateTime(item.updated_at) }}</span>
           </div>
           <div class="row-actions row-actions--wide row-actions--grow">
@@ -1892,6 +1895,7 @@ onBeforeUnmount(() => {
               <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
               <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
               <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>
+              <span v-if="item.contains_images" class="detail-chip">图片 {{ item.image_count }} 张</span>
               <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="detail-chip">#{{ tag }}</span>
             </div>
             <div class="row-actions">

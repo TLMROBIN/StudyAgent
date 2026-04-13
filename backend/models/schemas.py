@@ -214,6 +214,9 @@ class KnowledgeQuestionRead(BaseModel):
     question_number: str | None = None
     question_text: str
     is_disabled: bool = False
+    contains_images: bool = False
+    image_count: int = 0
+    assets: list[KnowledgeAssetRead] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
