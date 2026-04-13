@@ -927,6 +927,7 @@ async function loadQuestions() {
   }
   questions.value = data.items
   questionTotal.value = data.total
+  await preloadAssets(data.items.flatMap((item) => item.assets))
 }
 
 async function loadTasks() {
