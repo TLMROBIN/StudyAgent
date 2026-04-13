@@ -1,16 +1,21 @@
 import { onBeforeUnmount, reactive } from 'vue'
 
-import { api, resolveApiUrl, type KnowledgeAsset } from '../utils/api'
+import { api, resolveApiUrl, type AuthorizedAssetResource } from '../utils/api'
 
-function assetKey(asset: KnowledgeAsset): string {
-  return `${asset.asset_id}::${asset.url}`
+function assetKey(asset: AuthorizedAssetResource): string {
+  const stableId = (
+    ('asset_id' in asset && asset.asset_id)
+    || ('attachment_id' in asset && asset.attachment_id)
+    || asset.url
+  )
+  return `${stableId}::${asset.url}`
 }
 
 export function useAuthorizedAssets() {
   const assetUrls = reactive<Record<string, string>>({})
   const pendingLoads = new Map<string, Promise<string>>()
 
-  async function ensureAssetUrl(asset: KnowledgeAsset): Promise<string> {
+  async function ensureAssetUrl(asset: AuthorizedAssetResource): Promise<string> {
     const key = assetKey(asset)
     if (assetUrls[key]) {
       return assetUrls[key]
@@ -39,18 +44,18 @@ export function useAuthorizedAssets() {
     return request
   }
 
-  function assetUrl(asset: KnowledgeAsset): string {
+  function assetUrl(asset: AuthorizedAssetResource): string {
     return assetUrls[assetKey(asset)] || ''
   }
 
-  async function preloadAssets(assets: KnowledgeAsset[]): Promise<void> {
+  async function preloadAssets(assets: AuthorizedAssetResource[]): Promise<void> {
     const uniqueAssets = assets.filter((asset, index, list) => {
       return list.findIndex((item) => assetKey(item) === assetKey(asset)) === index
     })
     await Promise.allSettled(uniqueAssets.map((asset) => ensureAssetUrl(asset)))
   }
 
-  async function openAsset(asset: KnowledgeAsset): Promise<void> {
+  async function openAsset(asset: AuthorizedAssetResource): Promise<void> {
     const popup = window.open('', '_blank', 'noopener,noreferrer')
     try {
       const url = await ensureAssetUrl(asset)

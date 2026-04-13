@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from base64 import b64encode
 import json
 from typing import AsyncIterator
 
@@ -138,6 +139,41 @@ class LLMService:
         if fallback_text:
             yield fallback_text
 
+    async def extract_image_text(self, *, image_bytes: bytes, mime_type: str, subject: str) -> str:
+        prompt = (
+            f"你现在执行高中{subject}题目图片的 OCR。"
+            "只提取图片里能明确看清的文字、数字、公式、标签。"
+            "不要解释，不要总结，不要补全看不清的内容。"
+            "如果看不清，只输出能确认的部分。"
+        )
+        return await self._generate_image_completion(
+            prompt=prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+        )
+
+    async def summarize_academic_image(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        subject: str,
+        user_text: str,
+        ocr_text: str,
+    ) -> str:
+        prompt = (
+            f"你在辅助理解一张高中{subject}题目图片。"
+            "请用简洁中文概括图片里能可靠确认的题干、已知条件、图形/电路/实验装置、关键公式或数据。"
+            "不要直接给最终答案，不要编造看不清的内容。"
+            f"学生补充文字：{user_text or '（无）'}。"
+            f"OCR 提取：{ocr_text or '（无）'}。"
+        )
+        return await self._generate_image_completion(
+            prompt=prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+        )
+
     def _reset_provider(self, provider: ProviderState) -> None:
         provider.failures = 0
         provider.open_until = None
@@ -178,6 +214,59 @@ class LLMService:
         final_visible_text = content_filter.flush()
         if final_visible_text:
             yield final_visible_text
+
+    async def _generate_image_completion(self, *, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": self._image_data_url(image_bytes=image_bytes, mime_type=mime_type)},
+                    },
+                ],
+            }
+        ]
+        for provider in self.providers:
+            if not provider.available or not provider.base_url or not provider.api_key:
+                continue
+            try:
+                text = await self._complete_openai_compatible(provider, messages)
+                if text:
+                    self._reset_provider(provider)
+                    return text.strip()
+            except Exception:
+                self._mark_provider_failure(provider)
+        return ""
+
+    async def _complete_openai_compatible(self, provider: ProviderState, messages: list[dict[str, object]]) -> str:
+        headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": provider.model,
+            "messages": messages,
+            "temperature": 0.1,
+            "stream": False,
+        }
+        url = provider.base_url.rstrip("/") + "/chat/completions"
+        timeout = httpx.Timeout(self.settings.llm_request_timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            body = response.json()
+        message = body.get("choices", [{}])[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            return "".join(
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict)
+            )
+        return str(content or "")
+
+    @staticmethod
+    def _image_data_url(*, image_bytes: bytes, mime_type: str) -> str:
+        return f"data:{mime_type};base64,{b64encode(image_bytes).decode('ascii')}"
 
 
 llm_service = LLMService()

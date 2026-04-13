@@ -28,3 +28,29 @@ def test_build_prompt_adds_latex_instruction_for_stem_subjects():
     assert "标准 LaTeX" in system_text
     assert "$...$" in system_text
     assert "$$...$$" in system_text
+
+
+def test_build_prompt_requires_image_turn_disclaimer():
+    prompt = socratic_service.build_prompt(
+        question="请看这张图",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+        image_summary="图中给出了受力分析示意。",
+        image_confidence="high",
+        image_related=True,
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "你是 AI" in system_text
+    assert "看错图片" in system_text
+    assert "一起讨论探索" in system_text
+
+
+def test_image_low_confidence_text_contains_required_disclaimer():
+    text = socratic_service.image_low_confidence_text("数学")
+
+    assert "我是 AI" in text
+    assert "可能会看错图片" in text
+    assert "一起讨论探索" in text

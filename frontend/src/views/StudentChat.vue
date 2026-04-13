@@ -5,17 +5,15 @@ import { ElMessage } from 'element-plus'
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import {
   api,
+  type ChatConversationRead,
+  type ChatMessageAttachment,
+  type ChatMessageRead,
   fetchQuestionRecommendations,
   streamChat,
   type KnowledgeAsset,
   type QuestionRecommendation,
 } from '../utils/api'
 import { collectInlineAssetIds, renderRichText, type InlineRichTextAsset } from '../utils/richText'
-
-interface ChatMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
 
 interface ConversationSummary {
   id: number
@@ -51,12 +49,13 @@ const difficultyOptions = [
   { value: 'advanced', label: '提高' },
   { value: 'challenge', label: '挑战' },
 ]
+const IMAGE_ONLY_PLACEHOLDER = '[图片提问]'
 const form = reactive({
   subject: '数学',
   message: '',
 })
 const conversations = ref<ConversationSummary[]>([])
-const messages = ref<ChatMessage[]>([])
+const messages = ref<ChatMessageRead[]>([])
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
 const guidanceStage = ref('initial_guidance')
@@ -67,14 +66,19 @@ const recommendationLoading = ref(false)
 const recommendationError = ref('')
 const recommendationDifficulty = ref<'basic' | 'standard' | 'advanced'>('basic')
 const chatStreamRef = ref<HTMLElement | null>(null)
+const imageInputRef = ref<HTMLInputElement | null>(null)
+const pendingImageFile = ref<File | null>(null)
+const pendingImagePreviewUrl = ref('')
 let streamAbortController: AbortController | null = null
 let stopRequested = false
+const localAttachmentUrls = new Set<string>()
 const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 
 const visibleRecommendations = computed(() => (
   recommendationPool.value.slice(recommendationOffset.value, recommendationOffset.value + RECOMMENDATION_PAGE_SIZE)
 ))
 
+const canSend = computed(() => Boolean(form.message.trim() || pendingImageFile.value))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
 const guidanceStageLabel = computed(() => stageLabel(guidanceStage.value))
 
@@ -109,13 +113,18 @@ async function loadConversations() {
 
 async function openConversation(id: number) {
   currentConversationId.value = id
-  const { data } = await api.get(`/chat/history/${id}`)
+  resetPendingImage()
+  clearLocalAttachmentUrls()
+  const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
   form.subject = data.subject
   guidanceStage.value = data.guidance_stage
-  messages.value = data.messages.map((item: { role: 'user' | 'assistant'; content: string }) => ({
+  messages.value = data.messages.map((item) => ({
     role: item.role,
     content: item.content,
+    attachment: item.attachment || null,
   }))
+  await preloadMessageAttachments(messages.value)
+  queueScrollToBottom()
   const latestUserMessage = getLastUserMessage()
   if (latestUserMessage) {
     void loadRecommendations(latestUserMessage, { silent: true })
@@ -145,11 +154,114 @@ function stopStreaming(showNotice = true) {
 function getLastUserMessage(): string {
   for (let index = messages.value.length - 1; index >= 0; index -= 1) {
     const item = messages.value[index]
-    if (item.role === 'user' && item.content.trim()) {
+    const content = item.content.trim()
+    if (item.role === 'user' && content && content !== IMAGE_ONLY_PLACEHOLDER) {
       return item.content.trim()
     }
   }
   return ''
+}
+
+function isLocalPreviewUrl(url?: string | null): boolean {
+  return typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('data:'))
+}
+
+function trackLocalAttachmentUrl(url?: string | null) {
+  if (url && isLocalPreviewUrl(url)) {
+    localAttachmentUrls.add(url)
+  }
+}
+
+function revokeLocalAttachmentUrl(url?: string | null) {
+  if (!url || !isLocalPreviewUrl(url)) {
+    return
+  }
+  URL.revokeObjectURL(url)
+  localAttachmentUrls.delete(url)
+}
+
+function clearLocalAttachmentUrls() {
+  localAttachmentUrls.forEach((url) => {
+    URL.revokeObjectURL(url)
+  })
+  localAttachmentUrls.clear()
+}
+
+function resetPendingImage(options: { preservePreview?: boolean } = {}) {
+  const currentPreviewUrl = pendingImagePreviewUrl.value
+  if (options.preservePreview) {
+    trackLocalAttachmentUrl(currentPreviewUrl)
+  } else {
+    revokeLocalAttachmentUrl(currentPreviewUrl)
+  }
+  pendingImageFile.value = null
+  pendingImagePreviewUrl.value = ''
+  if (imageInputRef.value) {
+    imageInputRef.value.value = ''
+  }
+}
+
+function updatePendingImage(file: File) {
+  resetPendingImage()
+  pendingImageFile.value = file
+  pendingImagePreviewUrl.value = URL.createObjectURL(file)
+}
+
+function triggerImagePicker() {
+  if (!sending.value) {
+    imageInputRef.value?.click()
+  }
+}
+
+function handleImageSelection(event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const file = input?.files?.[0]
+  if (!file) {
+    return
+  }
+  if (!file.type.startsWith('image/')) {
+    resetPendingImage()
+    ElMessage.error('只支持上传 1 张图片')
+    return
+  }
+  updatePendingImage(file)
+}
+
+function removePendingImage() {
+  resetPendingImage()
+}
+
+function messageAttachmentSrc(attachment?: ChatMessageAttachment | null): string {
+  if (!attachment?.url) {
+    return ''
+  }
+  return isLocalPreviewUrl(attachment.url) ? attachment.url : assetUrl(attachment)
+}
+
+async function preloadMessageAttachments(items: ChatMessageRead[]) {
+  const attachments = items.flatMap((item) => {
+    if (!item.attachment?.content_type.startsWith('image/') || isLocalPreviewUrl(item.attachment.url)) {
+      return []
+    }
+    return [item.attachment]
+  })
+  if (attachments.length) {
+    await preloadAssets(attachments)
+  }
+}
+
+function openMessageAttachment(attachment?: ChatMessageAttachment | null) {
+  if (!attachment?.url) {
+    return
+  }
+  if (isLocalPreviewUrl(attachment.url)) {
+    window.open(attachment.url, '_blank', 'noopener,noreferrer')
+    return
+  }
+  void openAsset(attachment).catch((error) => {
+    console.error(error)
+    ElMessage.error('图片打开失败，请稍后重试')
+  })
 }
 
 function resetRecommendations() {
@@ -343,15 +455,28 @@ function applyRecommendationToInput(item: QuestionRecommendation) {
 }
 
 async function sendMessage() {
-  if (!form.message.trim()) {
+  if (!canSend.value) {
     return
   }
-  const content = form.message.trim()
+  const message = form.message.trim()
+  const image = pendingImageFile.value
+  const attachment = image ? {
+    attachment_id: `local-${Date.now()}`,
+    filename: image.name,
+    content_type: image.type || 'image/*',
+    url: pendingImagePreviewUrl.value,
+  } satisfies ChatMessageAttachment : null
+  const content = message || (attachment ? IMAGE_ONLY_PLACEHOLDER : '')
   form.message = ''
+  resetPendingImage({ preservePreview: Boolean(attachment) })
   sending.value = true
   stopRequested = false
   streamAbortController = new AbortController()
-  messages.value.push({ role: 'user', content })
+  messages.value.push({
+    role: 'user',
+    content,
+    attachment,
+  })
   messages.value.push({ role: 'assistant', content: '' })
   queueScrollToBottom()
 
@@ -359,8 +484,9 @@ async function sendMessage() {
     await streamChat(
       {
         subject: form.subject,
-        message: content,
+        message,
         conversation_id: currentConversationId.value,
+        image,
       },
       ({ event, data }) => {
         if (event === 'meta') {
@@ -396,7 +522,11 @@ async function sendMessage() {
       { signal: streamAbortController.signal, retryAttempts: 2, retryDelayMs: 1200 },
     )
     await loadConversations()
-    void loadRecommendations(content, { silent: true })
+    if (message) {
+      void loadRecommendations(message, { silent: true })
+    } else {
+      resetRecommendations()
+    }
   } catch (error) {
     const last = messages.value[messages.value.length - 1]
     if (error instanceof DOMException && error.name === 'AbortError') {
@@ -421,6 +551,8 @@ async function sendMessage() {
 
 onBeforeUnmount(() => {
   stopStreaming(false)
+  resetPendingImage()
+  clearLocalAttachmentUrls()
 })
 
 onMounted(async () => {
@@ -465,11 +597,39 @@ onMounted(async () => {
       <div ref="chatStreamRef" class="chat-stream">
         <article v-for="(item, index) in messages" :key="index" :class="['bubble', item.role]">
           <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
+          <div
+            v-if="item.attachment?.content_type.startsWith('image/')"
+            class="recommendation-card__images"
+          >
+            <a
+              class="recommendation-image"
+              :href="messageAttachmentSrc(item.attachment) || undefined"
+              target="_blank"
+              rel="noreferrer"
+              @click.prevent="openMessageAttachment(item.attachment)"
+            >
+              <img
+                v-if="messageAttachmentSrc(item.attachment)"
+                :src="messageAttachmentSrc(item.attachment)"
+                :alt="item.attachment.filename"
+                loading="lazy"
+              />
+              <span v-else>图片加载中...</span>
+              <span>{{ item.attachment.filename }}</span>
+            </a>
+          </div>
           <div class="message-body" v-html="renderMessageBody(item.content)"></div>
         </article>
       </div>
 
       <div class="chat-controls">
+        <input
+          ref="imageInputRef"
+          type="file"
+          accept="image/*"
+          style="display: none"
+          @change="handleImageSelection"
+        />
         <el-select v-model="form.subject" :disabled="sending" placeholder="选择学科">
           <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
         </el-select>
@@ -481,9 +641,36 @@ onMounted(async () => {
           resize="none"
           placeholder="输入你的问题，系统会先引导你整理思路"
         />
+        <div v-if="pendingImagePreviewUrl" class="recommendation-card__images">
+          <a
+            class="recommendation-image"
+            :href="pendingImagePreviewUrl"
+            target="_blank"
+            rel="noreferrer"
+            @click.prevent="openMessageAttachment({
+              attachment_id: 'composer-image',
+              filename: pendingImageFile?.name || '待发送图片',
+              content_type: pendingImageFile?.type || 'image/*',
+              url: pendingImagePreviewUrl,
+            })"
+          >
+            <img :src="pendingImagePreviewUrl" :alt="pendingImageFile?.name || '待发送图片'" />
+            <span>{{ pendingImageFile?.name || '待发送图片' }}</span>
+          </a>
+          <div class="row-actions">
+            <button class="ghost-button" :disabled="sending" @click="triggerImagePicker">替换图片</button>
+            <button class="ghost-button" :disabled="sending" @click="removePendingImage">移除图片</button>
+          </div>
+        </div>
+        <p class="panel-subcopy">
+          支持上传 1 张图片，可直接拍照或从相册选择；只有当前新上传图片会进入聊天理解。
+        </p>
         <p v-if="sending" class="stream-hint">正在流式生成，可随时停止。</p>
         <div class="chat-actions">
-          <button class="primary-button" :disabled="sending" @click="sendMessage">
+          <button class="ghost-button" :disabled="sending" @click="triggerImagePicker">
+            {{ pendingImageFile ? '替换图片' : '上传图片 / 拍照' }}
+          </button>
+          <button class="primary-button" :disabled="sending || !canSend" @click="sendMessage">
             {{ sending ? '生成中...' : '发送问题' }}
           </button>
           <button
@@ -503,7 +690,7 @@ onMounted(async () => {
             <p class="eyebrow">Practice Picks</p>
             <h2>推荐练习</h2>
             <p class="panel-subcopy">
-              题图会保留在卡片中；带入聊天时当前只会自动带入题干文字，不会直接解析图片内容。
+              推荐题图片会保留在卡片中；带入聊天时仍只会自动带入题干文字，不会自动进入聊天理解。
             </p>
           </div>
           <div class="row-actions">

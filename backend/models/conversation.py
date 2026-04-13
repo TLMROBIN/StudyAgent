@@ -4,7 +4,7 @@ from enum import Enum
 import re
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum as SqlEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -24,6 +24,7 @@ class MessageRole(str, Enum):
 
 
 TOPIC_MAX_LENGTH = 22
+IMAGE_ONLY_MESSAGE_PLACEHOLDER = "[图片提问]"
 TOPIC_PREFIXES = [
     "请围绕下面这道题继续引导我，不要直接给答案：",
     "请围绕下面这道题继续引导我，不要直接给答案:",
@@ -40,6 +41,8 @@ TOPIC_PREFIXES = [
 
 def summarize_conversation_topic(subject: str, content: str | None) -> str:
     normalized = re.sub(r"\s+", " ", (content or "").strip())
+    if normalized == IMAGE_ONLY_MESSAGE_PLACEHOLDER:
+        return f"{subject}图片答疑"
     for prefix in TOPIC_PREFIXES:
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix) :].strip()
@@ -88,6 +91,59 @@ class Message(TimestampMixin, Base):
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    attachment: Mapped["ChatMessageAttachment | None"] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class ChatMessageAttachment(TimestampMixin, Base):
+    __tablename__ = "chat_message_attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        index=True,
+        unique=True,
+    )
+    owner_student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    storage_key: Mapped[str] = mapped_column(String(500))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(100))
+    file_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    ocr_status: Mapped[str] = mapped_column(String(32), default="pending")
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    message: Mapped[Message] = relationship(back_populates="attachment")
+
+    @property
+    def asset_id(self) -> str:
+        return f"chat-attachment-{self.id}"
+
+    @property
+    def attachment_id(self) -> str:
+        return self.asset_id
+
+    @property
+    def filename(self) -> str:
+        return self.original_filename
+
+    @property
+    def content_type(self) -> str:
+        return self.mime_type
+
+    @property
+    def url(self) -> str:
+        return f"/api/chat/attachments/{self.id}"
+
+
+@event.listens_for(ChatMessageAttachment, "after_delete")
+def _cleanup_chat_attachment_file(_mapper, _connection, target: ChatMessageAttachment) -> None:
+    from backend.services.chat_attachment_service import chat_attachment_service
+
+    chat_attachment_service.delete(target.storage_key)
 
 
 if TYPE_CHECKING:

@@ -2,20 +2,38 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from hashlib import sha256
 import json
+import mimetypes
+from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.database import SessionLocal
 from backend.dependencies import CurrentUser, DbSession
 from backend.models.agent_config import AgentConfig
-from backend.models.conversation import Conversation, Message, MessageRole
-from backend.models.schemas import ChatRequest, ConversationRead, QuestionRecommendationRead, QuestionRecommendationRequest, ResolveConversationRequest
+from backend.models.conversation import (
+    ChatMessageAttachment,
+    Conversation,
+    GuidanceStage,
+    IMAGE_ONLY_MESSAGE_PLACEHOLDER,
+    Message,
+    MessageRole,
+)
+from backend.models.schemas import (
+    ChatRequest,
+    ConversationRead,
+    QuestionRecommendationRead,
+    QuestionRecommendationRequest,
+    ResolveConversationRequest,
+)
 from backend.models.user import User, UserRole
+from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
+from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import filter_service
 from backend.services.llm_service import llm_service
 from backend.services.metrics_service import (
@@ -34,7 +52,6 @@ from backend.services.queue_service import QueueFullError, queue_service
 from backend.services.rag_service import RetrievalResult, rag_service
 from backend.services.request_replay_service import request_replay_service
 from backend.services.socratic_service import socratic_service
-from time import perf_counter
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 STREAM_HEARTBEAT_SECONDS = 15
@@ -88,6 +105,10 @@ def _compose_safe_rewrite(existing_text: str, rewrite_text: str) -> str:
     return f"{cleaned_existing}{separator}{cleaned_rewrite}"
 
 
+def _message_load_option():
+    return selectinload(Conversation.messages).selectinload(Message.attachment)
+
+
 def _history_pairs_before_turn(conversation: Conversation, turn_index: int) -> list[tuple[str, str]]:
     return [
         (message.role.value, message.content)
@@ -103,6 +124,20 @@ def _assistant_message_for_turn(db: DbSession, conversation_id: int, turn_index:
             Message.conversation_id == conversation_id,
             Message.turn_index == turn_index,
             Message.role == MessageRole.ASSISTANT,
+        )
+        .order_by(Message.id.desc())
+        .limit(1)
+    )
+
+
+def _user_message_for_turn(db: DbSession, conversation_id: int, turn_index: int) -> Message | None:
+    return db.scalar(
+        select(Message)
+        .options(selectinload(Message.attachment))
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.turn_index == turn_index,
+            Message.role == MessageRole.USER,
         )
         .order_by(Message.id.desc())
         .limit(1)
@@ -177,7 +212,9 @@ def _instant_stream(
 def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -> Conversation:
     if payload.conversation_id:
         conversation = db.scalar(
-            select(Conversation).where(Conversation.id == payload.conversation_id, Conversation.student_id == student_id)
+            select(Conversation)
+            .options(_message_load_option())
+            .where(Conversation.id == payload.conversation_id, Conversation.student_id == student_id)
         )
         if not conversation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
@@ -190,11 +227,66 @@ def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -
     return conversation
 
 
+def _normalize_chat_message_content(message: str, *, has_attachment: bool) -> str:
+    trimmed = (message or "").strip()
+    if trimmed:
+        return trimmed
+    if has_attachment:
+        return IMAGE_ONLY_MESSAGE_PLACEHOLDER
+    return ""
+
+
+async def _parse_stream_request_payload(request: Request) -> tuple[ChatRequest, UploadFile | None]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        image_items = [item for item in form.getlist("image") if item]
+        if len(image_items) > 1:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only one chat image is allowed")
+        image = image_items[0] if image_items else None
+        if image is not None and not all(hasattr(image, attr) for attr in ("filename", "content_type", "read")):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid chat image upload")
+        conversation_id_raw = str(form.get("conversation_id") or "").strip()
+        request_id_raw = str(form.get("request_id") or "").strip()
+        payload = ChatRequest(
+            subject=str(form.get("subject") or "").strip(),
+            message=str(form.get("message") or ""),
+            conversation_id=int(conversation_id_raw) if conversation_id_raw else None,
+            request_id=request_id_raw or None,
+        )
+        return payload, image
+
+    body = await request.json()
+    return ChatRequest.model_validate(body), None
+
+
+def _build_filter_question(*, payload_message: str, understanding: ImageUnderstandingResult | None) -> str:
+    payload_text = (payload_message or "").strip()
+    if understanding is None:
+        return payload_text
+    if payload_text and understanding.filter_text:
+        return f"{payload_text}\n{understanding.filter_text}".strip()
+    return payload_text or understanding.filter_text
+
+
+def _build_prompt_question(*, payload_message: str, subject: str, understanding: ImageUnderstandingResult | None) -> str:
+    payload_text = (payload_message or "").strip()
+    if payload_text:
+        return payload_text
+    if understanding and understanding.prompt_summary:
+        return understanding.prompt_summary
+    return socratic_service.placeholder_question(subject)
+
+
+def _build_short_circuit_reply(subject: str) -> str:
+    return socratic_service.image_low_confidence_text(subject)
+
+
 @router.get("/history", response_model=list[ConversationRead])
 def list_conversations(db: DbSession, current_user: CurrentUser) -> list[ConversationRead]:
     conversations = db.scalars(
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(_message_load_option())
         .where(Conversation.student_id == current_user.id)
         .order_by(Conversation.updated_at.desc())
     ).all()
@@ -205,12 +297,24 @@ def list_conversations(db: DbSession, current_user: CurrentUser) -> list[Convers
 def get_conversation(conversation_id: int, db: DbSession, current_user: CurrentUser) -> ConversationRead:
     conversation = db.scalar(
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(_message_load_option())
         .where(Conversation.id == conversation_id, Conversation.student_id == current_user.id)
     )
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     return ConversationRead.model_validate(conversation)
+
+
+@router.get("/attachments/{attachment_id}")
+def get_chat_attachment(attachment_id: int, db: DbSession, current_user: CurrentUser):
+    attachment = db.scalar(select(ChatMessageAttachment).where(ChatMessageAttachment.id == attachment_id))
+    if not attachment or attachment.owner_student_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    file_path = chat_attachment_service.resolve_path(attachment.storage_key)
+    if not file_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    media_type = mimetypes.guess_type(file_path.name)[0] or attachment.mime_type or "application/octet-stream"
+    return FileResponse(file_path, media_type=media_type, filename=attachment.original_filename)
 
 
 @router.post("/{conversation_id}/resolve", response_model=ConversationRead)
@@ -256,29 +360,55 @@ def recommend_questions(
 
 
 @router.post("/stream")
-async def stream_chat(payload: ChatRequest, db: DbSession, current_user: CurrentUser, request: Request):
+async def stream_chat_endpoint(request: Request, db: DbSession, current_user: CurrentUser):
+    payload, image_upload = await _parse_stream_request_payload(request)
+    return await stream_chat(payload, db, current_user, request, image_upload=image_upload)
+
+
+async def stream_chat(
+    payload: ChatRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+    request: Request,
+    *,
+    image_upload: UploadFile | None = None,
+):
     started = perf_counter()
     chat_request_total.inc()
-    decision = filter_service.check_question(payload.message, payload.subject)
+    has_image_turn = image_upload is not None
+    image_content: bytes | None = None
+    stored_attachment: StoredChatAttachment | None = None
+    attachment_record: ChatMessageAttachment | None = None
+    image_understanding: ImageUnderstandingResult | None = None
+    user_message_content = _normalize_chat_message_content(payload.message, has_attachment=has_image_turn)
+    image_sha256: str | None = None
+
+    if has_image_turn:
+        image_content = await image_upload.read()
+        image_sha256 = sha256(image_content or b"").hexdigest()
     request_fingerprint = request_replay_service.fingerprint(
         subject=payload.subject,
-        question=payload.message,
+        question=user_message_content,
         conversation_id=payload.conversation_id,
+        image_sha256=image_sha256,
     )
+
     replay_state = request_replay_service.load(user_id=current_user.id, request_id=payload.request_id)
     if replay_state and replay_state.question_hash != request_fingerprint:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Request id already used with different payload")
 
+    conversation: Conversation | None = None
     if replay_state:
         conversation = db.scalar(
-            select(Conversation).where(
+            select(Conversation)
+            .options(_message_load_option())
+            .where(
                 Conversation.id == replay_state.conversation_id,
                 Conversation.student_id == current_user.id,
             )
         )
         if not conversation:
             replay_state = None
-            conversation = _ensure_conversation(db, current_user.id, payload)
         elif replay_state.status == "completed" and replay_state.final_content:
             return StreamingResponse(
                 _instant_stream(
@@ -289,12 +419,18 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                 ),
                 media_type="text/event-stream",
             )
-    else:
+
+    if not conversation:
         conversation = _ensure_conversation(db, current_user.id, payload)
 
     if replay_state:
         user_turn_index = replay_state.turn_index
         history_pairs = _history_pairs_before_turn(conversation, user_turn_index)
+        replayed_user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
+        attachment_record = replayed_user_message.attachment if replayed_user_message else None
+        if attachment_record:
+            image_content = chat_attachment_service.resolve_path(attachment_record.storage_key).read_bytes()
+            has_image_turn = True
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if existing_assistant:
             if payload.request_id:
@@ -320,15 +456,44 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
     else:
         history_pairs = [(message.role.value, message.content) for message in conversation.messages]
         user_turn_index = len([message for message in conversation.messages if message.role == MessageRole.USER]) + 1
+        if has_image_turn:
+            stored_attachment = chat_attachment_service.save_bytes(
+                content=image_content or b"",
+                filename=image_upload.filename or "chat-image.png",
+                content_type=image_upload.content_type,
+                student_id=current_user.id,
+                conversation_id=conversation.id,
+            )
         user_message = Message(
             conversation_id=conversation.id,
             role=MessageRole.USER,
-            content=payload.message,
+            content=user_message_content,
             turn_index=user_turn_index,
             guidance_stage=conversation.guidance_stage,
         )
-        db.add(user_message)
-        db.commit()
+        try:
+            db.add(user_message)
+            db.flush()
+            if stored_attachment:
+                attachment_record = ChatMessageAttachment(
+                    message_id=user_message.id,
+                    owner_student_id=current_user.id,
+                    storage_key=stored_attachment.storage_key,
+                    original_filename=stored_attachment.original_filename,
+                    mime_type=stored_attachment.mime_type,
+                    file_size=stored_attachment.file_size,
+                    sha256=stored_attachment.sha256,
+                )
+                db.add(attachment_record)
+            db.commit()
+        except Exception:
+            db.rollback()
+            if stored_attachment:
+                chat_attachment_service.delete(stored_attachment.storage_key)
+            raise
+        db.refresh(user_message)
+        if attachment_record:
+            db.refresh(attachment_record)
         if payload.request_id:
             request_replay_service.remember_request(
                 user_id=current_user.id,
@@ -339,9 +504,64 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                 subject=payload.subject,
             )
 
+    if has_image_turn and image_content and attachment_record:
+        image_understanding = await chat_image_understanding_service.understand(
+            image_bytes=image_content,
+            mime_type=attachment_record.mime_type,
+            subject=payload.subject,
+            user_text=payload.message,
+        )
+        attachment_record.ocr_status = {
+            "ocr": "ocr_only",
+            "multimodal": "multimodal_fallback",
+            "failed": "failed",
+        }.get(image_understanding.source, "pending")
+        attachment_record.ocr_confidence = image_understanding.ocr_confidence_value
+        db.add(attachment_record)
+        db.commit()
+
+    filter_question = _build_filter_question(payload_message=payload.message, understanding=image_understanding)
+    if has_image_turn and image_understanding and image_understanding.must_short_circuit:
+        short_circuit_text = _build_short_circuit_reply(payload.subject)
+        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+        if not existing_assistant:
+            assistant_message = Message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT,
+                content=short_circuit_text,
+                turn_index=user_turn_index,
+                guidance_stage=conversation.guidance_stage,
+            )
+            db.add(assistant_message)
+            db.commit()
+            guidance_stage_total.labels(stage=conversation.guidance_stage.value).inc()
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=payload.subject,
+                guidance_stage=conversation.guidance_stage,
+                final_content=short_circuit_text,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=conversation.guidance_stage.value,
+                content=short_circuit_text,
+                request=request,
+            ),
+            media_type="text/event-stream",
+        )
+
+    decision = filter_service.check_question(filter_question, payload.subject)
     if not decision.allowed:
         filter_blocked_total.inc()
         refusal = filter_service.refusal_text
+        if has_image_turn:
+            refusal = filter_service.ensure_image_disclaimer(refusal)
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if not existing_assistant:
             assistant_message = Message(
@@ -376,31 +596,41 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
         )
 
     subject = decision.subject or payload.subject
+    prompt_question = _build_prompt_question(payload_message=payload.message, subject=subject, understanding=image_understanding)
+    retrieval_query = filter_question or prompt_question
     retrieval = await asyncio.to_thread(
         _retrieve_context_for_chat,
         subject,
-        payload.message,
+        retrieval_query,
         student_grade=current_user.grade,
     )
     active_config = db.scalar(select(AgentConfig).where(AgentConfig.is_active.is_(True)).order_by(AgentConfig.version.desc()))
     prompt = socratic_service.build_prompt(
-        question=payload.message,
+        question=prompt_question,
         subject=subject,
         history=history_pairs,
         retrieved_context=retrieval.context,
         system_prompt=active_config.system_prompt if active_config else socratic_service.base_prompt,
         student_grade=current_user.grade,
+        image_summary=image_understanding.prompt_summary if image_understanding else None,
+        image_confidence=image_understanding.confidence_level if image_understanding else None,
+        image_related=has_image_turn,
     )
     cache_lookup = QuestionCacheLookup(cache_key=None, answer=None)
-    if question_cache_service.is_cacheable(history_pairs=history_pairs, question=payload.message):
+    if question_cache_service.is_cacheable(
+        history_pairs=history_pairs,
+        question=retrieval_query,
+        has_image_turn=has_image_turn,
+    ):
         cache_lookup = question_cache_service.lookup(
             subject=subject,
-            question=payload.message,
+            question=retrieval_query,
             guidance_stage=prompt.stage,
             agent_version=active_config.version if active_config else 0,
             chunks=retrieval.chunks,
         )
         if cache_lookup.answer:
+            response_text = filter_service.ensure_image_disclaimer(cache_lookup.answer) if has_image_turn else cache_lookup.answer
             conversation.subject = subject
             conversation.guidance_stage = prompt.stage
             db.add(conversation)
@@ -409,7 +639,7 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                 assistant_message = Message(
                     conversation_id=conversation.id,
                     role=MessageRole.ASSISTANT,
-                    content=cache_lookup.answer,
+                    content=response_text,
                     turn_index=user_turn_index,
                     guidance_stage=prompt.stage,
                 )
@@ -425,13 +655,13 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                     turn_index=user_turn_index,
                     subject=subject,
                     guidance_stage=prompt.stage,
-                    final_content=cache_lookup.answer,
+                    final_content=response_text,
                 )
             return StreamingResponse(
                 _instant_stream(
                     conversation_id=conversation.id,
                     guidance_stage=prompt.stage.value,
-                    content=cache_lookup.answer,
+                    content=response_text,
                     request=request,
                     context_chunks=len(retrieval.chunks),
                 ),
@@ -493,7 +723,7 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
                             emitted_text,
-                            socratic_service.safe_guided_rewrite(payload.message, subject, prompt.stage),
+                            socratic_service.safe_guided_rewrite(prompt_question, subject, prompt.stage, image_related=has_image_turn),
                         )
                         delta = rewritten_text[len(emitted_text) :]
                         emitted_text = rewritten_text
@@ -524,7 +754,7 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
                             emitted_text,
-                            socratic_service.safe_guided_rewrite(payload.message, subject, prompt.stage),
+                            socratic_service.safe_guided_rewrite(prompt_question, subject, prompt.stage, image_related=has_image_turn),
                         )
                         delta = rewritten_text[len(emitted_text) :]
                         emitted_text = rewritten_text
@@ -540,6 +770,8 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                         first_token_observed = True
                     yield _sse_event("chunk", {"content": segment})
 
+            if has_image_turn:
+                emitted_text = filter_service.ensure_image_disclaimer(emitted_text)
             if should_send_done:
                 yield _sse_event("done", {"content": emitted_text})
         finally:
@@ -570,7 +802,7 @@ async def stream_chat(payload: ChatRequest, db: DbSession, current_user: Current
                         guidance_stage_total.labels(stage=prompt.stage.value).inc()
                 db.commit()
                 if should_send_done and emitted_text:
-                    if cache_lookup.cache_key:
+                    if cache_lookup.cache_key and not has_image_turn:
                         question_cache_service.store_answer(cache_lookup.cache_key, emitted_text)
                     if payload.request_id:
                         request_replay_service.mark_completed(

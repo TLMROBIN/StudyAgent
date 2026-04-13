@@ -57,8 +57,8 @@ class QuestionCacheService:
             ttl_seconds=self.settings.hot_question_cache_ttl_seconds,
         )
 
-    def is_cacheable(self, *, history_pairs: list[tuple[str, str]], question: str) -> bool:
-        return not history_pairs and len(self.normalize_question(question)) >= 6
+    def is_cacheable(self, *, history_pairs: list[tuple[str, str]], question: str, has_image_turn: bool = False) -> bool:
+        return not has_image_turn and not history_pairs and len(self.normalize_question(question)) >= 6
 
     @staticmethod
     def normalize_question(question: str) -> str:

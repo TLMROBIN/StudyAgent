@@ -39,6 +39,38 @@ export interface KnowledgeAsset {
   description?: string | null
 }
 
+export interface ChatMessageAttachment {
+  attachment_id: string
+  filename: string
+  content_type: string
+  url: string
+  size_bytes?: number | null
+  width?: number | null
+  height?: number | null
+}
+
+export interface ChatMessageRead {
+  role: 'user' | 'assistant'
+  content: string
+  attachment?: ChatMessageAttachment | null
+}
+
+export interface ChatConversationRead {
+  subject: string
+  guidance_stage: string
+  messages: ChatMessageRead[]
+}
+
+export interface StreamChatRequest {
+  subject: string
+  message?: string
+  conversation_id?: number | null
+  request_id?: string | null
+  image?: File | null
+}
+
+export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment
+
 export interface QuestionRecommendationRequest {
   subject: string
   question: string
@@ -202,7 +234,7 @@ function isSessionExpiredError(error: unknown): boolean {
 }
 
 export async function streamChat(
-  payload: Record<string, unknown>,
+  payload: StreamChatRequest,
   onEvent: (event: StreamEvent) => void,
   options: StreamChatOptions = {},
 ): Promise<void> {
@@ -211,7 +243,7 @@ export async function streamChat(
     : (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`)
-  const nextPayload = {
+  const nextPayload: StreamChatRequest = {
     ...payload,
     request_id: requestId,
   }
@@ -231,10 +263,9 @@ export async function streamChat(
         method: 'POST',
         signal: options.signal,
         headers: {
-          'Content-Type': 'application/json',
           Authorization: `Bearer ${getStoredAccessToken()}`,
         },
-        body: JSON.stringify(nextPayload),
+        body: buildStreamChatFormData(nextPayload),
       })
 
       if (!response.ok || !response.body) {
@@ -316,4 +347,24 @@ export async function streamChat(
   if (!completed) {
     throw new Error('SSE stream interrupted before completion')
   }
+}
+
+function buildStreamChatFormData(payload: StreamChatRequest): FormData {
+  const formData = new FormData()
+  formData.append('subject', payload.subject)
+  formData.append('message', typeof payload.message === 'string' ? payload.message : '')
+
+  if (typeof payload.conversation_id === 'number') {
+    formData.append('conversation_id', String(payload.conversation_id))
+  }
+
+  if (typeof payload.request_id === 'string' && payload.request_id) {
+    formData.append('request_id', payload.request_id)
+  }
+
+  if (payload.image instanceof File) {
+    formData.append('image', payload.image)
+  }
+
+  return formData
 }

@@ -87,12 +87,23 @@ class PasswordResetRequest(BaseModel):
     user_id: int
 
 
+class ChatAttachmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    attachment_id: str
+    filename: str
+    content_type: str
+    url: str
+    ocr_status: str | None = None
+
+
 class MessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     role: MessageRole
     content: str
+    attachment: ChatAttachmentRead | None = None
     turn_index: int
     guidance_stage: GuidanceStage
     created_at: datetime
@@ -113,7 +124,7 @@ class ConversationRead(BaseModel):
 
 class ChatRequest(BaseModel):
     subject: str
-    message: str
+    message: str = ""
     conversation_id: int | None = None
     request_id: str | None = None
 

@@ -38,6 +38,31 @@ DIRECT_ANSWER_PATTERNS = [
     ]
 ]
 
+IMAGE_DISCLAIMER_AI_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\bAI\b",
+        r"人工智能",
+    ]
+]
+IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"可能不准确",
+        r"不一定准确",
+        r"可能会看错",
+        r"可能理解得不完全准确",
+    ]
+]
+IMAGE_DISCLAIMER_COLLABORATION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"一起讨论",
+        r"一起探索",
+        r"一起梳理",
+    ]
+]
+
 
 @dataclass
 class FilterDecision:
@@ -54,6 +79,7 @@ class OutputValidation:
 
 class FilterService:
     refusal_text = "抱歉，我只能解答高中学科相关问题，请重新提问。"
+    image_uncertainty_text = "提醒一下：我是 AI，可能会看错图片或理解得不完全准确，我们一起讨论探索。"
 
     def check_question(self, question: str, declared_subject: str | None = None) -> FilterDecision:
         normalized = question.strip()
@@ -82,6 +108,25 @@ class FilterService:
         if "抱歉，我只能解答高中学科相关问题" in answer and len(answer) > 30:
             issues.append("mixed_refusal")
         return OutputValidation(allowed=not issues, issues=issues)
+
+    def validate_image_answer(self, answer: str) -> OutputValidation:
+        issues = list(self.validate_answer(answer).issues)
+        if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_AI_PATTERNS):
+            issues.append("missing_image_ai_disclaimer")
+        if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS):
+            issues.append("missing_image_uncertainty_disclaimer")
+        if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_COLLABORATION_PATTERNS):
+            issues.append("missing_image_collaboration_disclaimer")
+        return OutputValidation(allowed=not issues, issues=issues)
+
+    def ensure_image_disclaimer(self, answer: str) -> str:
+        validation = self.validate_image_answer(answer)
+        if validation.allowed:
+            return answer.strip()
+        cleaned = answer.strip()
+        if not cleaned:
+            return self.image_uncertainty_text
+        return f"{self.image_uncertainty_text}\n\n{cleaned}"
 
 
 filter_service = FilterService()

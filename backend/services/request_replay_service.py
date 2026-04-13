@@ -26,11 +26,19 @@ class RequestReplayService:
         self.settings = get_settings()
         self.store_backend = store_backend or store
 
-    def fingerprint(self, *, subject: str, question: str, conversation_id: int | None) -> str:
+    def fingerprint(
+        self,
+        *,
+        subject: str,
+        question: str,
+        conversation_id: int | None,
+        image_sha256: str | None = None,
+    ) -> str:
         payload = {
             "subject": subject.strip(),
             "question": question.strip(),
             "conversation_id": conversation_id,
+            "image_sha256": image_sha256,
         }
         return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 

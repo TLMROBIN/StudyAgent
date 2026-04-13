@@ -1,24 +1,29 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
+from fastapi import UploadFile
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.datastructures import Headers
 
 from backend.config import Settings
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
-from backend.models.conversation import GuidanceStage, Message, MessageRole
+from backend.models.conversation import ChatMessageAttachment, GuidanceStage, Message, MessageRole
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
 from backend.routers import chat as chat_router
+from backend.services.chat_image_understanding_service import ImageUnderstandingResult
 from backend.services.embed_service import EmbedService
 from backend.services.rag_service import RagService, RetrievalResult
 from backend.services.store_service import MemoryStore
@@ -70,6 +75,12 @@ def _build_rag_service(tmp_path: Path) -> RagService:
     return RagService(settings=settings, embedder=embedder, vector_store=vector_store)
 
 
+def _make_test_image_bytes(color: str = "white") -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), color=color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 class FakeRequest:
     def __init__(self) -> None:
         self.state = SimpleNamespace(request_id="test-request")
@@ -81,9 +92,10 @@ class FakeRequest:
 def _create_user(session_factory, *, role: UserRole, grade: int | None = None) -> User:
     session = session_factory()
     try:
-        user = User(
-            username=f"{role.value}1",
-            student_no="20260001" if role == UserRole.STUDENT else None,
+        next_id = (session.query(user.User).count() or 0) + 1
+        created_user = User(
+            username=f"{role.value}{next_id}",
+            student_no=f"2026{next_id:04d}" if role == UserRole.STUDENT else None,
             full_name="测试用户",
             role=role,
             password_hash="fake-hash",
@@ -91,11 +103,11 @@ def _create_user(session_factory, *, role: UserRole, grade: int | None = None) -
             is_active=True,
             grade=grade,
         )
-        session.add(user)
+        session.add(created_user)
         session.commit()
-        session.refresh(user)
-        session.expunge(user)
-        return user
+        session.refresh(created_user)
+        session.expunge(created_user)
+        return created_user
     finally:
         session.close()
 
@@ -359,6 +371,427 @@ def test_chat_stream_replays_completed_request_id(monkeypatch):
         assert stored_messages[1].content == "先判断已知条件。"
     finally:
         session.close()
+
+
+def test_chat_stream_supports_image_only_messages_and_persists_attachment(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看看图里标出的已知条件。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="已知函数图像和坐标点",
+            prompt_summary="题目给了一张函数图像，并标出了一个坐标点。",
+            ocr_raw_text="函数图像 坐标点",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "", "request_id": "image-only-1"},
+        files={"image": ("question.png", _make_test_image_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert [event for event, _ in events] == ["meta", "chunk", "done"]
+    assert "我是 AI" in events[-1][1]["content"]
+    assert "一起讨论探索" in events[-1][1]["content"]
+
+    session = session_factory()
+    try:
+        stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
+        attachments = session.scalars(select(ChatMessageAttachment).order_by(ChatMessageAttachment.id.asc())).all()
+        assert len(stored_messages) == 2
+        assert stored_messages[0].content == "[图片提问]"
+        assert len(attachments) == 1
+        assert attachments[0].original_filename == "question.png"
+        assert attachments[0].ocr_status == "ocr_only"
+    finally:
+        session.close()
+
+
+def test_chat_stream_short_circuits_low_confidence_images(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    llm_called = {"value": 0}
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        llm_called["value"] += 1
+        yield "不应该被调用"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="",
+            prompt_summary="",
+            ocr_raw_text="模糊",
+            confidence_level="low",
+            source="failed",
+            must_short_circuit=True,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "物理", "message": ""},
+        files={"image": ("blur.png", _make_test_image_bytes("gray"), "image/png")},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert [event for event, _ in events] == ["meta", "done"]
+    assert "可能会看错图片" in events[-1][1]["content"]
+    assert "重拍" in events[-1][1]["content"]
+    assert llm_called["value"] == 0
+
+
+def test_chat_history_includes_attachment_payload_for_image_turn(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先圈出图中的已知条件。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="已知受力图和方向",
+            prompt_summary="图片里给出了受力图和方向标注。",
+            ocr_raw_text="受力图 方向",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    stream_response = client.post(
+        "/api/chat/stream",
+        data={"subject": "物理", "message": ""},
+        files={"image": ("force.png", _make_test_image_bytes("blue"), "image/png")},
+    )
+    assert stream_response.status_code == 200
+
+    history = client.get("/api/chat/history")
+    assert history.status_code == 200
+    conversation_id = history.json()[0]["id"]
+
+    detail = client.get(f"/api/chat/history/{conversation_id}")
+    assert detail.status_code == 200
+    messages = detail.json()["messages"]
+    assert messages[0]["attachment"]["filename"] == "force.png"
+    assert messages[0]["attachment"]["url"].startswith("/api/chat/attachments/")
+
+
+def test_chat_attachment_route_is_private_to_owner(monkeypatch):
+    session_factory = _build_session_factory()
+    owner = _create_student(session_factory)
+    intruder = _create_user(session_factory, role=UserRole.STUDENT)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看图中的坐标。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="坐标系 图像",
+            prompt_summary="图片中有坐标系和函数图像。",
+            ocr_raw_text="坐标系 图像",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    owner_client = _build_chat_test_client(session_factory, owner)
+    response = owner_client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": ""},
+        files={"image": ("graph.png", _make_test_image_bytes("green"), "image/png")},
+    )
+    assert response.status_code == 200
+
+    history = owner_client.get("/api/chat/history")
+    attachment_url = history.json()[0]["messages"][0]["attachment"]["url"]
+    assert owner_client.get(attachment_url).status_code == 200
+
+    intruder_client = _build_chat_test_client(session_factory, intruder)
+    assert intruder_client.get(attachment_url).status_code == 404
+
+
+def test_chat_stream_rejects_multiple_images(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看题干。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": ""},
+        files=[
+            ("image", ("first.png", _make_test_image_bytes("red"), "image/png")),
+            ("image", ("second.png", _make_test_image_bytes("blue"), "image/png")),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "Only one chat image is allowed" in response.text
+
+
+def test_chat_attachment_file_is_removed_when_conversation_is_deleted(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看图里的条件。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="图示 条件",
+            prompt_summary="图片里给出了题目的条件与图示。",
+            ocr_raw_text="图示 条件",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": ""},
+        files={"image": ("cleanup.png", _make_test_image_bytes("purple"), "image/png")},
+    )
+    assert response.status_code == 200
+
+    session = session_factory()
+    try:
+        attachment = session.scalar(select(ChatMessageAttachment))
+        conversation = session.scalar(select(chat_router.Conversation))
+        assert attachment is not None
+        attachment_path = chat_router.chat_attachment_service.resolve_path(attachment.storage_key)
+        assert attachment_path.exists()
+
+        session.delete(conversation)
+        session.commit()
+
+        assert not attachment_path.exists()
+    finally:
+        session.close()
+
+
+def test_chat_stream_cleans_up_saved_file_when_message_commit_fails(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    session = session_factory()
+    saved: dict[str, str] = {}
+
+    conversation_row = conversation.Conversation(student_id=current_user.id, subject="数学")
+    session.add(conversation_row)
+    session.commit()
+    session.refresh(conversation_row)
+
+    original_save_bytes = chat_router.chat_attachment_service.save_bytes
+
+    def wrapped_save_bytes(**kwargs):
+        stored = original_save_bytes(**kwargs)
+        saved["storage_key"] = stored.storage_key
+        return stored
+
+    original_commit = session.commit
+    failure_injected = {"done": False}
+
+    def failing_commit():
+        if not failure_injected["done"]:
+            failure_injected["done"] = True
+            raise RuntimeError("forced message commit failure")
+        return original_commit()
+
+    monkeypatch.setattr(chat_router.chat_attachment_service, "save_bytes", wrapped_save_bytes)
+    monkeypatch.setattr(session, "commit", failing_commit)
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    upload = UploadFile(
+        file=BytesIO(_make_test_image_bytes("orange")),
+        filename="rollback.png",
+        headers=Headers({"content-type": "image/png"}),
+    )
+
+    try:
+        try:
+            asyncio.run(
+                chat_router.stream_chat(
+                    ChatRequest(subject="数学", message="", conversation_id=conversation_row.id),
+                    session,
+                    current_user,
+                    FakeRequest(),
+                    image_upload=upload,
+                )
+            )
+        except RuntimeError as exc:
+            assert "forced message commit failure" in str(exc)
+        else:
+            raise AssertionError("Expected forced message commit failure")
+
+        assert session.scalar(select(Message)) is None
+        assert session.scalar(select(ChatMessageAttachment)) is None
+        attachment_path = chat_router.chat_attachment_service.resolve_path(saved["storage_key"])
+        assert not attachment_path.exists()
+    finally:
+        session.close()
+
+
+def test_chat_stream_keeps_saved_file_when_refresh_fails_after_commit(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    session = session_factory()
+    saved: dict[str, str] = {}
+
+    conversation_row = conversation.Conversation(student_id=current_user.id, subject="数学")
+    session.add(conversation_row)
+    session.commit()
+    session.refresh(conversation_row)
+
+    original_save_bytes = chat_router.chat_attachment_service.save_bytes
+
+    def wrapped_save_bytes(**kwargs):
+        stored = original_save_bytes(**kwargs)
+        saved["storage_key"] = stored.storage_key
+        return stored
+
+    original_refresh = session.refresh
+    failure_injected = {"done": False}
+
+    def failing_refresh(instance, *args, **kwargs):
+        if not failure_injected["done"]:
+            failure_injected["done"] = True
+            raise RuntimeError("forced refresh failure")
+        return original_refresh(instance, *args, **kwargs)
+
+    monkeypatch.setattr(chat_router.chat_attachment_service, "save_bytes", wrapped_save_bytes)
+    monkeypatch.setattr(session, "refresh", failing_refresh)
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    upload = UploadFile(
+        file=BytesIO(_make_test_image_bytes("pink")),
+        filename="refresh.png",
+        headers=Headers({"content-type": "image/png"}),
+    )
+
+    try:
+        try:
+            asyncio.run(
+                chat_router.stream_chat(
+                    ChatRequest(subject="数学", message="", conversation_id=conversation_row.id),
+                    session,
+                    current_user,
+                    FakeRequest(),
+                    image_upload=upload,
+                )
+            )
+        except RuntimeError as exc:
+            assert "forced refresh failure" in str(exc)
+        else:
+            raise AssertionError("Expected forced refresh failure")
+
+        inspection_session = session_factory()
+        try:
+            assert inspection_session.scalar(select(Message)) is not None
+            assert inspection_session.scalar(select(ChatMessageAttachment)) is not None
+        finally:
+            inspection_session.close()
+
+        attachment_path = chat_router.chat_attachment_service.resolve_path(saved["storage_key"])
+        assert attachment_path.exists()
+    finally:
+        session.close()
+
+
+def test_chat_stream_replay_request_id_distinguishes_different_images(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看题干。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="图像 已知条件",
+            prompt_summary="图片提供了函数图像与已知条件。",
+            ocr_raw_text="图像 已知条件",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+    monkeypatch.setattr(chat_router.request_replay_service, "store_backend", MemoryStore())
+
+    client = _build_chat_test_client(session_factory, current_user)
+    first = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "", "request_id": "same-image-request"},
+        files={"image": ("first.png", _make_test_image_bytes("red"), "image/png")},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "", "request_id": "same-image-request"},
+        files={"image": ("second.png", _make_test_image_bytes("yellow"), "image/png")},
+    )
+    assert second.status_code == 409
+    assert "different payload" in second.text
 
 
 def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monkeypatch):
