@@ -321,8 +321,12 @@ def _document_summary(db: DbSession) -> StatusSummaryRead:
 
 
 def _document_read(
-    document: KnowledgeDocument, *, has_active_task: bool = False
+    document: KnowledgeDocument,
+    *,
+    has_active_task: bool = False,
+    chunk_summary: dict | None = None,
 ) -> KnowledgeDocumentRead:
+    summary = chunk_summary or {}
     return KnowledgeDocumentRead(
         id=document.id,
         subject=document.subject,
@@ -339,7 +343,89 @@ def _document_read(
         has_active_task=has_active_task,
         error_message=document.error_message,
         created_at=document.created_at,
+        chunk_total=int(summary.get("chunk_total") or 0),
+        question_chunk_count=int(summary.get("question_chunk_count") or 0),
+        answer_count=int(summary.get("answer_count") or 0),
+        explanation_count=int(summary.get("explanation_count") or 0),
+        image_count=int(summary.get("image_count") or 0),
+        split_mode=str(summary.get("split_mode") or "按段落切分"),
+        count_mismatch=bool(summary.get("count_mismatch")),
+        count_mismatch_kind=str(summary.get("count_mismatch_kind") or "aligned"),
     )
+
+
+def _chunk_summaries_for_documents(
+    db: DbSession, document_ids: list[int]
+) -> dict[int, dict[str, int | bool | str]]:
+    if not document_ids:
+        return {}
+
+    rows = db.scalars(
+        select(KnowledgeChunk)
+        .where(KnowledgeChunk.document_id.in_(document_ids))
+        .order_by(KnowledgeChunk.document_id.asc(), KnowledgeChunk.chunk_index.asc())
+    ).all()
+
+    summaries: dict[int, dict[str, int | bool | str]] = {
+        document_id: {
+            "chunk_total": 0,
+            "question_chunk_count": 0,
+            "answer_count": 0,
+            "explanation_count": 0,
+            "image_count": 0,
+            "split_mode": "按段落切分",
+            "count_mismatch": False,
+            "count_mismatch_kind": "aligned",
+        }
+        for document_id in document_ids
+    }
+
+    for row in rows:
+        summary = summaries.setdefault(
+            row.document_id,
+            {
+                "chunk_total": 0,
+                "question_chunk_count": 0,
+                "answer_count": 0,
+                "explanation_count": 0,
+                "image_count": 0,
+                "split_mode": "按段落切分",
+                "count_mismatch": False,
+                "count_mismatch_kind": "aligned",
+            },
+        )
+        metadata = row.metadata_json or {}
+        summary["chunk_total"] = int(summary["chunk_total"]) + 1
+        summary["image_count"] = int(summary["image_count"]) + int(
+            metadata.get("image_count") or 0
+        )
+        if _question_row_matches(row):
+            summary["question_chunk_count"] = int(summary["question_chunk_count"]) + 1
+            if str(metadata.get("answer_text") or "").strip():
+                summary["answer_count"] = int(summary["answer_count"]) + 1
+            if str(metadata.get("explanation_text") or "").strip():
+                summary["explanation_count"] = int(summary["explanation_count"]) + 1
+
+    for summary in summaries.values():
+        question_count = int(summary["question_chunk_count"])
+        answer_count = int(summary["answer_count"])
+        explanation_count = int(summary["explanation_count"])
+        summary["split_mode"] = (
+            "按题目拆分" if question_count else "按段落切分"
+        )
+        mismatch = bool(
+            question_count and (question_count != answer_count or question_count != explanation_count)
+        )
+        summary["count_mismatch"] = mismatch
+        if not mismatch:
+            summary["count_mismatch_kind"] = "aligned"
+        elif answer_count < question_count and explanation_count == question_count:
+            summary["count_mismatch_kind"] = "missing_answer_only"
+        elif explanation_count < question_count and answer_count == question_count:
+            summary["count_mismatch_kind"] = "missing_explanation_only"
+        else:
+            summary["count_mismatch_kind"] = "mixed"
+    return summaries
 
 
 def _rank_suggestions(
@@ -699,6 +785,7 @@ def list_documents(
         documents = db.scalars(
             select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())
         ).all()
+        synced_documents = [_sync_document_state(item, db) for item in documents]
         active_ids = {
             item
             for item in db.scalars(
@@ -707,11 +794,16 @@ def list_documents(
                 .distinct()
             ).all()
         }
+        chunk_summaries = _chunk_summaries_for_documents(
+            db, [item.id for item in synced_documents]
+        )
         return [
             _document_read(
-                _sync_document_state(item, db), has_active_task=item.id in active_ids
+                item,
+                has_active_task=item.id in active_ids,
+                chunk_summary=chunk_summaries.get(item.id),
             )
-            for item in documents
+            for item in synced_documents
         ]
 
     page = page or 1
@@ -808,9 +900,16 @@ def list_documents(
                 .distinct()
             ).all()
         }
+    chunk_summaries = _chunk_summaries_for_documents(
+        db, [item.id for item in synced_rows]
+    )
     return PaginatedKnowledgeDocumentRead(
         items=[
-            _document_read(item, has_active_task=item.id in active_ids)
+            _document_read(
+                item,
+                has_active_task=item.id in active_ids,
+                chunk_summary=chunk_summaries.get(item.id),
+            )
             for item in synced_rows
         ],
         page=page,
@@ -939,7 +1038,12 @@ def get_document(
             .limit(1)
         )
     )
-    return _document_read(document, has_active_task=has_active_task)
+    chunk_summaries = _chunk_summaries_for_documents(db, [document.id])
+    return _document_read(
+        document,
+        has_active_task=has_active_task,
+        chunk_summary=chunk_summaries.get(document.id),
+    )
 
 
 @router.post(

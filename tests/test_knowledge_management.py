@@ -1098,6 +1098,74 @@ def test_reingest_document_resolves_backup_backed_relative_source_path(tmp_path,
         session.close()
 
 
+def test_list_documents_includes_live_chunk_counts_and_mismatch_flags():
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="data/document_backups/exercise/物理/0001__questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=12,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+            resource_type="exercise",
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add_all(
+            [
+                KnowledgeChunk(
+                    document_id=document.id,
+                    subject=document.subject,
+                    chunk_index=0,
+                    content="第1题\n\n题目：题干\n\n答案：A\n\n解析：解析",
+                    metadata_json={
+                        "chunk_kind": "question_item",
+                        "question_number": "1",
+                        "answer_text": "A",
+                        "explanation_text": "解析",
+                        "image_count": 1,
+                    },
+                ),
+                KnowledgeChunk(
+                    document_id=document.id,
+                    subject=document.subject,
+                    chunk_index=1,
+                    content="第2题\n\n题目：题干2\n\n答案：B",
+                    metadata_json={
+                        "chunk_kind": "question_item",
+                        "question_number": "2",
+                        "answer_text": "B",
+                    },
+                ),
+            ]
+        )
+        session.commit()
+
+        result = knowledge_router.list_documents(
+            db=session,
+            current_user=teacher,
+            page=1,
+            page_size=20,
+        )
+
+        assert result.items[0].chunk_total == 2
+        assert result.items[0].question_chunk_count == 2
+        assert result.items[0].answer_count == 2
+        assert result.items[0].explanation_count == 1
+        assert result.items[0].image_count == 1
+        assert result.items[0].split_mode == "按题目拆分"
+        assert result.items[0].count_mismatch is True
+        assert result.items[0].count_mismatch_kind == "missing_explanation_only"
+    finally:
+        session.close()
+
+
 def test_list_document_chunks_returns_question_metadata():
     session_local = build_session()
     session = session_local()

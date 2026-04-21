@@ -160,6 +160,14 @@ class KnowledgeDocumentRead(BaseModel):
     has_active_task: bool = False
     error_message: str | None
     created_at: datetime
+    chunk_total: int = 0
+    question_chunk_count: int = 0
+    answer_count: int = 0
+    explanation_count: int = 0
+    image_count: int = 0
+    split_mode: str = "按段落切分"
+    count_mismatch: bool = False
+    count_mismatch_kind: str = "aligned"
 
 
 class KnowledgeDocumentUpdate(BaseModel):
@@ -179,6 +187,11 @@ class KnowledgeDocumentBulkUpdate(BaseModel):
     section: str | None = Field(default=None, max_length=255)
     difficulty: DifficultyLevel | None = None
     tags: list[str] | None = Field(default=None, max_length=20)
+
+
+class KnowledgeStructureOptionRead(BaseModel):
+    chapter: str
+    sections: list[str] = Field(default_factory=list)
 
 
 class KnowledgeAssetRead(BaseModel):

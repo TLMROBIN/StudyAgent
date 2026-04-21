@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile, UploadFiles, UploadInstance, UploadUserFile } from 'element-plus'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
@@ -24,6 +24,14 @@ interface KnowledgeDoc {
   has_active_task: boolean
   error_message?: string | null
   created_at: string
+  chunk_total: number
+  question_chunk_count: number
+  answer_count: number
+  explanation_count: number
+  image_count: number
+  split_mode: string
+  count_mismatch: boolean
+  count_mismatch_kind: string
 }
 
 interface ImportTask {
@@ -73,6 +81,11 @@ interface PaginatedQuestionResponse {
 
 interface SuggestionItem {
   value: string
+}
+
+interface KnowledgeStructureOption {
+  chapter: string
+  sections: string[]
 }
 
 interface KnowledgeChunk {
@@ -247,6 +260,9 @@ const questionPage = ref(1)
 const uploading = ref(false)
 const uploadRef = ref<UploadInstance | null>(null)
 const selectedUploadFiles = ref<UploadUserFile[]>([])
+const uploadStructureLoading = ref(false)
+const uploadStructureOptions = ref<KnowledgeStructureOption[]>([])
+const reingestingDocumentIds = ref<number[]>([])
 const deletingTaskIds = ref<number[]>([])
 const deletingDocumentIds = ref<number[]>([])
 const uploadTagDraft = ref('')
@@ -278,6 +294,11 @@ const uploadAccept = computed(() => (
     ? '.docx'
     : '.pdf,.docx,.txt,.md,.tex'
 ))
+const uploadChapterOptions = computed(() => uploadStructureOptions.value.map((item) => item.chapter))
+const uploadSelectedChapterOption = computed(() => (
+  uploadStructureOptions.value.find((item) => item.chapter === uploadForm.chapter) || null
+))
+const uploadSectionOptions = computed(() => uploadSelectedChapterOption.value?.sections || [])
 const editSupportsDifficulty = computed(() => questionResourceTypes.has(editForm.resource_type))
 const editSupportsChapter = computed(() => editForm.resource_type !== 'extension')
 const batchResourceTypeSupportsDifficulty = computed(() => questionResourceTypes.has(batchForm.resource_type))
@@ -318,11 +339,17 @@ const previewSummary = computed(() => {
   return chunkSummaryCache[previewDocumentId.value] || null
 })
 const latestTaskChunkSummary = computed(() => {
+  const latestDocument = documents.value.find((item) => item.id === latestTask.value?.document_id)
+  if (latestDocument && latestDocument.status === 'completed') {
+    return buildStoredChunkSummary(latestDocument)
+  }
   if (!latestTask.value || latestTask.value.status !== 'completed') {
     return null
   }
   return chunkSummaryCache[latestTask.value.document_id] || null
 })
+
+const autoResliceTriggeredIds = new Set<number>()
 
 function isActiveStatus(status: string) {
   return ['pending', 'processing'].includes(status)
@@ -504,6 +531,23 @@ function uploadErrorMessage(error: unknown) {
   return '上传失败'
 }
 
+function escapeHtml(value: string) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function failureListHtml(failures: string[]) {
+  return [
+    '<div style="white-space: pre-wrap; line-height: 1.6; max-height: 360px; overflow: auto;">',
+    escapeHtml(failures.join('\n')),
+    '</div>',
+  ].join('')
+}
+
 function chunkKindLabel(value?: string | null) {
   if (value === 'question_item') {
     return '题目片段'
@@ -563,6 +607,36 @@ function buildChunkSummary(document: KnowledgeDoc | null, chunks: KnowledgeChunk
   }
 }
 
+function buildStoredChunkSummary(document: KnowledgeDoc | null): ChunkPreviewSummary | null {
+  if (!document) {
+    return null
+  }
+  const splitMode = document.split_mode || (document.question_chunk_count ? '按题目拆分' : '按段落切分')
+  const warnings: string[] = []
+  if (document.count_mismatch) {
+    if (document.count_mismatch_kind === 'missing_answer_only') {
+      warnings.push('这份资料存在“有解析但无独立答案”的题型，当前不会自动重新切片。')
+    } else if (documentHasActiveTask(document.id)) {
+      warnings.push('检测到切片计数不一致，已在重新切片或等待任务完成。')
+    } else {
+      warnings.push('检测到切片计数不一致，建议重新切片后再查看。')
+    }
+  }
+  return {
+    totalChunks: document.chunk_total || 0,
+    questionChunks: document.question_chunk_count || 0,
+    answerCount: document.answer_count || 0,
+    explanationCount: document.explanation_count || 0,
+    imageCount: document.image_count || 0,
+    chapterCount: document.chapter ? 1 : 0,
+    sectionCount: document.section ? 1 : 0,
+    chapters: document.chapter ? [document.chapter] : [],
+    sections: document.section ? [document.section] : [],
+    splitMode,
+    warnings,
+  }
+}
+
 function cacheChunkPreview(documentId: number, chunks: KnowledgeChunk[]) {
   chunkCache[documentId] = chunks
   const document = documents.value.find((item) => item.id === documentId) || null
@@ -597,6 +671,51 @@ async function ensureLatestTaskSummary(task: ImportTask | null) {
   } catch (error) {
     console.error(error)
   }
+}
+
+async function triggerAutoResliceForMismatches(list: KnowledgeDoc[]) {
+  for (const document of list) {
+    if (!questionResourceTypes.has(document.resource_type)) {
+      continue
+    }
+    if (document.status !== 'completed' || document.has_active_task) {
+      continue
+    }
+    if (!document.count_mismatch || document.count_mismatch_kind === 'missing_answer_only') {
+      continue
+    }
+    if (autoResliceTriggeredIds.has(document.id)) {
+      continue
+    }
+    autoResliceTriggeredIds.add(document.id)
+    markBusy(reingestingDocumentIds, document.id)
+    try {
+      const response = await api.post<ImportTask>(`/knowledge/documents/${document.id}/reingest`)
+      latestTask.value = response.data
+      startPolling()
+    } catch (error) {
+      console.error(error)
+    } finally {
+      clearBusy(reingestingDocumentIds, document.id)
+    }
+  }
+}
+
+function taskStatusDisplay(task: ImportTask) {
+  const document = documents.value.find((item) => item.id === task.document_id)
+  if (document?.status === 'completed') {
+    const summary = buildStoredChunkSummary(document)
+    if (summary) {
+      const parts = [`${summary.splitMode}`, `片段 ${summary.totalChunks}`]
+      if (summary.questionChunks) {
+        parts.push(`题目 ${summary.questionChunks}`)
+        parts.push(`答案 ${summary.answerCount}`)
+        parts.push(`解析 ${summary.explanationCount}`)
+      }
+      return parts.join('；')
+    }
+  }
+  return friendlyImportMessage(task.status_message)
 }
 
 async function fetchDocumentById(documentId: number) {
@@ -718,17 +837,42 @@ async function fetchMetadataSuggestions(
   }
 }
 
-function fetchUploadChapterSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
-  void fetchMetadataSuggestions('chapter', queryString, callback, uploadForm.subject)
-}
-
-function fetchUploadSectionSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
-  void fetchMetadataSuggestions('section', queryString, callback, uploadForm.subject)
-}
-
 function fetchUploadTagSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
   uploadTagDraft.value = queryString
   void fetchMetadataSuggestions('tag', currentTagFragment(queryString), callback, uploadForm.subject)
+}
+
+async function loadUploadStructureOptions() {
+  if (!uploadSupportsChapter.value || !uploadForm.subject.trim()) {
+    uploadStructureOptions.value = []
+    return
+  }
+
+  uploadStructureLoading.value = true
+  try {
+    const { data } = await api.get<KnowledgeStructureOption[]>('/knowledge/textbook-structure-options', {
+      params: {
+        subject: uploadForm.subject,
+      },
+    })
+    uploadStructureOptions.value = data
+    if (!data.some((item) => item.chapter === uploadForm.chapter)) {
+      uploadForm.chapter = ''
+      uploadForm.section = ''
+      return
+    }
+    const selectedChapter = data.find((item) => item.chapter === uploadForm.chapter)
+    if (uploadForm.section && !selectedChapter?.sections.includes(uploadForm.section)) {
+      uploadForm.section = ''
+    }
+  } catch (error) {
+    console.error(error)
+    uploadStructureOptions.value = []
+    uploadForm.chapter = ''
+    uploadForm.section = ''
+  } finally {
+    uploadStructureLoading.value = false
+  }
 }
 
 function fetchFilterChapterSuggestions(queryString: string, callback: (items: SuggestionItem[]) => void) {
@@ -890,6 +1034,7 @@ async function loadDocuments() {
   documents.value = data.items
   documentTotal.value = data.total
   documentSummary.value = data.summary
+  await triggerAutoResliceForMismatches(data.items)
 }
 
 async function loadQuestions() {
@@ -1069,6 +1214,10 @@ async function submitSelectedUploads() {
       return
     }
     ElMessage.warning(`成功 ${uploadedCount} 个，失败 ${failures.length} 个`)
+    await ElMessageBox.alert(failureListHtml(failures), '上传失败列表', {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '知道了',
+    })
   } finally {
     uploading.value = false
   }
@@ -1249,6 +1398,30 @@ async function deleteDocuments(documentIds: number[]) {
   return { deletedCount, failures }
 }
 
+async function reingestDocument(document: KnowledgeDoc) {
+  if (documentHasActiveTask(document.id)) {
+    ElMessage.error('资料仍在导入中，请稍后再试')
+    return
+  }
+  if (!window.confirm(`确认基于原文件重新切片“${document.filename}”？现有切片会在新任务写入时被替换。`)) {
+    return
+  }
+
+  markBusy(reingestingDocumentIds, document.id)
+  try {
+    const response = await api.post<ImportTask>(`/knowledge/documents/${document.id}/reingest`)
+    latestTask.value = response.data
+    await refreshData(true)
+    startPolling()
+    ElMessage.success('已创建重新切片任务')
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(extractApiErrorDetail(error) || '重新切片失败')
+  } finally {
+    clearBusy(reingestingDocumentIds, document.id)
+  }
+}
+
 async function deleteDocument(document: KnowledgeDoc) {
   if (documentHasActiveTask(document.id)) {
     ElMessage.error('资料仍在导入中，请先取消任务')
@@ -1358,6 +1531,27 @@ watch(
     void ensureLatestTaskSummary(latestTask.value)
   },
   { immediate: true },
+)
+
+watch(
+  [
+    () => uploadForm.subject,
+    () => uploadForm.resource_type,
+  ],
+  () => {
+    sanitizeUploadMetadata()
+    void loadUploadStructureOptions()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => uploadForm.chapter,
+  () => {
+    if (!uploadSectionOptions.value.includes(uploadForm.section)) {
+      uploadForm.section = ''
+    }
+  },
 )
 
 watch(taskStatusFilter, () => {
@@ -1489,20 +1683,27 @@ onBeforeUnmount(() => {
         >
           <el-option v-for="item in difficultyOptions" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
-        <el-autocomplete
+        <el-select
           v-if="uploadSupportsChapter"
           v-model="uploadForm.chapter"
-          :fetch-suggestions="fetchUploadChapterSuggestions"
-          :trigger-on-focus="false"
-          placeholder="章节，例如：第二章 机械运动"
-        />
-        <el-autocomplete
+          clearable
+          filterable
+          :loading="uploadStructureLoading"
+          placeholder="选择章节"
+        >
+          <el-option v-for="item in uploadChapterOptions" :key="item" :label="item" :value="item" />
+        </el-select>
+        <el-select
           v-if="uploadSupportsChapter"
           v-model="uploadForm.section"
-          :fetch-suggestions="fetchUploadSectionSuggestions"
-          :trigger-on-focus="false"
-          placeholder="小节，例如：2.1 匀变速直线运动"
-        />
+          clearable
+          filterable
+          :loading="uploadStructureLoading"
+          :disabled="!uploadForm.chapter || !uploadSectionOptions.length"
+          placeholder="选择小节"
+        >
+          <el-option v-for="item in uploadSectionOptions" :key="item" :label="item" :value="item" />
+        </el-select>
         <el-autocomplete
           v-model="uploadForm.tags"
           :fetch-suggestions="fetchUploadTagSuggestions"
@@ -1544,7 +1745,7 @@ onBeforeUnmount(() => {
           <span>{{ latestTask.document_filename || `文档 #${latestTask.document_id}` }}</span>
         </div>
         <el-progress :percentage="latestTask.progress" :status="progressStatus(latestTask.status)" />
-        <p>{{ friendlyImportMessage(latestTask.status_message) }}</p>
+        <p>{{ taskStatusDisplay(latestTask) }}</p>
         <div v-if="latestTaskChunkSummary" class="detail-chip-group">
           <span class="detail-chip">{{ latestTaskChunkSummary.splitMode }}</span>
           <span class="detail-chip">片段 {{ latestTaskChunkSummary.totalChunks }}</span>
@@ -1610,7 +1811,7 @@ onBeforeUnmount(() => {
           <div class="task-main">
             <strong>{{ item.document_filename || `文档 #${item.document_id}` }}</strong>
             <span>{{ item.document_subject || '-' }} · {{ statusLabel(item.status) }}</span>
-            <span>{{ friendlyImportMessage(item.status_message) }}</span>
+            <span>{{ taskStatusDisplay(item) }}</span>
             <span>更新时间 {{ formatDateTime(item.updated_at) }}</span>
           </div>
           <div class="task-side task-side--stack">
@@ -1769,11 +1970,24 @@ onBeforeUnmount(() => {
             <div class="detail-chip-group">
               <span class="detail-chip">{{ formatFileSize(item.size_bytes) }}</span>
               <span class="detail-chip">{{ statusLabel(item.status) }}</span>
+              <span v-if="item.chunk_total" class="detail-chip">片段 {{ item.chunk_total }}</span>
+              <span v-if="item.question_chunk_count" class="detail-chip">题目 {{ item.question_chunk_count }}</span>
+              <span v-if="item.question_chunk_count" class="detail-chip">答案 {{ item.answer_count }}</span>
+              <span v-if="item.question_chunk_count" class="detail-chip">解析 {{ item.explanation_count }}</span>
               <span v-if="item.grade" class="detail-chip">{{ gradeLabel(item.grade) }}</span>
               <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
               <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
               <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>
               <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="detail-chip">#{{ tag }}</span>
+              <span v-if="item.count_mismatch" class="detail-chip detail-chip--warning">
+                {{
+                  item.count_mismatch_kind === 'missing_answer_only'
+                    ? '源文件缺独立答案'
+                    : (documentHasActiveTask(item.id) || reingestingDocumentIds.includes(item.id))
+                        ? '计数不一致，已自动重新切片'
+                        : '计数不一致'
+                }}
+              </span>
             </div>
             <div class="row-actions">
               <button
@@ -1789,6 +2003,19 @@ onBeforeUnmount(() => {
                 @click="openChunkPreview(item)"
               >
                 查看切分
+              </button>
+              <button
+                class="ghost-button"
+                :disabled="documentHasActiveTask(item.id) || reingestingDocumentIds.includes(item.id)"
+                @click="reingestDocument(item)"
+              >
+                {{
+                  reingestingDocumentIds.includes(item.id)
+                    ? '重新切片中...'
+                    : documentHasActiveTask(item.id)
+                      ? '导入中'
+                      : '重新切片'
+                }}
               </button>
               <button
                 class="ghost-button"
