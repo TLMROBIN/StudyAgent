@@ -121,6 +121,7 @@ def configure_upload_router(
         CHROMADB_PATH=str(tmp_path / "chromadb"),
         TASK_ARTIFACT_PATH=str(tmp_path / "tasks"),
         UPLOAD_PATH=str(tmp_path / "uploads"),
+        DOCUMENT_BACKUP_PATH=str(tmp_path / "document_backups"),
     )
     settings.ensure_storage()
     monkeypatch.setattr(knowledge_router, "settings", settings)
@@ -233,6 +234,33 @@ def test_upload_document_accepts_supported_files_with_generic_or_missing_mime(
         assert upload_context["audit_details"][-1]["raw_mime"] == (content_type or "")
         assert upload_context["audit_details"][-1]["effective_mime"] == expected_mime_type
         assert result.document_id == document.id
+    finally:
+        session.close()
+
+
+def test_upload_document_moves_source_into_backup_storage_and_persists_backup_path(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        upload = FakeUploadFile(
+            filename="notes.txt",
+            payload="牛顿第二定律".encode("utf-8"),
+            content_type="text/plain",
+        )
+
+        run_upload(session, teacher, upload, subject="物理")
+
+        document = session.scalar(
+            select(KnowledgeDocument).where(KnowledgeDocument.filename == "notes.txt")
+        )
+        assert document is not None
+        backup_path = Path(document.file_path)
+        assert backup_path.is_file()
+        assert backup_path.parent == tmp_path / "document_backups" / "knowledge-note" / "物理"
+        assert backup_path.read_text(encoding="utf-8") == "牛顿第二定律"
+        assert list((tmp_path / "uploads").iterdir()) == []
     finally:
         session.close()
 
@@ -1909,5 +1937,118 @@ def test_delete_document_rejects_when_active_task_exists(tmp_path, monkeypatch):
         assert exc_info.value.status_code == 409
         assert source_file.exists()
         assert session.get(KnowledgeDocument, document.id) is not None
+    finally:
+        session.close()
+
+
+def test_reingest_document_creates_new_task_without_reupload(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        teacher = create_teacher(session)
+        source_file = tmp_path / "reingest.docx"
+        source_file.write_text("重新切片测试", encoding="utf-8")
+
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="reingest.docx",
+            file_path=str(source_file),
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=source_file.stat().st_size,
+            status=DocumentStatus.COMPLETED,
+            resource_type="exercise",
+            chapter="第八章 机械能守恒定律",
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add(
+            ImportTask(
+                document_id=document.id,
+                status=DocumentStatus.COMPLETED,
+                progress=100,
+                error_message="导入完成",
+            )
+        )
+        session.commit()
+
+        dispatched: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            knowledge_router,
+            "dispatch_import_task",
+            lambda db, document, task, background_tasks=None: dispatched.append((document.id, task.id)),
+        )
+
+        result = knowledge_router.reingest_document(
+            document.id,
+            db=session,
+            current_user=teacher,
+            request=build_request(),
+        )
+
+        tasks = session.scalars(
+            select(ImportTask)
+            .where(ImportTask.document_id == document.id)
+            .order_by(ImportTask.id.asc())
+        ).all()
+
+        assert result.document_id == document.id
+        assert result.status == DocumentStatus.PENDING
+        assert len(tasks) == 2
+        assert tasks[-1].id == result.id
+        assert tasks[-1].progress == 0
+        assert dispatched == [(document.id, result.id)]
+        refreshed_document = session.get(KnowledgeDocument, document.id)
+        assert refreshed_document is not None
+        assert refreshed_document.status == DocumentStatus.PENDING
+    finally:
+        session.close()
+
+
+def test_reingest_document_rejects_when_active_task_exists(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        monkeypatch.setattr(knowledge_router, "rag_service", FakeRagService())
+        teacher = create_teacher(session)
+        source_file = tmp_path / "active-reingest.docx"
+        source_file.write_text("进行中的重新切片", encoding="utf-8")
+
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="active-reingest.docx",
+            file_path=str(source_file),
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=source_file.stat().st_size,
+            status=DocumentStatus.PROCESSING,
+            resource_type="exercise",
+            created_by=teacher.id,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        session.add(
+            ImportTask(
+                document_id=document.id,
+                status=DocumentStatus.PROCESSING,
+                progress=20,
+                error_message="处理中",
+            )
+        )
+        session.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            knowledge_router.reingest_document(
+                document.id,
+                db=session,
+                current_user=teacher,
+                request=build_request(),
+            )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "Document has active import task"
     finally:
         session.close()

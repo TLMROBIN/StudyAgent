@@ -33,6 +33,7 @@ from backend.models.schemas import (
     KnowledgeChunkRead,
     KnowledgeDocumentBulkUpdate,
     KnowledgeDocumentRead,
+    KnowledgeStructureOptionRead,
     KnowledgeDocumentUpdate,
     KnowledgeQuestionRead,
     KnowledgeQuestionUpdate,
@@ -43,6 +44,7 @@ from backend.models.schemas import (
 )
 from backend.services.audit_service import audit_service
 from backend.services.auto_tag_service import auto_tag_service
+from backend.services.document_backup_service import DocumentBackupService
 from backend.services.rag_service import UnsupportedQuestionDocxError, rag_service
 from backend.tasks.celery_app import celery_app
 from backend.tasks.ingest import (
@@ -836,6 +838,19 @@ def list_metadata_suggestions(
     )
 
 
+@router.get("/textbook-structure-options", response_model=list[KnowledgeStructureOptionRead])
+def list_textbook_structure_options(
+    subject: str,
+    db: DbSession,
+    current_user: CurrentTeacher,
+) -> list[KnowledgeStructureOptionRead]:
+    del current_user
+    return [
+        KnowledgeStructureOptionRead.model_validate(item)
+        for item in auto_tag_service.list_textbook_structure_options(db, subject)
+    ]
+
+
 @router.get("/questions", response_model=PaginatedKnowledgeQuestionRead)
 def list_questions(
     db: DbSession,
@@ -925,6 +940,78 @@ def get_document(
         )
     )
     return _document_read(document, has_active_task=has_active_task)
+
+
+@router.post(
+    "/documents/{document_id}/reingest",
+    response_model=ImportTaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reingest_document(
+    document_id: int,
+    db: DbSession,
+    current_user: CurrentTeacher,
+    request: Request,
+) -> ImportTaskRead:
+    document = db.get(KnowledgeDocument, document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        )
+
+    related_tasks = [sync_task_state(task, db) for task in list(document.tasks)]
+    active_tasks = [
+        task for task in related_tasks if task.status in ACTIVE_TASK_STATUSES
+    ]
+    if active_tasks:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document has active import task",
+        )
+
+    source_path = Path(document.file_path)
+    if not source_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source file not found",
+        )
+
+    document.status = DocumentStatus.PENDING
+    document.error_message = None
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    task = ImportTask(
+        document_id=document.id,
+        status=DocumentStatus.PENDING,
+        progress=0,
+        error_message="任务已创建，等待重新切片",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    dispatch_import_task(db, document, task)
+    db.refresh(task)
+    db.refresh(document)
+
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="reingest_knowledge_document",
+        target_type="knowledge_document",
+        target_id=str(document.id),
+        result="accepted",
+        ip_address=request.client.host if request.client else None,
+        detail={
+            "filename": document.filename,
+            "subject": document.subject,
+            "resource_type": document.resource_type,
+            "task_id": task.id,
+        },
+    )
+    return ImportTaskRead.model_validate(task)
 
 
 def _rebuild_question_metadata(
@@ -1219,6 +1306,22 @@ async def upload_document(
             subject=subject,
             existing_tags=document.tags,
         )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    try:
+        backup_path = DocumentBackupService(settings).persist_uploaded_file(
+            target_path, document
+        )
+    except OSError as exc:
+        db.delete(document)
+        db.commit()
+        target_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to persist document backup: {exc}",
+        ) from exc
+    document.file_path = str(backup_path)
     db.add(document)
     db.commit()
     db.refresh(document)

@@ -2833,6 +2833,37 @@ def test_prepare_question_chunks_keeps_wrapped_subquestions_in_same_question(tmp
     assert prepared[1].metadata["question_number"] == "2"
 
 
+def test_prepare_question_chunks_does_not_false_split_ratio_like_1_to_2(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=21,
+        subject="物理",
+        filename="ratio-inline.docx",
+        file_path=str(tmp_path / "ratio-inline.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1. 两物体速度之比为1：2，求位移之比。",
+                "【答案】1：2",
+                "2. 下一题。",
+                "【答案】A",
+            ]
+        ),
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].metadata["question_number"] == "1"
+    assert "速度之比为1：2" in prepared[0].metadata["question_text"]
+    assert prepared[0].metadata["answer_text"] == "1：2"
+    assert prepared[1].metadata["question_number"] == "2"
+
+
 def test_prepare_question_chunks_drops_question_category_heading_between_questions(tmp_path):
     rag_service = build_rag_service(tmp_path)
     document = KnowledgeDocument(
@@ -2864,6 +2895,242 @@ def test_prepare_question_chunks_drops_question_category_heading_between_questio
     assert "三、解答题" not in prepared[0].content
     assert prepared[0].metadata["question_number"] == "20"
     assert prepared[1].metadata["question_number"] == "21"
+
+
+def test_prepare_question_chunks_merges_repeated_numbered_answer_bank_at_document_end(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=20,
+        subject="物理",
+        filename="end-answer-bank.docx",
+        file_path=str(tmp_path / "end-answer-bank.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1. 如图所示斜面受力分析，求加速度。",
+                "2. 已知v-t图像，求位移。",
+                "1. A",
+                "解析：由牛顿第二定律可得。",
+                "2. 位移等于图像与坐标轴围成的面积。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].metadata["question_number"] == "1"
+    assert prepared[0].metadata["question_text"] == "如图所示斜面受力分析，求加速度。"
+    assert prepared[0].metadata["answer_text"] == "A"
+    assert prepared[0].metadata["explanation_text"] == "由牛顿第二定律可得。"
+    assert prepared[1].metadata["question_number"] == "2"
+    assert prepared[1].metadata["question_text"] == "已知v-t图像，求位移。"
+    assert prepared[1].metadata["answer_text"] == "位移等于图像与坐标轴围成的面积。"
+
+
+def test_prepare_question_chunks_parses_inline_numbered_answer_bank_with_section_markers(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=23,
+        subject="物理",
+        filename="inline-numbered-answer-bank.docx",
+        file_path=str(tmp_path / "inline-numbered-answer-bank.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "16. 运动具有_____性。",
+                "17. 参考系的选取具有_____性。",
+                "【答案】16．相对 17．任意",
+                "【解析】16．描述运动总是相对于其他物体。 17．参考系可以按观察方便任意选取。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].metadata["question_number"] == "16"
+    assert prepared[0].metadata["answer_text"] == "相对"
+    assert "描述运动总是相对于其他物体" in (prepared[0].metadata["explanation_text"] or "")
+    assert prepared[1].metadata["question_number"] == "17"
+    assert prepared[1].metadata["answer_text"] == "任意"
+    assert "参考系可以按观察方便任意选取" in (prepared[1].metadata["explanation_text"] or "")
+
+
+def test_prepare_question_chunks_keeps_multiline_explanation_entries_bound_to_numbered_fillins(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=24,
+        subject="物理",
+        filename="multiline-fillin-answer-bank.docx",
+        file_path=str(tmp_path / "multiline-fillin-answer-bank.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "16. 运动与静止",
+                "（1）自然界的一切物体都处于永恒的_____中，运动是_____的。",
+                "（2）描述某个物体的位置随时间的变化，总是相对于其他物体而言的，这便是运动的_____性。",
+                "17. 参考系的选择是_____（填“任意”或“唯一”）的。",
+                "【答案】16．运动 绝对 相对 17．任意",
+                "【解析】16．[1][2]自然界的一切物体都处于永恒的运动中，运动是绝对的。",
+                "[3]描述某个物体的位置随时间的变化，总是相对于其他物体而言的，这便是运动的相对性。",
+                "17．为了方便描述运动，根据不同的情况，可以选择不同的参考系，所以参考系的选择是任意的。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].metadata["question_number"] == "16"
+    assert prepared[0].metadata["answer_text"] == "运动 绝对 相对"
+    assert "[1][2]自然界的一切物体都处于永恒的运动中" in (prepared[0].metadata["explanation_text"] or "")
+    assert "[3]描述某个物体的位置随时间的变化" in (prepared[0].metadata["explanation_text"] or "")
+    assert prepared[1].metadata["question_number"] == "17"
+    assert prepared[1].metadata["answer_text"] == "任意"
+    assert "参考系的选择是任意的" in (prepared[1].metadata["explanation_text"] or "")
+
+
+def test_prepare_question_chunks_does_not_false_split_wrapped_explanation_items_between_questions(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=25,
+        subject="物理",
+        filename="wrapped-explanation-items.docx",
+        file_path=str(tmp_path / "wrapped-explanation-items.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "20. 判断下列说法的正误。",
+                "（1）时刻表示时间极短。(    )",
+                "（2）在时间轴上，时刻用点表示。(    )",
+                "【答案】（1）错误 （2）正确",
+                "【详解】（1）时刻表示的是某一瞬间，故错误。",
+                "（2）在时间轴上时刻用点表示，故正确。",
+                "21. 下一题题干。",
+                "【答案】A",
+                "【详解】下一题解析。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert [chunk.metadata["question_number"] for chunk in prepared] == ["20", "21"]
+    assert "（1）错误" in (prepared[0].metadata["answer_text"] or "")
+    assert "（2）在时间轴上时刻用点表示" in (prepared[0].metadata["explanation_text"] or "")
+    assert prepared[1].metadata["answer_text"] == "A"
+    assert prepared[1].metadata["explanation_text"] == "下一题解析。"
+
+
+def test_prepare_question_chunks_ignores_exam_cover_block_before_real_questions(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=26,
+        subject="物理",
+        filename="exam-cover.docx",
+        file_path=str(tmp_path / "exam-cover.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "8.5. 实验：验证机械能守恒定律",
+                "学校:___________姓名:___________班级:___________考号:___________",
+                "一、实验题",
+                "1. 某实验装置如图所示。",
+                "【答案】A",
+                "【详解】由机械能守恒分析可得。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 1
+    assert prepared[0].metadata["question_number"] == "1"
+    assert prepared[0].metadata["answer_text"] == "A"
+    assert prepared[0].metadata["explanation_text"] == "由机械能守恒分析可得。"
+
+
+def test_prepare_question_chunks_groups_multi_question_blocks_with_shared_answer_sections(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=22,
+        subject="物理",
+        filename="grouped-question-blocks.docx",
+        file_path=str(tmp_path / "grouped-question-blocks.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "21. 第一组第1题。",
+                "22. 第一组第2题。",
+                "23. 第一组第3题。",
+                "24. 第一组第4题。",
+                "参考答案",
+                "21. A 22. B 23. AB 24. C",
+                "解析：",
+                "21. 第一组解析一。",
+                "22. 第一组解析二。",
+                "23. 第一组解析三。",
+                "24. 第一组解析四。",
+                "25. 第二组第1题。",
+                "26. 第二组第2题。",
+                "27. 第二组第3题。",
+                "28. 第二组第4题。",
+                "29. 第二组第5题。",
+                "参考答案",
+                "25. D 26. C 27. A 28. B 29. ABC",
+                "解析：",
+                "25. 第二组解析一。",
+                "26. 第二组解析二。",
+                "27. 第二组解析三。",
+                "28. 第二组解析四。",
+                "29. 第二组解析五。",
+            ]
+        ),
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].metadata["question_number"] == "21-24"
+    assert "21. 第一组第1题。" in prepared[0].metadata["question_text"]
+    assert "24. 第一组第4题。" in prepared[0].metadata["question_text"]
+    assert "21. A 22. B 23. AB 24. C" in (prepared[0].metadata["answer_text"] or "")
+    assert "21. 第一组解析一。" in (prepared[0].metadata["explanation_text"] or "")
+    assert prepared[1].metadata["question_number"] == "25-29"
+    assert "25. 第二组第1题。" in prepared[1].metadata["question_text"]
+    assert "29. 第二组第5题。" in prepared[1].metadata["question_text"]
+    assert "25. D 26. C 27. A 28. B 29. ABC" in (prepared[1].metadata["answer_text"] or "")
+    assert "29. 第二组解析五。" in (prepared[1].metadata["explanation_text"] or "")
 
 
 def test_vector_store_metadata_whitelists_structure_retrieval_fields(tmp_path):

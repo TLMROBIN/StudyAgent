@@ -153,13 +153,21 @@ OMML_ACCENT_MAP = {
     "̃": r"\tilde",
 }
 QUESTION_START_PATTERN = re.compile(
-    r"^\s*(?:第\s*(?P<ordinal>\d+)\s*题|(?P<plain>\d{1,3})\s*[.．、:：)]|[（(](?P<wrapped>\d{1,3})[)）])\s*(?P<body>.*)$"
+    r"^\s*(?:"
+    r"第\s*(?P<ordinal>\d+)\s*题"
+    r"|(?P<plain>\d{1,3})(?:\s*[.．、)]|\s*[:：](?!\s*\d))"
+    r"|[（(](?P<wrapped>\d{1,3})[)）]"
+    r")\s*(?P<body>.*)$"
 )
 QUESTION_SECTION_HEADING_PATTERN = re.compile(
     r"^\s*(?:【)?(?:参考)?(?:答案(?:与解析)?|答案及解析|解答|参考解答|参考解析|解析|详解)(?:】)?\s*$"
 )
 ANSWER_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:参考)?答案(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
 EXPLANATION_LINE_PATTERN = re.compile(r"^\s*(?:【)?(?:解析|详解|解答|思路(?:点拨)?|点拨|说明|分析|点睛)(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
+INLINE_EXPLANATION_SEGMENT_PATTERN = re.compile(
+    r"^(?P<answer>.+?)\s+(?P<explanation>(?:【)?(?:解析|详解|解答|思路(?:点拨)?|点拨|说明|分析|点睛)(?:】)?\s*(?:[:：]\s*)?.+)$"
+)
+ANSWER_ONLY_TOKEN_PATTERN = re.compile(r"^(?:[A-H](?:\s*[、,，/]\s*[A-H]){0,7}|[√×]|正确|错误|对|错|T|F|\d+(?:\.\d+)?)$")
 DIFFICULTY_LINE_PATTERN = re.compile(r"^\s*(?:【)?难度(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
 KNOWLEDGE_POINTS_LINE_PATTERN = re.compile(r"^\s*(?:【)?知识点(?:】)?\s*(?:[:：]\s*)?(?P<body>.*)?$")
 QUESTION_CATEGORY_HEADING_PATTERN = re.compile(
@@ -1098,64 +1106,308 @@ class RagService:
         parser_provenance: dict[str, Any] | None = None,
     ) -> list[PreparedChunk]:
         normalized_text = self._normalize_question_source_text(text)
-        question_text, answer_bank = self._split_question_and_answer_sections(normalized_text or text)
-        question_blocks = self._parse_numbered_blocks(
-            question_text,
-            keep_wrapped_subquestions=True,
-        )
-        if not question_blocks:
-            return []
-
-        answer_lookup = self._parse_answer_bank(answer_bank or "")
         prepared_chunks: list[PreparedChunk] = []
-        for number, block_text in question_blocks:
-            question_body, local_answer, local_explanation = self._split_question_block_sections(block_text)
-            merged_answer = local_answer or answer_lookup.get(number, {}).get("answer_text")
-            merged_explanation = local_explanation or answer_lookup.get(number, {}).get("explanation_text")
-            combined_text = self._compose_question_chunk_text(
-                number=number,
-                question_text=question_body,
-                answer_text=merged_answer,
-                explanation_text=merged_explanation,
+        for question_text, answer_bank in self._split_question_groups(normalized_text or text):
+            question_blocks = self._parse_numbered_blocks(
+                question_text,
+                keep_wrapped_subquestions=True,
             )
-            finalized_text, asset_refs = self._finalize_chunk_text_and_assets(combined_text, asset_map)
-            if not finalized_text.strip():
+            question_blocks = [
+                (number, block_text)
+                for number, block_text in question_blocks
+                if not self._looks_like_exam_cover_block(block_text)
+            ]
+            if not question_blocks:
                 continue
-            clean_question_text, question_assets = self._finalize_chunk_text_and_assets(question_body, asset_map)
-            clean_answer_text, _ = self._finalize_chunk_text_and_assets(merged_answer or "", asset_map)
-            clean_explanation_text, _ = self._finalize_chunk_text_and_assets(merged_explanation or "", asset_map)
-            if question_assets and not asset_refs:
-                asset_refs = question_assets
-            readable_question_text = self._normalize_question_readability_layout(
-                clean_question_text or finalized_text
+
+            answer_lookup = self._parse_answer_bank(answer_bank or "")
+            question_blocks, repeated_answer_lookup = self._merge_repeated_answer_bank_blocks(
+                question_blocks
             )
-            readable_answer_text = self._format_compound_judgement_answers(
-                readable_question_text,
-                clean_answer_text or None,
-            )
-            finalized_text = self._compose_question_chunk_text(
-                number=number,
-                question_text=readable_question_text,
-                answer_text=readable_answer_text,
-                explanation_text=clean_explanation_text or None,
-            )
-            prepared_chunks.append(
-                self._build_question_bank_chunk(
+            single_group_answer: str | None = None
+            single_group_explanation: str | None = None
+            if len(question_blocks) == 1 and str(answer_bank or "").strip():
+                single_group_answer, single_group_explanation = self._split_grouped_answer_bank_sections(
+                    answer_bank or ""
+                )
+
+            if self._should_group_question_blocks(question_blocks, answer_lookup, answer_bank):
+                grouped_chunk = self._build_grouped_question_bank_chunk(
                     document,
-                    content=finalized_text,
-                    question_number=number,
-                    question_text=readable_question_text or finalized_text,
-                    answer_text=readable_answer_text,
-                    explanation_text=clean_explanation_text or None,
-                    asset_refs=asset_refs,
+                    question_text=question_text,
+                    answer_bank=answer_bank or "",
+                    question_blocks=question_blocks,
+                    asset_map=asset_map,
                     source_format=source_format,
-                    source_locator=f"question:{number}",
                     parser_backend=parser_backend,
                     parser_provenance=parser_provenance,
-                    raw_block_text=block_text,
                 )
-            )
+                if grouped_chunk is not None:
+                    prepared_chunks.append(grouped_chunk)
+                    continue
+
+            for number, block_text in question_blocks:
+                question_body, local_answer, local_explanation = self._split_question_block_sections(block_text)
+                raw_metadata_text = block_text
+                if len(question_blocks) == 1 and str(answer_bank or "").strip():
+                    raw_metadata_text = "\n".join(part for part in (block_text, answer_bank or "") if str(part).strip())
+                merged_answer = (
+                    local_answer
+                    or answer_lookup.get(number, {}).get("answer_text")
+                    or repeated_answer_lookup.get(number, {}).get("answer_text")
+                    or single_group_answer
+                )
+                merged_explanation = (
+                    local_explanation
+                    or answer_lookup.get(number, {}).get("explanation_text")
+                    or repeated_answer_lookup.get(number, {}).get("explanation_text")
+                    or single_group_explanation
+                )
+                combined_text = self._compose_question_chunk_text(
+                    number=number,
+                    question_text=question_body,
+                    answer_text=merged_answer,
+                    explanation_text=merged_explanation,
+                )
+                finalized_text, asset_refs = self._finalize_chunk_text_and_assets(combined_text, asset_map)
+                if not finalized_text.strip():
+                    continue
+                clean_question_text, question_assets = self._finalize_chunk_text_and_assets(question_body, asset_map)
+                clean_answer_text, _ = self._finalize_chunk_text_and_assets(merged_answer or "", asset_map)
+                clean_explanation_text, _ = self._finalize_chunk_text_and_assets(merged_explanation or "", asset_map)
+                if question_assets and not asset_refs:
+                    asset_refs = question_assets
+                readable_question_text = self._normalize_question_readability_layout(
+                    clean_question_text or finalized_text
+                )
+                readable_answer_text = self._format_compound_judgement_answers(
+                    readable_question_text,
+                    clean_answer_text or None,
+                )
+                finalized_text = self._compose_question_chunk_text(
+                    number=number,
+                    question_text=readable_question_text,
+                    answer_text=readable_answer_text,
+                    explanation_text=clean_explanation_text or None,
+                )
+                prepared_chunks.append(
+                    self._build_question_bank_chunk(
+                        document,
+                        content=finalized_text,
+                        question_number=number,
+                        question_text=readable_question_text or finalized_text,
+                        answer_text=readable_answer_text,
+                        explanation_text=clean_explanation_text or None,
+                        asset_refs=asset_refs,
+                        source_format=source_format,
+                        source_locator=f"question:{number}",
+                        parser_backend=parser_backend,
+                        parser_provenance=parser_provenance,
+                        raw_block_text=raw_metadata_text,
+                    )
+                )
         return prepared_chunks
+
+    def _split_question_groups(self, text: str) -> list[tuple[str, str | None]]:
+        lines = [line.rstrip() for line in str(text or "").split("\n")]
+        groups: list[tuple[str, str | None]] = []
+        question_lines: list[str] = []
+        answer_lines: list[str] = []
+        mode = "question"
+        answer_mode = "answer"
+        question_count = 0
+
+        def flush() -> None:
+            nonlocal question_lines, answer_lines, mode, answer_mode, question_count
+            question_text = "\n".join(question_lines).strip()
+            answer_text = "\n".join(answer_lines).strip() or None
+            if question_text:
+                groups.append((question_text, answer_text))
+            question_lines = []
+            answer_lines = []
+            mode = "question"
+            answer_mode = "answer"
+            question_count = 0
+
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                target = question_lines if mode == "question" else answer_lines
+                if target:
+                    target.append("")
+                continue
+
+            question_match = QUESTION_START_PATTERN.match(stripped)
+            if mode == "question":
+                answer_match = ANSWER_LINE_PATTERN.match(stripped)
+                explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
+                if question_count >= 1 and (
+                    QUESTION_SECTION_HEADING_PATTERN.match(stripped)
+                    or answer_match
+                    or explanation_match
+                ):
+                    mode = "answer"
+                    answer_mode = "explanation" if explanation_match else "answer"
+                    answer_lines.append(stripped)
+                    continue
+                question_lines.append(stripped)
+                if question_match and (question_match.group("ordinal") or question_match.group("plain") or question_match.group("wrapped")):
+                    question_count += 1
+                continue
+
+            explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
+            if explanation_match:
+                answer_mode = "explanation"
+                answer_lines.append(stripped)
+                continue
+
+            if QUESTION_CATEGORY_HEADING_PATTERN.match(stripped):
+                flush()
+                continue
+
+            if question_match and self._line_starts_new_question_group(stripped, answer_mode=answer_mode):
+                flush()
+                question_lines.append(stripped)
+                question_count = 1
+                continue
+
+            answer_lines.append(stripped)
+
+        flush()
+        return groups
+
+    def _line_starts_new_question_group(self, line: str, *, answer_mode: str) -> bool:
+        matched = QUESTION_START_PATTERN.match(str(line or "").strip())
+        if not matched:
+            return False
+        body = str(matched.group("body") or "").strip()
+        if matched.group("wrapped") and answer_mode in {"answer", "explanation"}:
+            return False
+        if self._looks_like_answer_only_text(body):
+            return False
+        if re.match(r"^[A-HＡ-Ｈ]\s*[.．、]", body):
+            return False
+        if answer_mode == "explanation":
+            return self._looks_like_question_prompt_text(body)
+        return True
+
+    def _looks_like_question_prompt_text(self, text: str) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        if re.match(r"^[A-HＡ-Ｈ]\s*[.．、]", stripped):
+            return False
+        if re.search(r"第\s*\d+\s*题", stripped):
+            return True
+        return any(
+            token in stripped
+            for token in ("（", "( ", "（　", "求", "下列", "正确", "错误", "如图", "已知", "关于", "判断", "的是", "说明", "题")
+        )
+
+    def _should_group_question_blocks(
+        self,
+        question_blocks: list[tuple[str, str]],
+        answer_lookup: dict[str, dict[str, str]],
+        answer_bank: str | None,
+    ) -> bool:
+        if len(question_blocks) < 3:
+            return False
+        if not str(answer_bank or "").strip():
+            return False
+        answered_numbers = {
+            number
+            for number in (answer_lookup or {})
+            if answer_lookup[number].get("answer_text") or answer_lookup[number].get("explanation_text")
+        }
+        if len(answered_numbers) < 2:
+            return False
+        question_numbers = {number for number, _ in question_blocks}
+        return answered_numbers.issubset(question_numbers)
+
+    def _build_grouped_question_bank_chunk(
+        self,
+        document: KnowledgeDocument,
+        *,
+        question_text: str,
+        answer_bank: str,
+        question_blocks: list[tuple[str, str]],
+        asset_map: dict[str, ExtractedAsset],
+        source_format: str | None,
+        parser_backend: str | None,
+        parser_provenance: dict[str, Any] | None,
+    ) -> PreparedChunk | None:
+        start_number = question_blocks[0][0]
+        end_number = question_blocks[-1][0]
+        grouped_number = start_number if start_number == end_number else f"{start_number}-{end_number}"
+        grouped_answer, grouped_explanation = self._split_grouped_answer_bank_sections(answer_bank)
+
+        clean_question_text, question_assets = self._finalize_chunk_text_and_assets(question_text, asset_map)
+        clean_answer_text, answer_assets = self._finalize_chunk_text_and_assets(grouped_answer or "", asset_map)
+        clean_explanation_text, explanation_assets = self._finalize_chunk_text_and_assets(grouped_explanation or "", asset_map)
+        asset_refs = question_assets or answer_assets or explanation_assets
+        readable_question_text = self._normalize_question_readability_layout(clean_question_text or question_text)
+        finalized_text = self._compose_question_chunk_text(
+            number=grouped_number,
+            question_text=readable_question_text,
+            answer_text=clean_answer_text or None,
+            explanation_text=clean_explanation_text or None,
+        )
+        if not finalized_text.strip():
+            return None
+        return self._build_question_bank_chunk(
+            document,
+            content=finalized_text,
+            question_number=grouped_number,
+            question_text=readable_question_text,
+            answer_text=clean_answer_text or None,
+            explanation_text=clean_explanation_text or None,
+            asset_refs=asset_refs,
+            source_format=source_format,
+            source_locator=f"question-group:{grouped_number}",
+            parser_backend=parser_backend,
+            parser_provenance=parser_provenance,
+            raw_block_text=f"{question_text}\n{answer_bank}".strip(),
+        )
+
+    def _split_grouped_answer_bank_sections(self, text: str) -> tuple[str | None, str | None]:
+        answer_lines: list[str] = []
+        explanation_lines: list[str] = []
+        current_section = "answer"
+        for line in str(text or "").split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            answer_match = ANSWER_LINE_PATTERN.match(stripped)
+            explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
+            if DIFFICULTY_LINE_PATTERN.match(stripped) or KNOWLEDGE_POINTS_LINE_PATTERN.match(stripped):
+                continue
+            if answer_match:
+                current_section = "answer"
+                inline_body = str(answer_match.group("body") or "").strip()
+                if inline_body:
+                    answer_lines.append(inline_body)
+                continue
+            if explanation_match:
+                current_section = "explanation"
+                inline_body = str(explanation_match.group("body") or "").strip()
+                if inline_body:
+                    explanation_lines.append(inline_body)
+                continue
+            if current_section == "answer":
+                answer_lines.append(stripped)
+            else:
+                explanation_lines.append(stripped)
+        answer_text = "\n".join(answer_lines).strip() or None
+        explanation_text = "\n".join(explanation_lines).strip() or None
+        if answer_text and explanation_text is None:
+            marker_match = re.search(r"(?:【)?(?:解析|详解|解答|思路(?:点拨)?|点拨|说明|分析|点睛)(?:】)?\s*[:：]", answer_text)
+            if marker_match:
+                explanation_text = answer_text[marker_match.start():].strip() or None
+                answer_text = answer_text[:marker_match.start()].strip() or None
+                explanation_match = EXPLANATION_LINE_PATTERN.match(explanation_text)
+                if explanation_match:
+                    explanation_text = str(explanation_match.group("body") or "").strip() or explanation_text
+        return self._split_inline_explanation_segment(answer_text, explanation_text)
 
     def _normalize_question_source_text(self, text: str) -> str:
         raw_text = str(text or "").strip()
@@ -1301,17 +1553,248 @@ class RagService:
         return matched.group("ordinal") or matched.group("plain") or matched.group("wrapped") or ""
 
     def _parse_answer_bank(self, text: str) -> dict[str, dict[str, str]]:
-        answer_blocks = self._parse_numbered_blocks(text)
+        normalized_bank = self._normalize_answer_bank_text(text)
+        answer_blocks = self._parse_numbered_blocks(normalized_bank)
         if not answer_blocks:
             return {}
         answer_lookup: dict[str, dict[str, str]] = {}
         for number, block_text in answer_blocks:
             answer_text, explanation_text = self._split_answer_block_sections(block_text)
+            existing = answer_lookup.get(number, {})
+            answer_lookup[number] = {
+                "answer_text": answer_text or existing.get("answer_text") or "",
+                "explanation_text": explanation_text or existing.get("explanation_text") or "",
+            }
+        return answer_lookup
+
+    def _normalize_answer_bank_text(self, text: str) -> str:
+        normalized_lines: list[str] = []
+        current_section = "answer"
+
+        for raw_line in str(text or "").split("\n"):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            answer_match = ANSWER_LINE_PATTERN.match(stripped)
+            explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
+            if answer_match:
+                current_section = "answer"
+                body = str(answer_match.group("body") or "").strip()
+                if not body:
+                    continue
+                entries = self._split_inline_top_level_numbered_entries(body)
+                if not entries and QUESTION_START_PATTERN.match(body):
+                    entries = [body]
+                normalized_lines.extend(entry.strip() for entry in (entries or [body]) if entry.strip())
+                continue
+            elif explanation_match:
+                current_section = "explanation"
+                body = str(explanation_match.group("body") or "").strip()
+                if not body:
+                    continue
+                entries = self._split_inline_top_level_numbered_entries(body)
+                if not entries and QUESTION_START_PATTERN.match(body):
+                    entries = [body]
+                if entries:
+                    for entry in entries:
+                        numbered_match = QUESTION_START_PATTERN.match(entry)
+                        if not numbered_match:
+                            normalized_lines.append(f"解析：{entry}")
+                            continue
+                        number = self._question_number_from_match(numbered_match)
+                        numbered_body = str(numbered_match.group("body") or "").strip()
+                        nested_answer_match = ANSWER_LINE_PATTERN.match(numbered_body)
+                        if nested_answer_match:
+                            answer_body = str(nested_answer_match.group("body") or "").strip()
+                            normalized_lines.append(f"{number}. {answer_body}" if answer_body else f"{number}.")
+                            continue
+                        normalized_lines.append(f"{number}. 解析：{numbered_body}" if numbered_body else f"{number}. 解析：")
+                else:
+                    normalized_lines.append(f"解析：{body}")
+                continue
+
+            entries = self._split_inline_top_level_numbered_entries(stripped)
+            if not entries and QUESTION_START_PATTERN.match(stripped):
+                entries = [stripped]
+            if entries:
+                if current_section == "explanation":
+                    for entry in entries:
+                        numbered_match = QUESTION_START_PATTERN.match(entry)
+                        if not numbered_match:
+                            normalized_lines.append(f"解析：{entry}")
+                            continue
+                        number = self._question_number_from_match(numbered_match)
+                        numbered_body = str(numbered_match.group("body") or "").strip()
+                        nested_answer_match = ANSWER_LINE_PATTERN.match(numbered_body)
+                        if nested_answer_match:
+                            answer_body = str(nested_answer_match.group("body") or "").strip()
+                            normalized_lines.append(f"{number}. {answer_body}" if answer_body else f"{number}.")
+                            continue
+                        normalized_lines.append(f"{number}. 解析：{numbered_body}" if numbered_body else f"{number}. 解析：")
+                else:
+                    normalized_lines.extend(entry.strip() for entry in entries if entry.strip())
+                continue
+
+            if current_section == "explanation" and normalized_lines:
+                normalized_lines[-1] = f"{normalized_lines[-1]}\n{stripped}".strip()
+                continue
+            if current_section == "answer" and normalized_lines:
+                normalized_lines[-1] = f"{normalized_lines[-1]}\n{stripped}".strip()
+                continue
+
+            normalized_lines.append(stripped)
+
+        return "\n".join(normalized_lines)
+
+    def _split_inline_top_level_numbered_entries(self, text: str) -> list[str]:
+        pattern = re.compile(r"(?:(?<=^)|(?<=\s))(?=(?:第\s*\d+\s*题|\d{1,3}\s*[.．、)]))")
+        positions = [match.start() for match in pattern.finditer(text)]
+        if len(positions) <= 1:
+            return []
+        positions.append(len(text))
+        entries: list[str] = []
+        for start, end in zip(positions, positions[1:]):
+            entry = text[start:end].strip()
+            if entry:
+                entries.append(entry)
+        return entries
+
+    def _merge_repeated_answer_bank_blocks(
+        self,
+        question_blocks: list[tuple[str, str]],
+    ) -> tuple[list[tuple[str, str]], dict[str, dict[str, str]]]:
+        if len(question_blocks) < 3:
+            return question_blocks, {}
+
+        split_index = self._find_repeated_answer_bank_split(question_blocks)
+        if split_index is None:
+            return question_blocks, {}
+
+        main_blocks = question_blocks[:split_index]
+        answer_blocks = question_blocks[split_index:]
+        answer_lookup: dict[str, dict[str, str]] = {}
+        for number, block_text in answer_blocks:
+            answer_text, explanation_text = self._extract_repeated_answer_payload(block_text)
+            if not answer_text and not explanation_text:
+                return question_blocks, {}
             answer_lookup[number] = {
                 "answer_text": answer_text or "",
                 "explanation_text": explanation_text or "",
             }
-        return answer_lookup
+        return main_blocks, answer_lookup
+
+    def _find_repeated_answer_bank_split(
+        self,
+        question_blocks: list[tuple[str, str]],
+    ) -> int | None:
+        if len(question_blocks) < 3:
+            return None
+
+        for split_index in range(1, len(question_blocks)):
+            prefix = question_blocks[:split_index]
+            suffix = question_blocks[split_index:]
+            if len(suffix) < 2:
+                continue
+            prefix_order: list[str] = []
+            seen_numbers: set[str] = set()
+            for number, _ in prefix:
+                if number not in seen_numbers:
+                    seen_numbers.add(number)
+                    prefix_order.append(number)
+            suffix_numbers = [number for number, _ in suffix]
+            if not suffix_numbers:
+                continue
+            if len(set(suffix_numbers)) != len(suffix_numbers):
+                continue
+            if any(number not in seen_numbers for number in suffix_numbers):
+                continue
+            ordered_suffix = sorted(suffix_numbers, key=prefix_order.index)
+            if suffix_numbers != ordered_suffix:
+                continue
+            answer_like_count = sum(
+                1 for _, block_text in suffix if self._looks_like_repeated_answer_block(block_text)
+            )
+            if answer_like_count >= max(1, len(suffix) - 1):
+                return split_index
+        return None
+
+    def _looks_like_repeated_answer_block(self, block_text: str) -> bool:
+        answer_text, explanation_text = self._extract_repeated_answer_payload(block_text)
+        return bool(answer_text or explanation_text)
+
+    def _extract_repeated_answer_payload(
+        self,
+        block_text: str,
+    ) -> tuple[str | None, str | None]:
+        question_text, answer_text, explanation_text = self._split_question_block_sections(block_text)
+        clean_question = str(question_text or "").strip()
+        clean_answer = str(answer_text or "").strip() or None
+        clean_explanation = str(explanation_text or "").strip() or None
+
+        clean_answer, clean_explanation = self._split_inline_explanation_segment(
+            clean_answer,
+            clean_explanation,
+        )
+        clean_question, clean_explanation = self._split_inline_explanation_segment(
+            clean_question,
+            clean_explanation,
+        )
+
+        if clean_answer or clean_explanation:
+            if not clean_answer and clean_question and self._looks_like_answer_only_text(clean_question):
+                clean_answer = clean_question
+            elif clean_question and not self._looks_like_answer_only_text(clean_question):
+                return None, None
+            return clean_answer, clean_explanation
+
+        if self._looks_like_answer_only_text(clean_question):
+            return clean_question, None
+        return None, None
+
+    def _split_inline_explanation_segment(
+        self,
+        answer_text: str | None,
+        explanation_text: str | None,
+    ) -> tuple[str | None, str | None]:
+        clean_answer = str(answer_text or "").strip() or None
+        clean_explanation = str(explanation_text or "").strip() or None
+        if not clean_answer or clean_explanation:
+            return clean_answer, clean_explanation
+        matched = INLINE_EXPLANATION_SEGMENT_PATTERN.match(clean_answer)
+        if not matched:
+            return clean_answer, clean_explanation
+        answer_part = str(matched.group("answer") or "").strip() or None
+        explanation_part = str(matched.group("explanation") or "").strip() or None
+        if explanation_part:
+            explanation_match = EXPLANATION_LINE_PATTERN.match(explanation_part)
+            if explanation_match:
+                explanation_part = str(explanation_match.group("body") or "").strip() or explanation_part
+        return answer_part, explanation_part
+
+    def _looks_like_answer_only_text(self, text: str) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        if re.search(r"第\s*\d+\s*题", stripped) or "题" in stripped:
+            return False
+        if len(stripped) <= 24 and ANSWER_ONLY_TOKEN_PATTERN.match(stripped):
+            return True
+        if "\n" in stripped:
+            lines = [line.strip() for line in stripped.split("\n") if line.strip()]
+            return bool(lines) and all(self._looks_like_answer_only_text(line) for line in lines)
+        if any(token in stripped for token in ("答案", "解析", "详解")):
+            return True
+        if len(stripped) <= 80 and not any(
+            token in stripped for token in ("如图", "求", "已知", "下列", "判断", "计算", "实验", "分析", "选择")
+        ):
+            return True
+        return False
+
+    def _looks_like_exam_cover_block(self, text: str) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        return bool(re.search(r"学校[:：].*姓名[:：].*班级[:：]", stripped))
 
     def _split_question_block_sections(self, text: str) -> tuple[str, str | None, str | None]:
         question_lines: list[str] = []

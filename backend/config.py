@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     chromadb_ssl: bool = Field(default=False, alias="CHROMADB_SSL")
     chromadb_collection_prefix: str = Field(default="studyagent", alias="CHROMADB_COLLECTION_PREFIX")
     upload_path: str = Field(default="data/uploads", alias="UPLOAD_PATH")
+    document_backup_path: str = Field(default="data/document_backups", alias="DOCUMENT_BACKUP_PATH")
     task_artifact_path: str = Field(default="data/tasks", alias="TASK_ARTIFACT_PATH")
     chat_attachment_path: str = Field(default="data/chat_attachments", alias="CHAT_ATTACHMENT_PATH")
 
@@ -138,7 +139,7 @@ class Settings(BaseSettings):
         return [item.strip().lower() for item in self.chat_allowed_image_mime_types.split(",") if item.strip()]
 
     def ensure_storage(self) -> None:
-        base_paths = [self.sqlite_path, self.chromadb_path, self.upload_path, self.task_artifact_path, self.chat_attachment_path]
+        base_paths = [self.sqlite_path, self.chromadb_path, self.upload_path, self.document_backup_path, self.task_artifact_path, self.chat_attachment_path]
         for path in base_paths:
             target = Path(path)
             target.parent.mkdir(parents=True, exist_ok=True) if target.suffix else target.mkdir(parents=True, exist_ok=True)
