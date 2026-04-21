@@ -969,7 +969,7 @@ def reingest_document(
             detail="Document has active import task",
         )
 
-    source_path = Path(document.file_path)
+    source_path = DocumentBackupService(settings).resolve_path(document.file_path)
     if not source_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1321,7 +1321,7 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to persist document backup: {exc}",
         ) from exc
-    document.file_path = str(backup_path)
+    document.file_path = DocumentBackupService(settings).to_storage_path(backup_path)
     db.add(document)
     db.commit()
     db.refresh(document)
@@ -1661,7 +1661,9 @@ def delete_document(
     }
 
     try:
-        Path(document.file_path).unlink(missing_ok=True)
+        DocumentBackupService(settings).resolve_path(document.file_path).unlink(
+            missing_ok=True
+        )
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

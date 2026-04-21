@@ -15,6 +15,7 @@ from backend.models import agent_config, audit_log, conversation, knowledge, use
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeChunk, KnowledgeDocument
 from backend.models.user import User, UserRole
 from backend.routers import knowledge as knowledge_router
+from backend.services.document_backup_service import DocumentBackupService
 from backend.services.embed_service import EmbedService
 from backend.services.rag_service import RagService
 from backend.services.vector_store_service import VectorStoreService
@@ -1044,6 +1045,55 @@ def test_delete_document_removes_file_chunks_and_related_tasks(tmp_path, monkeyp
         assert session.get(KnowledgeDocument, document.id) is None
         assert session.get(ImportTask, task.id) is None
         assert session.scalar(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)) is None
+    finally:
+        session.close()
+
+
+def test_reingest_document_resolves_backup_backed_relative_source_path(tmp_path, monkeypatch):
+    session_local = build_session()
+    session = session_local()
+    try:
+        configure_upload_router(tmp_path, monkeypatch)
+        teacher = create_teacher(session)
+        backup_source = tmp_path / "document_backups" / "exercise" / "物理" / "0001__questions.docx"
+        backup_source.parent.mkdir(parents=True, exist_ok=True)
+        backup_source.write_text("题库内容", encoding="utf-8")
+
+        dispatched: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            DocumentBackupService,
+            "resolve_path",
+            lambda self, stored_path: backup_source,
+        )
+        monkeypatch.setattr(
+            knowledge_router,
+            "dispatch_import_task",
+            lambda db, document, task, background_tasks=None: dispatched.append((document.id, task.id)),
+        )
+
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="questions.docx",
+            file_path="data/document_backups/exercise/物理/0001__questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=backup_source.stat().st_size,
+            status=DocumentStatus.COMPLETED,
+            created_by=teacher.id,
+            resource_type="exercise",
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        result = knowledge_router.reingest_document(
+            document.id, db=session, current_user=teacher, request=build_request()
+        )
+
+        assert result.document_id == document.id
+        assert dispatched == [(document.id, result.id)]
+        latest_task = session.get(ImportTask, result.id)
+        assert latest_task is not None
+        assert latest_task.error_message == "任务已创建，等待重新切片"
     finally:
         session.close()
 

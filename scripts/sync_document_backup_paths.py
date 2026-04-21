@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from backend.database import SessionLocal
 from backend.models.knowledge import KnowledgeDocument
+from backend.services.document_backup_service import DocumentBackupService
 
 
 def _latest_manifest() -> Path:
@@ -24,6 +25,7 @@ def _latest_manifest() -> Path:
 
 def main() -> None:
     manifest_path = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else _latest_manifest()
+    service = DocumentBackupService()
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     mapping = {
         int(item["document_id"]): ROOT / str(item["backup_path"])
@@ -41,10 +43,12 @@ def main() -> None:
             if backup_path is None or not backup_path.exists():
                 skipped += 1
                 continue
-            if Path(document.file_path).resolve() == backup_path.resolve():
+            new_path = service.to_storage_path(backup_path)
+            current_resolved = service.resolve_path(document.file_path)
+            if current_resolved.resolve() == backup_path.resolve() and document.file_path == new_path:
                 skipped += 1
                 continue
-            document.file_path = str(backup_path)
+            document.file_path = new_path
             db.add(document)
             updated += 1
         db.commit()

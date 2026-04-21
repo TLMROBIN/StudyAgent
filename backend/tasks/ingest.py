@@ -22,6 +22,7 @@ from backend.services.mineru_service import (
     MineruStartupError,
     MineruTransientIOError,
 )
+from backend.services.document_backup_service import DocumentBackupService
 from backend.services.pdf_parse_types import PDFParseResult
 from backend.services.rag_service import ExtractionResult, rag_service
 from backend.tasks.celery_app import celery_app
@@ -382,8 +383,9 @@ def run_ingest_pipeline(document_id: int, task_id: int, celery_task=None) -> Non
             celery_task=celery_task,
         )
         _ensure_not_cancelled(db, task_id, document_id)
+        source_path = DocumentBackupService(settings).resolve_path(document.file_path)
         extracted = rag_service.extract_content(
-            document.file_path,
+            str(source_path),
             document.mime_type,
             document_id=document.id,
             task_id=task.id,

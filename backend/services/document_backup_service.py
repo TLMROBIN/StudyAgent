@@ -27,6 +27,9 @@ class DocumentBackupService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
+    def repo_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
     def backup_root(self) -> Path:
         return Path(self.settings.document_backup_path)
 
@@ -48,6 +51,29 @@ class DocumentBackupService:
             return target
         shutil.move(str(source), str(target))
         return target
+
+    def to_storage_path(self, path: str | Path) -> str:
+        target = Path(path)
+        try:
+            return str(target.resolve().relative_to(self.repo_root().resolve()))
+        except ValueError:
+            return str(target)
+
+    def resolve_path(self, stored_path: str | Path) -> Path:
+        raw = Path(stored_path)
+        if raw.is_file():
+            return raw
+        if not raw.is_absolute():
+            candidate = (self.repo_root() / raw).resolve()
+            if candidate.is_file():
+                return candidate
+        parts = raw.parts
+        for anchor in ("data", ".omx"):
+            if anchor in parts:
+                candidate = (self.repo_root() / Path(*parts[parts.index(anchor) :])).resolve()
+                if candidate.is_file():
+                    return candidate
+        return raw
 
 
 document_backup_service = DocumentBackupService()
