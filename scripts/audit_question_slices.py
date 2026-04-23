@@ -60,6 +60,11 @@ def _chunk_counts_from_prepared(chunks: list[Any]) -> ChunkCounts:
 
 def _suspect_chunks(rows: list[KnowledgeChunk]) -> list[dict[str, Any]]:
     numbers = Counter(str((row.metadata_json or {}).get("question_number") or "").strip() for row in rows)
+    rows_by_number: dict[str, list[KnowledgeChunk]] = {}
+    for row in rows:
+        number = str((row.metadata_json or {}).get("question_number") or "").strip()
+        if number:
+            rows_by_number.setdefault(number, []).append(row)
     suspects: list[dict[str, Any]] = []
     for row in rows:
         metadata = row.metadata_json or {}
@@ -70,7 +75,19 @@ def _suspect_chunks(rows: list[KnowledgeChunk]) -> list[dict[str, Any]]:
         has_explanation = bool(str(metadata.get("explanation_text") or "").strip())
         flags: list[str] = []
         if number and numbers[number] > 1:
-            flags.append("duplicate_question_number")
+            flags.append("raw_duplicate_question_number")
+            source_locators = {
+                str((candidate.metadata_json or {}).get("source_locator") or "").strip()
+                for candidate in rows_by_number.get(number, [])
+            }
+            question_uids = {
+                str((candidate.metadata_json or {}).get("question_uid") or "").strip()
+                for candidate in rows_by_number.get(number, [])
+            }
+            if "" in source_locators or len(source_locators) < numbers[number]:
+                flags.append("non_expected_duplicate_logical_item")
+            if "" in question_uids or len(question_uids) < numbers[number]:
+                flags.append("same_document_question_uid_collision")
         if not has_answer:
             flags.append("missing_answer")
         if not has_explanation:
@@ -93,6 +110,11 @@ def _suspect_chunks(rows: list[KnowledgeChunk]) -> list[dict[str, Any]]:
 
 def _suspect_prepared_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
     numbers = Counter(str((chunk.metadata or {}).get("question_number") or "").strip() for chunk in chunks)
+    chunks_by_number: dict[str, list[Any]] = {}
+    for chunk in chunks:
+        number = str((chunk.metadata or {}).get("question_number") or "").strip()
+        if number:
+            chunks_by_number.setdefault(number, []).append(chunk)
     suspects: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks):
         metadata = chunk.metadata or {}
@@ -103,7 +125,19 @@ def _suspect_prepared_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
         has_explanation = bool(str(metadata.get("explanation_text") or "").strip())
         flags: list[str] = []
         if number and numbers[number] > 1:
-            flags.append("duplicate_question_number")
+            flags.append("raw_duplicate_question_number")
+            source_locators = {
+                str((candidate.metadata or {}).get("source_locator") or "").strip()
+                for candidate in chunks_by_number.get(number, [])
+            }
+            question_uids = {
+                str((candidate.metadata or {}).get("question_uid") or "").strip()
+                for candidate in chunks_by_number.get(number, [])
+            }
+            if "" in source_locators or len(source_locators) < numbers[number]:
+                flags.append("non_expected_duplicate_logical_item")
+            if "" in question_uids or len(question_uids) < numbers[number]:
+                flags.append("same_document_question_uid_collision")
         if not has_answer:
             flags.append("missing_answer")
         if not has_explanation:
@@ -150,14 +184,21 @@ def _classify_document(
 
     if reparse_counts.questions == reparse_counts.answers == reparse_counts.explanations:
         reasons.append("best_effort_reparse_is_aligned")
-        if suspect_flags["duplicate_question_number"] or suspect_flags["pseudo_tail_fragment"]:
+        if suspect_flags["non_expected_duplicate_logical_item"] or suspect_flags["pseudo_tail_fragment"]:
             reasons.append("stored_chunks_show_tail_fragment_false_split")
             fixes.append("strengthen _parse_numbered_blocks() and repeated-answer-bank merge guards")
+        if suspect_flags["same_document_question_uid_collision"]:
+            reasons.append("same_document_question_uid_collision")
+            fixes.append("enforce deterministic source_locator/question_uid collision suffixing")
         return "historical_parser_bug_or_stale_db", reasons, fixes or ["reingest affected docs after parser fix lands"]
 
-    if suspect_flags["duplicate_question_number"] or suspect_flags["pseudo_tail_fragment"]:
+    if suspect_flags["non_expected_duplicate_logical_item"] or suspect_flags["pseudo_tail_fragment"]:
         reasons.append("tail_fragment_or_repeated_number_false_split")
         fixes.append("tighten numbered-block splitting and repeated-answer-bank absorption")
+
+    if suspect_flags["same_document_question_uid_collision"]:
+        reasons.append("same_document_question_uid_collision")
+        fixes.append("enforce deterministic source_locator/question_uid collision suffixing")
 
     if suspect_flags["review_or_fillin_fragment"]:
         reasons.append("review_or_fillin_segments_miscollected_as_question_items")
@@ -169,7 +210,8 @@ def _classify_document(
         and missing_answer_only == (reparse_counts.questions - reparse_counts.answers)
     ):
         reasons.append("source_material_uses_blank_answer_with_explanation_only")
-        fixes.append("exclude these subjective items from parser-bug counts unless product rules require synthetic answers")
+        fixes.append("allowed_by_product_rule_missing_answer_with_explanation")
+        return "allowed_missing_answer_with_explanation", reasons, fixes
 
     answer_only_gap = (
         reparse_counts.explanations == reparse_counts.questions
@@ -189,10 +231,7 @@ def _classify_document(
         reasons.append("unclassified_mismatch")
         fixes.append("manual review needed")
 
-    if (
-        "source_material_lacks_complete_answer_or_explanation_markers" in reasons
-        or "source_material_uses_blank_answer_with_explanation_only" in reasons
-    ) and "tail_fragment_or_repeated_number_false_split" not in reasons:
+    if "source_material_lacks_complete_answer_or_explanation_markers" in reasons and "tail_fragment_or_repeated_number_false_split" not in reasons:
         return "source_missing_excluded", reasons, fixes
     return "parser_bug_remaining", reasons, fixes
 

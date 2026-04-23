@@ -6,6 +6,8 @@ in already-matched tags are skipped to avoid redundancy.
 
 from __future__ import annotations
 
+from collections import Counter
+from difflib import SequenceMatcher
 import logging
 import re
 import time
@@ -44,6 +46,47 @@ _FILENAME_NOISE_PATTERNS = [
     re.compile(r"\s*[副本复件]\s*$"),
     re.compile(r"\s*copy\s*$", re.IGNORECASE),
 ]
+_CURRICULUM_PREFIX_PATTERNS = [
+    re.compile(
+        r"^\s*(?:人教版|教科版|鲁科版|粤教版|苏教版)?\s*(?:高中)?\s*(?:语文|数学|英语|物理|化学|生物|政治|历史|地理)?\s*(?:必修|选择性?必修|选修)\s*[一二三四五六七八九十百零两0-9]+(?:册|上|下)?\s*"
+    ),
+    re.compile(r"^\s*(?:模块|专题)\s*[一二三四五六七八九十百零两0-9]+\s*"),
+]
+_TRAILING_CURRICULUM_SUFFIX_PATTERNS = [
+    re.compile(
+        r"\s*[-_－—]\s*(?:[^-_－—\s]+版)?(?:.*?(?:必修|选修|选择性?必修|第[一二三四五六七八九十百零两0-9]+册|上册|下册).*)$"
+    ),
+]
+_STRUCTURE_TAIL_PATTERNS = [
+    re.compile(r"(第[一二三四五六七八九十百零两0-9]+(?:节|课)\s*\S.*)$"),
+    re.compile(r"([0-9]{1,2}(?:\.[0-9]{1,2})*[.．、]?\s*\S.*)$"),
+]
+_OUTLINE_PREFIX_PATTERNS = [
+    re.compile(r"^\s*\d{1,2}[.．]\d{1,2}\s*[+＋\-—－_:：、.．]?\s*"),
+    re.compile(
+        r"^\s*第[一二三四五六七八九十百零两0-9]+章\s*第[一二三四五六七八九十百零两0-9]+(?:节|课)\s*"
+    ),
+]
+_FUZZY_SEPARATOR_PATTERN = re.compile(r"[\s\u3000\-_+＋—－–·•,:：，。;；、/\\()（）\[\]【】'\"《》]+")
+_FUZZY_CONNECTOR_PATTERN = re.compile(r"[和与及跟]")
+_LEADING_DECIMAL_OUTLINE_PATTERN = re.compile(r"^\s*(\d{1,2})[.．](\d{1,2})")
+_CHAPTER_NUMBER_PATTERN = re.compile(r"第([一二三四五六七八九十百零两0-9]+)章")
+_SECTION_NUMBER_PATTERN = re.compile(r"第([一二三四五六七八九十百零两0-9]+)(?:节|课)")
+_DECIMAL_SECTION_NUMBER_PATTERN = re.compile(r"^\s*(\d{1,2})[.．]")
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 
 
 class AutoTagService:
@@ -93,32 +136,100 @@ class AutoTagService:
         if now - self._cache_time > self._cache_ttl:
             self._refresh_cache(db)
         clean_title = self._clean_title(title)
-        normalized_title = self._normalize_title_tag_candidate(clean_title) or self._normalize_tag_candidate(clean_title)
-        if not normalized_title:
+        chapter_hint, section_hint, prefers_decimal_sections = self._extract_structure_number_hints(clean_title)
+        title_candidates = self._structure_title_candidates(clean_title)
+        if not title_candidates:
             return {"chapter": None, "section": None}
 
-        title_key = normalized_title.lower()
-        best_match: tuple[int, int, dict[str, str | None]] | None = None
-        for entry in self._structure_cache.get(subject, []):
-            normalized_label = str(entry.get("normalized") or "").lower()
-            if not normalized_label:
-                continue
-            score = self._structure_match_score(title_key, normalized_label, kind=str(entry.get("kind") or "chapter"))
-            if score is None:
-                continue
-            candidate = (score, len(normalized_label), entry)
-            if best_match is None or candidate > best_match:
-                best_match = candidate
+        best_match: dict[str, str | None] | None = None
+        best_rank: tuple[int, int, int, int] | None = None
+        for title_key in title_candidates:
+            for index, entry in enumerate(self._structure_cache.get(subject, [])):
+                label_key = str(entry.get("match_key") or "").lower()
+                if not label_key:
+                    continue
+                entry_chapter_number = self._as_int(entry.get("chapter_number"))
+                entry_section_number = self._as_int(entry.get("section_number"))
+                if chapter_hint is not None and entry_chapter_number is not None and entry_chapter_number != chapter_hint:
+                    continue
+                if (
+                    section_hint is not None
+                    and str(entry.get("kind") or "") == "section"
+                    and entry_section_number is not None
+                    and entry_section_number != section_hint
+                ):
+                    continue
+                score = self._structure_match_score(
+                    title_key,
+                    label_key,
+                    kind=str(entry.get("kind") or "chapter"),
+                )
+                if score is None:
+                    continue
+                if chapter_hint is not None and entry_chapter_number == chapter_hint:
+                    score += 90
+                if section_hint is not None and entry_section_number == section_hint:
+                    score += 110
+                if (
+                    prefers_decimal_sections
+                    and str(entry.get("kind") or "") == "section"
+                    and entry.get("section_style") == "decimal"
+                ):
+                    score += 15
+                rank = (
+                    score,
+                    len(label_key),
+                    1 if str(entry.get("kind") or "") == "section" else 0,
+                    -index,
+                )
+                if best_rank is None or rank > best_rank:
+                    best_rank = rank
+                    best_match = entry
+
+        if best_match is None:
+            best_match = self._fallback_match_by_chapter_number(
+                subject_entries=self._structure_cache.get(subject, []),
+                chapter_hint=chapter_hint,
+                prefers_decimal_sections=prefers_decimal_sections,
+            )
 
         if best_match is None:
             return {"chapter": None, "section": None}
 
-        entry = best_match[2]
-        chapter = str(entry.get("chapter") or "").strip() or None
+        chapter = str(best_match.get("chapter") or "").strip() or None
         section = None
-        if str(entry.get("kind") or "") == "section" and title_key == str(entry.get("normalized") or "").lower():
-            section = str(entry.get("section") or "").strip() or None
+        if str(best_match.get("kind") or "") == "section":
+            section = str(best_match.get("section") or "").strip() or None
         return {"chapter": chapter, "section": section}
+
+    def list_textbook_structure_options(
+        self,
+        db: Session,
+        subject: str,
+    ) -> list[dict[str, list[str] | str]]:
+        now = time.time()
+        if now - self._cache_time > self._cache_ttl:
+            self._refresh_cache(db)
+
+        chapter_sections: dict[str, list[str]] = {}
+        for entry in self._structure_cache.get(subject, []):
+            chapter = str(entry.get("chapter") or "").strip()
+            if not chapter:
+                continue
+            chapter_sections.setdefault(chapter, [])
+            if str(entry.get("kind") or "") != "section":
+                continue
+            section = str(entry.get("section") or "").strip()
+            if section and section not in chapter_sections[chapter]:
+                chapter_sections[chapter].append(section)
+
+        return [
+            {
+                "chapter": chapter,
+                "sections": sorted(sections),
+            }
+            for chapter, sections in sorted(chapter_sections.items(), key=lambda item: item[0])
+        ]
 
     def _get_vocabulary(self, db: Session, subject: str) -> list[str]:
         now = time.time()
@@ -263,6 +374,10 @@ class AutoTagService:
                 "section": str(section).strip() if str(section or "").strip() else None,
                 "label": str(label).strip() if str(label or "").strip() else None,
                 "normalized": normalized_label,
+                "match_key": self._normalize_structure_match_key(label),
+                "chapter_number": self._extract_chapter_number(chapter),
+                "section_number": self._extract_section_number(section),
+                "section_style": self._extract_section_style(section),
             }
         )
 
@@ -277,6 +392,14 @@ class AutoTagService:
             return 220 + partial_bonus
         if title_key in label_key and len(title_key) >= _MIN_TAG_LENGTH + 1:
             return 180 + partial_bonus
+        if self._unordered_text_equivalent(title_key, label_key):
+            return 200 + exact_bonus
+        min_length = min(len(title_key), len(label_key))
+        if min_length < _MIN_TAG_LENGTH + 1:
+            return None
+        sequence_ratio = SequenceMatcher(None, title_key, label_key).ratio()
+        if sequence_ratio >= 0.82:
+            return int(170 + sequence_ratio * 40) + exact_bonus
         return None
 
     def _clean_title(self, filename: str) -> str:
@@ -299,6 +422,192 @@ class AutoTagService:
         if len(normalized) < _MIN_TAG_LENGTH:
             return None
         return normalized
+
+    def _strip_curriculum_prefixes(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        while normalized:
+            next_value = normalized
+            for pattern in _CURRICULUM_PREFIX_PATTERNS:
+                next_value = pattern.sub("", next_value, count=1).strip()
+            if next_value == normalized:
+                return normalized
+            normalized = next_value
+        return normalized
+
+    def _strip_trailing_curriculum_suffix(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        while normalized:
+            next_value = normalized
+            for pattern in _TRAILING_CURRICULUM_SUFFIX_PATTERNS:
+                next_value = pattern.sub("", next_value, count=1).strip()
+            if next_value == normalized:
+                return normalized
+            normalized = next_value
+        return normalized
+
+    def _strip_outline_prefixes(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        while normalized:
+            next_value = normalized
+            for pattern in _OUTLINE_PREFIX_PATTERNS:
+                next_value = pattern.sub("", next_value, count=1).strip()
+            if next_value == normalized:
+                return normalized
+            normalized = next_value
+        return normalized
+
+    def _structure_title_candidates(self, title: str) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add(candidate: str | None) -> None:
+            normalized = str(candidate or "").strip()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            candidates.append(normalized)
+
+        add(title)
+        stripped_title = self._strip_curriculum_prefixes(title)
+        add(stripped_title)
+        stripped_suffix_title = self._strip_trailing_curriculum_suffix(stripped_title)
+        add(stripped_suffix_title)
+        add(self._strip_outline_prefixes(stripped_suffix_title))
+        for base in list(candidates):
+            for pattern in _STRUCTURE_TAIL_PATTERNS:
+                matched = pattern.search(base)
+                if matched:
+                    add(matched.group(1))
+                    add(self._strip_outline_prefixes(matched.group(1)))
+
+        keys: list[str] = []
+        key_seen: set[str] = set()
+        for candidate in candidates:
+            key = self._normalize_structure_match_key(candidate)
+            if not key or key in key_seen:
+                continue
+            key_seen.add(key)
+            keys.append(key)
+        return keys
+
+    def _normalize_structure_match_key(self, value: str | None) -> str:
+        normalized = self._normalize_title_tag_candidate(value) or self._normalize_tag_candidate(value) or str(value or "").strip()
+        normalized = self._strip_curriculum_prefixes(normalized)
+        normalized = self._strip_trailing_curriculum_suffix(normalized)
+        normalized = self._strip_outline_prefixes(normalized)
+        for pattern in _TAG_PREFIX_PATTERNS:
+            normalized = pattern.sub("", normalized).strip()
+        normalized = _FUZZY_SEPARATOR_PATTERN.sub("", normalized)
+        normalized = _FUZZY_CONNECTOR_PATTERN.sub("", normalized)
+        return normalized.lower()
+
+    def _unordered_text_equivalent(self, title_key: str, label_key: str) -> bool:
+        if len(title_key) < _MIN_TAG_LENGTH + 1 or len(label_key) < _MIN_TAG_LENGTH + 1:
+            return False
+        return Counter(title_key) == Counter(label_key)
+
+    def _extract_structure_number_hints(self, title: str) -> tuple[int | None, int | None, bool]:
+        normalized = str(title or "").strip()
+        decimal_match = _LEADING_DECIMAL_OUTLINE_PATTERN.match(normalized)
+        if decimal_match:
+            return int(decimal_match.group(1)), int(decimal_match.group(2)), True
+        chapter_match = _CHAPTER_NUMBER_PATTERN.search(normalized)
+        section_match = _SECTION_NUMBER_PATTERN.search(normalized)
+        return (
+            self._parse_mixed_number(chapter_match.group(1)) if chapter_match else None,
+            self._parse_mixed_number(section_match.group(1)) if section_match else None,
+            False,
+        )
+
+    def _extract_chapter_number(self, value: str | None) -> int | None:
+        matched = _CHAPTER_NUMBER_PATTERN.search(str(value or ""))
+        if not matched:
+            return None
+        return self._parse_mixed_number(matched.group(1))
+
+    def _extract_section_number(self, value: str | None) -> int | None:
+        normalized = str(value or "").strip()
+        decimal_match = _DECIMAL_SECTION_NUMBER_PATTERN.match(normalized)
+        if decimal_match:
+            return int(decimal_match.group(1))
+        section_match = _SECTION_NUMBER_PATTERN.search(normalized)
+        if section_match:
+            return self._parse_mixed_number(section_match.group(1))
+        return None
+
+    def _extract_section_style(self, value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        if _DECIMAL_SECTION_NUMBER_PATTERN.match(normalized):
+            return "decimal"
+        if _SECTION_NUMBER_PATTERN.search(normalized):
+            return "ordinal"
+        return None
+
+    def _parse_mixed_number(self, value: str | None) -> int | None:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        if normalized.isdigit():
+            return int(normalized)
+        if normalized == "十":
+            return 10
+        total = 0
+        if "十" in normalized:
+            left, _, right = normalized.partition("十")
+            total += (self._parse_single_chinese_digit(left) or 1) * 10
+            if right:
+                total += self._parse_single_chinese_digit(right) or 0
+            return total or None
+        return self._parse_single_chinese_digit(normalized)
+
+    def _parse_single_chinese_digit(self, value: str | None) -> int | None:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        if len(normalized) == 1 and normalized in _CHINESE_DIGITS:
+            return _CHINESE_DIGITS[normalized]
+        return None
+
+    def _fallback_match_by_chapter_number(
+        self,
+        *,
+        subject_entries: list[dict[str, str | None]],
+        chapter_hint: int | None,
+        prefers_decimal_sections: bool,
+    ) -> dict[str, str | None] | None:
+        if chapter_hint is None:
+            return None
+
+        chapter_entries = [
+            entry
+            for entry in subject_entries
+            if str(entry.get("kind") or "") == "chapter"
+            and self._as_int(entry.get("chapter_number")) == chapter_hint
+        ]
+        if not chapter_entries:
+            return None
+
+        if prefers_decimal_sections:
+            decimal_chapters = {
+                str(entry.get("chapter") or "")
+                for entry in subject_entries
+                if self._as_int(entry.get("chapter_number")) == chapter_hint
+                and entry.get("section_style") == "decimal"
+            }
+            filtered = [
+                entry
+                for entry in chapter_entries
+                if str(entry.get("chapter") or "") in decimal_chapters
+            ]
+            if len(filtered) == 1:
+                return filtered[0]
+            if filtered:
+                chapter_entries = filtered
+
+        return chapter_entries[0]
+
+    def _as_int(self, value: object) -> int | None:
+        return int(value) if isinstance(value, int) else None
 
     def _match_tags(self, title: str, vocabulary: list[str]) -> list[str]:
         matched: list[str] = []

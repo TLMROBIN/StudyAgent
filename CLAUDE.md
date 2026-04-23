@@ -214,7 +214,7 @@ LLM_FALLBACK_MODEL=qwen-plus
 
 # PDF 解析后端（legacy / mineru）
 PDF_PARSER_BACKEND=mineru
-MINERU_PYTHON_BIN=/tmp/mineru-venv/bin/python
+MINERU_PYTHON_BIN=/home/binyu/文档/trae_projects/.runtime/mineru-venv/bin/python  # 宿主机直跑；docker compose 仍使用容器内 /tmp 路径
 MINERU_REQUIRE_GPU_PROOF=true
 
 # Embedding

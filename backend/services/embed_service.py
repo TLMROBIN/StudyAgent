@@ -11,6 +11,10 @@ from backend.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+MODEL_EMBEDDING_DIMENSIONS = {
+    "baai/bge-m3": 1024,
+}
+
 
 class EmbedService:
     def __init__(self, settings: Settings | None = None) -> None:
@@ -101,7 +105,7 @@ class EmbedService:
         return "cpu"
 
     def _hash_embed_text(self, text: str) -> list[float]:
-        dims = self.settings.embedding_dimension
+        dims = self._hash_embedding_dimension()
         vector = [0.0] * dims
         for token in self._tokenize(text):
             digest = hashlib.sha256(token.encode("utf-8")).digest()
@@ -109,6 +113,14 @@ class EmbedService:
             vector[index] += 1.0
         norm = math.sqrt(sum(value * value for value in vector)) or 1.0
         return [value / norm for value in vector]
+
+    def _hash_embedding_dimension(self) -> int:
+        configured = int(self.settings.embedding_dimension or 0)
+        model_key = str(self.settings.embedding_model_name or "").strip().lower()
+        inferred = MODEL_EMBEDDING_DIMENSIONS.get(model_key, 0)
+        if self.settings.embedding_backend == "sentence-transformers" and inferred > 0:
+            return max(configured, inferred)
+        return configured or inferred or 128
 
     @staticmethod
     def cosine_similarity(left: list[float], right: list[float]) -> float:

@@ -537,3 +537,56 @@ def test_run_ingest_pipeline_fails_closed_when_parser_provenance_shows_cpu_fallb
     assert "未实际使用 GPU" in message
     assert "回退 CPU" not in message
     verify.close()
+
+
+def test_build_completion_message_counts_grouped_question_chunks_as_question_blocks():
+    document = KnowledgeDocument(
+        subject="物理",
+        filename="grouped.docx",
+        file_path="/tmp/grouped.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type="exercise",
+    )
+    chunks = [
+        type(
+            "Chunk",
+            (),
+            {
+                "metadata": {
+                    "chunk_kind": "question_item",
+                    "question_number": "21-24",
+                    "answer_text": "21.A 22.B 23.AB 24.C",
+                    "explanation_text": "21.... 22.... 23.... 24....",
+                    "image_count": 2,
+                    "chapter": "第五章 运动的合成与分解",
+                    "section": "5.2 运动的合成与分解",
+                }
+            },
+        )(),
+        type(
+            "Chunk",
+            (),
+            {
+                "metadata": {
+                    "chunk_kind": "question_item",
+                    "question_number": "25-29",
+                    "answer_text": "25.D 26.C 27.A 28.B 29.ABC",
+                    "explanation_text": "25.... 26.... 27.... 28.... 29....",
+                    "image_count": 1,
+                    "chapter": "第五章 运动的合成与分解",
+                    "section": "5.2 运动的合成与分解",
+                }
+            },
+        )(),
+    ]
+
+    message = ingest_module._build_completion_message(document, chunks)
+
+    assert "导入完成，共写入 2 个片段" in message
+    assert "按题目/题块拆分 2 个" in message
+    assert "答案 2 个" in message
+    assert "解析 2 个" in message
+    assert "识别章节 1 个" in message
+    assert "识别小节 1 个" in message
+    assert "附图 3 张" in message

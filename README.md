@@ -72,11 +72,11 @@ celery -A backend.tasks.celery_app.celery_app worker -l info
 ### PDF 解析器（本机 MinerU 部署）
 
 - 当前仓库已支持通过环境变量把 **PDF** 解析路径切到 MinerU，`DOCX/TXT` 不受影响
-- 本机正式部署建议在 `.env` 中使用：
+- 本机正式部署建议在 `.env` 中使用 `Workspace` 下的持久路径；`docker compose` 容器内仍使用镜像自带的 `/tmp/mineru-venv/bin/python`：
 
 ```bash
 PDF_PARSER_BACKEND=mineru
-MINERU_PYTHON_BIN=/tmp/mineru-venv/bin/python
+MINERU_PYTHON_BIN=/home/binyu/文档/trae_projects/.runtime/mineru-venv/bin/python
 MINERU_BACKEND=pipeline
 MINERU_PARSE_METHOD=auto
 MINERU_DEVICE=cuda

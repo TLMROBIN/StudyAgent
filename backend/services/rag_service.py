@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path, PurePosixPath
@@ -1106,8 +1107,9 @@ class RagService:
         parser_provenance: dict[str, Any] | None = None,
     ) -> list[PreparedChunk]:
         normalized_text = self._normalize_question_source_text(text)
-        prepared_chunks: list[PreparedChunk] = []
-        for question_text, answer_bank in self._split_question_groups(normalized_text or text):
+        prepared_chunk_records: list[tuple[int, int, PreparedChunk]] = []
+        order = 0
+        for group_id, (question_text, answer_bank) in enumerate(self._split_question_groups(normalized_text or text)):
             question_blocks = self._parse_numbered_blocks(
                 question_text,
                 keep_wrapped_subquestions=True,
@@ -1120,7 +1122,8 @@ class RagService:
             if not question_blocks:
                 continue
 
-            answer_lookup = self._parse_answer_bank(answer_bank or "")
+            expected_numbers = [number for number, _ in question_blocks]
+            answer_lookup = self._parse_answer_bank(answer_bank or "", expected_numbers=expected_numbers)
             question_blocks, repeated_answer_lookup = self._merge_repeated_answer_bank_blocks(
                 question_blocks
             )
@@ -1143,7 +1146,8 @@ class RagService:
                     parser_provenance=parser_provenance,
                 )
                 if grouped_chunk is not None:
-                    prepared_chunks.append(grouped_chunk)
+                    prepared_chunk_records.append((group_id, order, grouped_chunk))
+                    order += 1
                     continue
 
             for number, block_text in question_blocks:
@@ -1153,16 +1157,18 @@ class RagService:
                     raw_metadata_text = "\n".join(part for part in (block_text, answer_bank or "") if str(part).strip())
                 merged_answer = (
                     local_answer
+                    or single_group_answer
                     or answer_lookup.get(number, {}).get("answer_text")
                     or repeated_answer_lookup.get(number, {}).get("answer_text")
-                    or single_group_answer
                 )
                 merged_explanation = (
                     local_explanation
+                    or single_group_explanation
                     or answer_lookup.get(number, {}).get("explanation_text")
                     or repeated_answer_lookup.get(number, {}).get("explanation_text")
-                    or single_group_explanation
                 )
+                merged_answer = self._strip_matching_question_number_prefix(merged_answer, number)
+                merged_explanation = self._strip_matching_question_number_prefix(merged_explanation, number)
                 combined_text = self._compose_question_chunk_text(
                     number=number,
                     question_text=question_body,
@@ -1190,8 +1196,7 @@ class RagService:
                     answer_text=readable_answer_text,
                     explanation_text=clean_explanation_text or None,
                 )
-                prepared_chunks.append(
-                    self._build_question_bank_chunk(
+                chunk = self._build_question_bank_chunk(
                         document,
                         content=finalized_text,
                         question_number=number,
@@ -1204,9 +1209,172 @@ class RagService:
                         parser_backend=parser_backend,
                         parser_provenance=parser_provenance,
                         raw_block_text=raw_metadata_text,
-                    )
                 )
-        return prepared_chunks
+                prepared_chunk_records.append((group_id, order, chunk))
+                order += 1
+        return self._reconcile_prepared_question_chunks(document, prepared_chunk_records)
+
+    def _reconcile_prepared_question_chunks(
+        self,
+        document: KnowledgeDocument,
+        chunk_records: list[tuple[int, int, PreparedChunk]],
+    ) -> list[PreparedChunk]:
+        grouped_records: dict[tuple[str, int], list[tuple[int, PreparedChunk]]] = {}
+        passthrough_records: list[tuple[int, PreparedChunk]] = []
+        first_seen_order: dict[tuple[str, int], int] = {}
+
+        for group_id, order, chunk in chunk_records:
+            metadata = chunk.metadata or {}
+            if metadata.get("chunk_kind") != "question_item":
+                passthrough_records.append((order, chunk))
+                continue
+            question_number = str(metadata.get("question_number") or "").strip()
+            if not question_number:
+                passthrough_records.append((order, chunk))
+                continue
+            key = (question_number, group_id)
+            grouped_records.setdefault(key, []).append((order, chunk))
+            first_seen_order.setdefault(key, order)
+
+        merged_records: list[tuple[int, PreparedChunk]] = passthrough_records[:]
+        for key, items in grouped_records.items():
+            ordered_items = sorted(items, key=lambda item: item[0])
+            if len(ordered_items) == 1:
+                merged_records.append((ordered_items[0][0], ordered_items[0][1]))
+                continue
+            merged_records.append(
+                (
+                    first_seen_order[key],
+                    self._merge_question_chunk_group(document, [chunk for _, chunk in ordered_items]),
+                )
+            )
+
+        merged_records.sort(key=lambda item: item[0])
+        reconciled_chunks = [chunk for _, chunk in merged_records]
+        self._apply_question_locator_collision_suffixes(document, reconciled_chunks)
+        return reconciled_chunks
+
+    def _merge_question_chunk_group(
+        self,
+        document: KnowledgeDocument,
+        chunks: list[PreparedChunk],
+    ) -> PreparedChunk:
+        primary = chunks[0]
+        primary_metadata = dict(primary.metadata or {})
+
+        question_text = self._merge_question_texts(
+            [chunk.metadata.get("question_text") for chunk in chunks if chunk.metadata]
+        )
+        answer_text = self._merge_answer_texts(
+            [chunk.metadata.get("answer_text") for chunk in chunks if chunk.metadata]
+        )
+        explanation_text = self._merge_explanation_texts(
+            [chunk.metadata.get("explanation_text") for chunk in chunks if chunk.metadata]
+        )
+        asset_refs = self.question_bank_post_processor._dedupe_asset_refs(
+            [
+                asset
+                for chunk in chunks
+                for asset in list((chunk.metadata or {}).get("asset_refs") or [])
+            ]
+        )
+
+        question_number = str(primary_metadata.get("question_number") or "").strip()
+        merged_content = self._compose_question_chunk_text(
+            number=question_number,
+            question_text=question_text,
+            answer_text=answer_text,
+            explanation_text=explanation_text,
+        )
+
+        primary_metadata["question_text"] = question_text or None
+        primary_metadata["answer_text"] = answer_text
+        primary_metadata["explanation_text"] = explanation_text
+        primary_metadata["asset_refs"] = asset_refs
+        primary_metadata["image_count"] = len(asset_refs)
+        primary_metadata["contains_images"] = bool(asset_refs)
+        image_expectation = str(primary_metadata.get("image_expectation") or "not_needed")
+        primary_metadata["image_binding_status"] = self.question_bank_post_processor._image_binding_status(
+            image_expectation,
+            asset_refs,
+        )
+        primary_metadata["quality_flags"] = self.question_bank_post_processor._quality_flags(
+            question_text=question_text,
+            answer_text=answer_text,
+            explanation_text=explanation_text,
+            image_binding_status=str(primary_metadata.get("image_binding_status") or "none_needed"),
+        )
+        source_locator = str(primary_metadata.get("source_locator") or f"question:{question_number}").strip()
+        primary_metadata["source_locator"] = source_locator
+        primary_metadata["question_uid"] = f"qb:{document.id}:{source_locator or question_number or 'unknown'}"
+
+        return PreparedChunk(content=merged_content, metadata=primary_metadata)
+
+    def _merge_question_texts(self, texts: list[str | None]) -> str:
+        valid = [str(text).strip() for text in texts if str(text or "").strip()]
+        if not valid:
+            return ""
+        return max(valid, key=len)
+
+    def _merge_answer_texts(self, texts: list[str | None]) -> str | None:
+        for text in texts:
+            normalized = str(text or "").strip()
+            if normalized:
+                return normalized
+        return None
+
+    def _merge_explanation_texts(self, texts: list[str | None]) -> str | None:
+        valid = [str(text).strip() for text in texts if str(text or "").strip()]
+        if not valid:
+            return None
+        deduped: list[str] = []
+        for text in valid:
+            if any(text == existing for existing in deduped):
+                continue
+            if any(text in existing for existing in deduped):
+                continue
+            deduped = [existing for existing in deduped if existing not in text]
+            deduped.append(text)
+        return "\n\n".join(deduped)
+
+    def _apply_question_locator_collision_suffixes(
+        self,
+        document: KnowledgeDocument,
+        chunks: list[PreparedChunk],
+    ) -> None:
+        numbered_chunks: dict[str, list[PreparedChunk]] = defaultdict(list)
+        for chunk in chunks:
+            metadata = chunk.metadata or {}
+            if metadata.get("chunk_kind") != "question_item":
+                continue
+            question_number = str(metadata.get("question_number") or "").strip()
+            if question_number:
+                numbered_chunks[question_number].append(chunk)
+
+        for question_number, question_chunks in numbered_chunks.items():
+            if len(question_chunks) <= 1:
+                continue
+            for index, chunk in enumerate(question_chunks, start=1):
+                metadata = chunk.metadata or {}
+                metadata["source_locator"] = f"question:{question_number}|v:{index}"
+                metadata["question_uid"] = f"qb:{document.id}:{metadata['source_locator']}"
+
+    def _strip_matching_question_number_prefix(
+        self,
+        text: str | None,
+        question_number: str,
+    ) -> str | None:
+        normalized = str(text or "").strip()
+        if not normalized or not question_number:
+            return normalized or None
+        pattern = re.compile(
+            rf"^\s*(?:"
+            rf"第\s*{re.escape(question_number)}\s*题"
+            rf"|{re.escape(question_number)}(?:\s*[、)]|\s*[.．](?!\s*\d)|\s*[:：](?!\s*\d))"
+            rf")\s*"
+        )
+        stripped = pattern.sub("", normalized, count=1).strip()
+        return stripped or normalized or None
 
     def _split_question_groups(self, text: str) -> list[tuple[str, str | None]]:
         lines = [line.rstrip() for line in str(text or "").split("\n")]
@@ -1216,9 +1384,10 @@ class RagService:
         mode = "question"
         answer_mode = "answer"
         question_count = 0
+        current_question_numbers: list[int] = []
 
         def flush() -> None:
-            nonlocal question_lines, answer_lines, mode, answer_mode, question_count
+            nonlocal question_lines, answer_lines, mode, answer_mode, question_count, current_question_numbers
             question_text = "\n".join(question_lines).strip()
             answer_text = "\n".join(answer_lines).strip() or None
             if question_text:
@@ -1228,6 +1397,7 @@ class RagService:
             mode = "question"
             answer_mode = "answer"
             question_count = 0
+            current_question_numbers = []
 
         for raw_line in lines:
             stripped = raw_line.strip()
@@ -1253,6 +1423,13 @@ class RagService:
                 question_lines.append(stripped)
                 if question_match and (question_match.group("ordinal") or question_match.group("plain") or question_match.group("wrapped")):
                     question_count += 1
+                    numeric_number = (
+                        self._matched_question_number_int(question_match)
+                        if (question_match.group("ordinal") or question_match.group("plain"))
+                        else None
+                    )
+                    if numeric_number is not None:
+                        current_question_numbers.append(numeric_number)
                 continue
 
             explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
@@ -1265,10 +1442,21 @@ class RagService:
                 flush()
                 continue
 
-            if question_match and self._line_starts_new_question_group(stripped, answer_mode=answer_mode):
+            if question_match and self._line_starts_new_question_group(
+                stripped,
+                answer_mode=answer_mode,
+                current_max_question_number=max(current_question_numbers) if current_question_numbers else None,
+            ):
                 flush()
                 question_lines.append(stripped)
                 question_count = 1
+                numeric_number = (
+                    self._matched_question_number_int(question_match)
+                    if (question_match.group("ordinal") or question_match.group("plain"))
+                    else None
+                )
+                if numeric_number is not None:
+                    current_question_numbers.append(numeric_number)
                 continue
 
             answer_lines.append(stripped)
@@ -1276,9 +1464,23 @@ class RagService:
         flush()
         return groups
 
-    def _line_starts_new_question_group(self, line: str, *, answer_mode: str) -> bool:
+    def _line_starts_new_question_group(
+        self,
+        line: str,
+        *,
+        answer_mode: str,
+        current_max_question_number: int | None = None,
+    ) -> bool:
         matched = QUESTION_START_PATTERN.match(str(line or "").strip())
         if not matched:
+            return False
+        numeric_number = self._matched_question_number_int(matched)
+        if (
+            numeric_number is not None
+            and current_max_question_number is not None
+            and answer_mode in {"answer", "explanation"}
+            and numeric_number <= current_max_question_number
+        ):
             return False
         body = str(matched.group("body") or "").strip()
         if matched.group("wrapped") and answer_mode in {"answer", "explanation"}:
@@ -1303,6 +1505,12 @@ class RagService:
             token in stripped
             for token in ("（", "( ", "（　", "求", "下列", "正确", "错误", "如图", "已知", "关于", "判断", "的是", "说明", "题")
         )
+
+    def _matched_question_number_int(self, matched: re.Match[str] | None) -> int | None:
+        if matched is None:
+            return None
+        raw = self._question_number_from_match(matched)
+        return int(raw) if str(raw).isdigit() else None
 
     def _should_group_question_blocks(
         self,
@@ -1537,6 +1745,11 @@ class RagService:
             if matched and not (
                 keep_wrapped_subquestions and matched.group("wrapped") and current_number
             ):
+                body = (matched.group("body") or "").strip()
+                if matched.group("plain") and re.fullmatch(r"\d+(?:\s*[.．、]\s*\d+)*", body):
+                    if current_number:
+                        current_lines.append(stripped)
+                    continue
                 if current_number and any(item.strip() for item in current_lines):
                     blocks.append((current_number, current_lines[:]))
                 current_number = self._question_number_from_match(matched)
@@ -1552,11 +1765,14 @@ class RagService:
     def _question_number_from_match(self, matched: re.Match[str]) -> str:
         return matched.group("ordinal") or matched.group("plain") or matched.group("wrapped") or ""
 
-    def _parse_answer_bank(self, text: str) -> dict[str, dict[str, str]]:
+    def _parse_answer_bank(
+        self,
+        text: str,
+        *,
+        expected_numbers: list[str] | None = None,
+    ) -> dict[str, dict[str, str]]:
         normalized_bank = self._normalize_answer_bank_text(text)
         answer_blocks = self._parse_numbered_blocks(normalized_bank)
-        if not answer_blocks:
-            return {}
         answer_lookup: dict[str, dict[str, str]] = {}
         for number, block_text in answer_blocks:
             answer_text, explanation_text = self._split_answer_block_sections(block_text)
@@ -1565,7 +1781,97 @@ class RagService:
                 "answer_text": answer_text or existing.get("answer_text") or "",
                 "explanation_text": explanation_text or existing.get("explanation_text") or "",
             }
+        if expected_numbers:
+            targeted_lookup = self._parse_answer_bank_by_expected_numbers(text, expected_numbers)
+            for number, payload in targeted_lookup.items():
+                existing = answer_lookup.get(number, {})
+                answer_lookup[number] = {
+                    "answer_text": payload.get("answer_text") or existing.get("answer_text") or "",
+                    "explanation_text": payload.get("explanation_text") or existing.get("explanation_text") or "",
+                }
+            answer_lookup = {
+                number: answer_lookup.get(number, {"answer_text": "", "explanation_text": ""})
+                for number in expected_numbers
+            }
         return answer_lookup
+
+    def _parse_answer_bank_by_expected_numbers(
+        self,
+        text: str,
+        expected_numbers: list[str],
+    ) -> dict[str, dict[str, str]]:
+        expected = [str(number).strip() for number in expected_numbers if str(number).strip()]
+        if not expected:
+            return {}
+
+        answer_section, explanation_section = self._split_raw_answer_bank_sections(text)
+        answer_entries = self._split_section_by_expected_numbers(answer_section, expected)
+        explanation_entries = self._split_section_by_expected_numbers(explanation_section, expected)
+
+        return {
+            number: {
+                "answer_text": answer_entries.get(number, ""),
+                "explanation_text": explanation_entries.get(number, ""),
+            }
+            for number in expected
+        }
+
+    def _split_raw_answer_bank_sections(self, text: str) -> tuple[str, str]:
+        answer_lines: list[str] = []
+        explanation_lines: list[str] = []
+        current_section = "answer"
+        for raw_line in str(text or "").split("\n"):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            answer_match = ANSWER_LINE_PATTERN.match(stripped)
+            explanation_match = EXPLANATION_LINE_PATTERN.match(stripped)
+            if DIFFICULTY_LINE_PATTERN.match(stripped) or KNOWLEDGE_POINTS_LINE_PATTERN.match(stripped):
+                continue
+            if answer_match:
+                current_section = "answer"
+                body = str(answer_match.group("body") or "").strip()
+                if body:
+                    answer_lines.append(body)
+                continue
+            if explanation_match:
+                current_section = "explanation"
+                body = str(explanation_match.group("body") or "").strip()
+                if body:
+                    explanation_lines.append(body)
+                continue
+            if current_section == "answer":
+                answer_lines.append(stripped)
+            else:
+                explanation_lines.append(stripped)
+        return "\n".join(answer_lines).strip(), "\n".join(explanation_lines).strip()
+
+    def _split_section_by_expected_numbers(
+        self,
+        text: str,
+        expected_numbers: list[str],
+    ) -> dict[str, str]:
+        body = str(text or "").strip()
+        if not body:
+            return {}
+
+        escaped = "|".join(sorted({re.escape(number) for number in expected_numbers}, key=len, reverse=True))
+        marker_pattern = re.compile(
+            rf"(?:(?P<plain>{escaped})\s*[.．、)]|(?:(?<=^)|(?<=[\s；;。]))第\s*(?P<ordinal>{escaped})\s*题)"
+        )
+        matches = list(marker_pattern.finditer(body))
+        if not matches:
+            return {}
+
+        result: dict[str, str] = {}
+        for index, match in enumerate(matches):
+            number = match.group("ordinal") or match.group("plain") or ""
+            start = match.end()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+            segment = body[start:end].strip()
+            if segment:
+                result[number] = segment
+        return result
 
     def _normalize_answer_bank_text(self, text: str) -> str:
         normalized_lines: list[str] = []

@@ -207,6 +207,61 @@ onMounted(loadUsers)
           <button class="ghost-button">批量创建 CSV / XLSX</button>
         </el-upload>
       </div>
+      <div class="task-card">
+        <div class="task-card-head">
+          <strong>批量导入格式说明</strong>
+        </div>
+        <div class="dashboard-stack">
+          <p class="panel-subcopy">
+            仅支持 <code>csv</code> 和 <code>xlsx</code>。表头可使用英文列名或中文列名。
+          </p>
+          <div class="table-like">
+            <article class="table-row table-row-wrap">
+              <strong>必填列</strong>
+              <span><code>full_name</code> / <code>姓名</code></span>
+              <span><code>role</code> / <code>身份</code></span>
+            </article>
+            <article class="table-row table-row-wrap">
+              <strong>学生额外必填</strong>
+              <span><code>class_name</code> / <code>班级</code></span>
+              <span><code>grade</code> / <code>年级</code></span>
+            </article>
+            <article class="table-row table-row-wrap">
+              <strong>身份取值</strong>
+              <span><code>student</code> / 学生</span>
+              <span><code>teacher</code> / 教师</span>
+            </article>
+            <article class="table-row table-row-wrap">
+              <strong>学生年级取值</strong>
+              <span>仅支持 <code>1</code> / <code>2</code> / <code>3</code></span>
+              <span>分别表示高一 / 高二 / 高三</span>
+            </article>
+            <article class="table-row table-row-wrap">
+              <strong>班级格式</strong>
+              <span>班级名必须带班级数字</span>
+              <span>示例：<code>3班</code>、<code>高一（2）班</code></span>
+            </article>
+            <article class="table-row table-row-wrap">
+              <strong>教师规则</strong>
+              <span>教师不使用年级和班级列</span>
+              <span>填写了也会被忽略</span>
+            </article>
+            <article class="table-row table-row-wrap">
+              <strong>账号与密码</strong>
+              <span>登录账号自动生成为姓名拼音</span>
+              <span>学生会追加班级数字后缀；默认密码为姓名拼音 + <code>123456</code></span>
+            </article>
+          </div>
+          <div class="table-like">
+            <article class="table-row table-row-wrap">
+              <strong>CSV / XLSX 示例</strong>
+              <span><code>full_name,role,class_name,grade</code></span>
+              <span><code>张三,student,3班,1</code></span>
+              <span><code>李四,teacher,,</code></span>
+            </article>
+          </div>
+        </div>
+      </div>
       <div v-if="importResult" class="task-card">
         <div class="task-card-head">
           <strong>最近导入反馈</strong>

@@ -51,6 +51,7 @@ def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_
     answer_count = 0
     explanation_count = 0
     image_count = 0
+    has_grouped_question_identifier = False
     chapters: set[str] = set()
     sections: set[str] = set()
 
@@ -58,6 +59,9 @@ def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_
         metadata = getattr(chunk, "metadata", {}) or {}
         if metadata.get("chunk_kind") == "question_item":
             question_count += 1
+            question_number = str(metadata.get("question_number") or "").strip()
+            if "-" in question_number:
+                has_grouped_question_identifier = True
         if metadata.get("answer_text"):
             answer_count += 1
         if metadata.get("explanation_text"):
@@ -74,11 +78,15 @@ def _build_completion_message(document: KnowledgeDocument, chunks: list, parsed_
     parts = [f"导入完成，共写入 {len(chunks)} 个片段"]
     resource_type = document.resource_type or ResourceType.KNOWLEDGE_NOTE.value
     if question_count:
-        parts.append(f"按题目拆分 {question_count} 道题")
+        parts.append(
+            f"按题目/题块拆分 {question_count} 个"
+            if has_grouped_question_identifier
+            else f"按题目拆分 {question_count} 道题"
+        )
         if answer_count:
-            parts.append(f"答案 {answer_count} 道")
+            parts.append(f"答案 {answer_count} 个" if has_grouped_question_identifier else f"答案 {answer_count} 道")
         if explanation_count:
-            parts.append(f"解析 {explanation_count} 道")
+            parts.append(f"解析 {explanation_count} 个" if has_grouped_question_identifier else f"解析 {explanation_count} 道")
     elif resource_type in QUESTION_RESOURCE_TYPES:
         parts.append("未识别到稳定题号，当前按段落切分")
     else:

@@ -116,6 +116,19 @@ def test_embedding_normalization_expands_common_latex_tokens():
     assert "下标" in normalized
 
 
+def test_hash_fallback_dimension_matches_bge_m3_runtime_contract():
+    embedder = EmbedService(
+        Settings(
+            EMBEDDING_MODEL_NAME="BAAI/bge-m3",
+            EMBEDDING_BACKEND="sentence-transformers",
+            EMBEDDING_DIMENSION=128,
+            EMBEDDING_DEVICE="cpu",
+        )
+    )
+
+    assert embedder._hash_embedding_dimension() == 1024
+
+
 def test_split_text_returns_multiple_chunks_for_long_content(tmp_path):
     rag_service = build_rag_service(tmp_path)
     text = "函数单调性" * 200
@@ -3131,6 +3144,179 @@ def test_prepare_question_chunks_groups_multi_question_blocks_with_shared_answer
     assert "29. 第二组第5题。" in prepared[1].metadata["question_text"]
     assert "25. D 26. C 27. A 28. B 29. ABC" in (prepared[1].metadata["answer_text"] or "")
     assert "29. 第二组解析五。" in (prepared[1].metadata["explanation_text"] or "")
+
+
+def test_prepare_question_chunks_reconciles_duplicate_question_number_within_same_group_and_suffixes_cross_group_ids(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=40,
+        subject="物理",
+        filename="duplicate-number-reconcile.docx",
+        file_path=str(tmp_path / "duplicate-number-reconcile.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1. 第一组题干。",
+                "参考答案",
+                "1. A",
+                "解析：1. 第一组解析。",
+                "三、综合题",
+                "1. 第二组题干。",
+                "参考答案",
+                "1. B",
+                "解析：1. 第二组解析。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].metadata["question_number"] == "1"
+    assert prepared[0].metadata["answer_text"] == "A"
+    assert "第一组解析" in (prepared[0].metadata["explanation_text"] or "")
+    assert prepared[0].metadata["source_locator"] == "question:1|v:1"
+    assert prepared[0].metadata["question_uid"] == "qb:40:question:1|v:1"
+    assert "group_id" not in prepared[0].metadata
+
+    assert prepared[1].metadata["question_number"] == "1"
+    assert prepared[1].metadata["answer_text"] == "B"
+    assert "第二组解析" in (prepared[1].metadata["explanation_text"] or "")
+    assert prepared[1].metadata["source_locator"] == "question:1|v:2"
+    assert prepared[1].metadata["question_uid"] == "qb:40:question:1|v:2"
+    assert "group_id" not in prepared[1].metadata
+
+
+def test_prepare_question_chunks_ignores_repeated_number_prefixes_inside_answer_and_explanation_banks(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=42,
+        subject="物理",
+        filename="repeated-number-banks.docx",
+        file_path=str(tmp_path / "repeated-number-banks.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "21．第一题题干。",
+                "22．第二题题干。",
+                "【答案】19．旧答案 20．旧答案 21．A 22．B",
+                "【解析】19．旧解析。",
+                "20．旧解析。",
+                "21．第一题解析。",
+                "22．第二题解析。",
+                "23．第三题题干。",
+                "【答案】23．C",
+                "【解析】23．第三题解析。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert [chunk.metadata["question_number"] for chunk in prepared] == ["21", "22", "23"]
+    assert prepared[0].metadata["answer_text"] == "A"
+    assert "第一题解析" in (prepared[0].metadata["explanation_text"] or "")
+    assert prepared[1].metadata["answer_text"] == "B"
+    assert "第二题解析" in (prepared[1].metadata["explanation_text"] or "")
+    assert prepared[2].metadata["answer_text"] == "C"
+    assert "第三题解析" in (prepared[2].metadata["explanation_text"] or "")
+
+
+def test_parse_answer_bank_assigns_inline_shared_answer_bank_back_to_each_expected_question(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+
+    answer_lookup = rag_service._parse_answer_bank(
+        "\n".join(
+            [
+                "【答案】37．C    38．D    39．B    40．0.02 0.12W 41．电流 电压 a 1.48 1.29",
+                "【解析】37．旧题解析。38．第38题解析。39．第39题解析。40．第40题解析。41．第41题解析。",
+            ]
+        ),
+        expected_numbers=["38", "39", "40", "41"],
+    )
+
+    assert answer_lookup["38"]["answer_text"] == "D"
+    assert "解析" in answer_lookup["38"]["explanation_text"]
+    assert answer_lookup["39"]["answer_text"] == "B"
+    assert "解析" in answer_lookup["39"]["explanation_text"]
+    assert "0.02" in answer_lookup["40"]["answer_text"]
+    assert "解析" in answer_lookup["40"]["explanation_text"]
+    assert "电流" in answer_lookup["41"]["answer_text"]
+    assert "解析" in answer_lookup["41"]["explanation_text"]
+
+
+def test_prepare_question_chunks_keeps_decimal_numeric_answers_when_question_number_matches_prefix(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=41,
+        subject="物理",
+        filename="decimal-answer.docx",
+        file_path=str(tmp_path / "decimal-answer.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "1. 求加速度大小。",
+                "【答案】1.5 m/s",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 1
+    assert prepared[0].metadata["question_number"] == "1"
+    assert prepared[0].metadata["answer_text"] == "1.5 m/s"
+
+
+def test_prepare_question_chunks_does_not_split_connector_label_like_1_and_3_as_new_question(tmp_path):
+    rag_service = build_rag_service(tmp_path)
+    document = KnowledgeDocument(
+        id=43,
+        subject="物理",
+        filename="connector-label.docx",
+        file_path=str(tmp_path / "connector-label.docx"),
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=12,
+        resource_type=ResourceType.QUESTION_SET.value,
+    )
+
+    prepared = rag_service.prepare_document_chunks(
+        document,
+        "\n".join(
+            [
+                "32．如图所示，电流表 A 的量程为",
+                "$0 \\textasciitilde 0.6A$",
+                "D．将接线柱",
+                "1、3",
+                "接入电路时，改装成的电压表的量程为",
+                "$0 \\textasciitilde 21V$",
+                "【答案】AD",
+                "【详解】A",
+                "D．将接线柱1、3接入电路时，改装成的电压表量程为 21V。",
+            ]
+        ),
+        source_format="docx",
+    )
+
+    assert len(prepared) == 1
+    assert prepared[0].metadata["question_number"] == "32"
+    assert "1、3" in prepared[0].metadata["question_text"]
+    assert prepared[0].metadata["answer_text"] == "AD"
 
 
 def test_vector_store_metadata_whitelists_structure_retrieval_fields(tmp_path):

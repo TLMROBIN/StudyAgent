@@ -240,6 +240,167 @@ class TestAutoTag:
 
             assert result == {"chapter": None, "section": None}
 
+    def test_match_textbook_structure_supports_curriculum_prefix_and_reordered_words(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第一章运动的描述",
+                section="2.时间位移",
+            )
+
+            result = svc.match_textbook_structure(
+                db,
+                "必修一 第一章 第2节 位移 时间.docx",
+                "物理",
+            )
+
+            assert result == {
+                "chapter": "第一章运动的描述",
+                "section": "2.时间位移",
+            }
+
+    def test_match_textbook_structure_normalizes_dash_variants(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第一章运动的描述",
+                section="3.位置变化快慢的描述—速度",
+            )
+
+            result = svc.match_textbook_structure(
+                db,
+                "必修一 第一章 第3节 位置变化快慢的描述——速度.docx",
+                "物理",
+            )
+
+            assert result == {
+                "chapter": "第一章运动的描述",
+                "section": "3.位置变化快慢的描述—速度",
+            }
+
+    def test_match_textbook_structure_prefers_matching_decimal_chapter_over_legacy_catalogs(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            legacy = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=legacy,
+                chapter="第六章电场",
+                section="第九节 电势差",
+            )
+            modern = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=modern,
+                chapter="第十章静电场中的能量",
+                section="2.电势差",
+            )
+
+            result = svc.match_textbook_structure(
+                db,
+                "10.2+电势差-人教版必修第三册.docx",
+                "物理",
+            )
+
+            assert result == {
+                "chapter": "第十章静电场中的能量",
+                "section": "2.电势差",
+            }
+
+    def test_match_textbook_structure_can_fallback_to_chapter_when_decimal_section_missing(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            legacy = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=legacy,
+                chapter="第九章原子核",
+                section="第一节 天然放射现象",
+            )
+            modern = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=modern,
+                chapter="第九章静电场及其应用",
+                section="2.库仑定律",
+            )
+            _seed_textbook_chunk(
+                db,
+                document=modern,
+                chapter="第九章静电场及其应用",
+                section="3.电场电场强度",
+            )
+
+            result = svc.match_textbook_structure(
+                db,
+                "9.1+电荷-人教版必修第三册.docx",
+                "物理",
+            )
+
+            assert result == {
+                "chapter": "第九章静电场及其应用",
+                "section": None,
+            }
+
+    def test_match_textbook_structure_recognizes_trailing_curriculum_suffix_patterns(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第十三章电磁感应与电磁波初步",
+                section="1.磁场磁感线",
+            )
+
+            result = svc.match_textbook_structure(
+                db,
+                "13.1+磁场+磁感线-人教版必修第三册.docx",
+                "物理",
+            )
+
+            assert result == {
+                "chapter": "第十三章电磁感应与电磁波初步",
+                "section": "1.磁场磁感线",
+            }
+
+    def test_match_textbook_structure_handles_equal_rank_candidates_without_crashing(self):
+        factory = setup_db()
+        svc = AutoTagService(cache_ttl=0)
+        with factory() as db:
+            textbook = _seed_textbook(db, "物理", [])
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第十一章 交变电流",
+                section="第一节 交变电流",
+            )
+            _seed_textbook_chunk(
+                db,
+                document=textbook,
+                chapter="第十二章 直流电流",
+                section="第一节 直流电流",
+            )
+
+            result = svc.match_textbook_structure(db, "电流.docx", "物理")
+
+            assert result in (
+                {"chapter": None, "section": None},
+                {"chapter": "第十一章 交变电流", "section": "第一节 交变电流"},
+                {"chapter": "第十二章 直流电流", "section": "第一节 直流电流"},
+            )
+
 
 class TestCache:
     def test_cache_reuses_within_ttl(self):
