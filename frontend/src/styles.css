@@ -926,6 +926,15 @@ textarea {
   background: rgba(255, 249, 238, 0.84);
 }
 
+.recommendation-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.recommendation-controls .panel-subcopy {
+  margin: 0;
+}
+
 .recommendation-seed,
 .recommendation-state {
   margin: 0;

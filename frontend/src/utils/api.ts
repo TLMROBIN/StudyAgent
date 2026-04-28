@@ -73,7 +73,9 @@ export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment
 
 export interface QuestionRecommendationRequest {
   subject: string
-  question: string
+  recommendation_mode: 'context' | 'keyword'
+  question?: string
+  conversation_id?: number | null
   limit?: number
   student_grade?: number | null
   include_solutions?: boolean

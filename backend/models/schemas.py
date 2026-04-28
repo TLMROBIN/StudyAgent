@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer
+from pydantic import AliasChoices, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
@@ -131,11 +131,24 @@ class ChatRequest(BaseModel):
 
 class QuestionRecommendationRequest(BaseModel):
     subject: str
-    question: str = Field(min_length=2, max_length=500)
+    recommendation_mode: Literal["context", "keyword"] = "keyword"
+    question: str | None = Field(default=None, max_length=500)
+    conversation_id: int | None = None
     limit: int = Field(default=3, ge=1, le=3)
     student_grade: int | None = Field(default=None, ge=1, le=3)
     include_solutions: bool = False
     difficulty_preference: Literal["basic", "standard", "advanced"] = "basic"
+
+    @model_validator(mode="after")
+    def validate_seed(self) -> "QuestionRecommendationRequest":
+        self.question = (self.question or "").strip() or None
+        if self.recommendation_mode == "keyword":
+            if not self.question or len(self.question) < 2:
+                raise ValueError("Keyword query must contain at least 2 characters")
+            return self
+        if self.conversation_id is None:
+            raise ValueError("Conversation id is required for context recommendations")
+        return self
 
 
 class ResolveConversationRequest(BaseModel):

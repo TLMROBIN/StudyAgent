@@ -23,6 +23,7 @@ from backend.models.conversation import (
     IMAGE_ONLY_MESSAGE_PLACEHOLDER,
     Message,
     MessageRole,
+    normalize_conversation_seed,
 )
 from backend.models.schemas import (
     ChatRequest,
@@ -179,6 +180,58 @@ def _effective_recommendation_grade(current_user: User, payload: QuestionRecomme
     if current_user.role == UserRole.STUDENT:
         return current_user.grade
     return payload.student_grade
+
+
+def _conversation_recommendation_seed(conversation: Conversation) -> str:
+    topic = conversation.topic.strip()
+    recent_prompts: list[str] = []
+    for message in reversed(conversation.messages):
+        if message.role != MessageRole.USER:
+            continue
+        seed = normalize_conversation_seed(message.content)
+        if not seed:
+            continue
+        if any(seed == existing for existing in recent_prompts):
+            continue
+        recent_prompts.append(seed)
+        if len(recent_prompts) >= 3:
+            break
+
+    ordered_parts = [topic, *reversed(recent_prompts)]
+    deduped_parts: list[str] = []
+    for part in ordered_parts:
+        normalized = part.strip()
+        if not normalized:
+            continue
+        if any(normalized in existing or existing in normalized for existing in deduped_parts):
+            continue
+        deduped_parts.append(normalized)
+    return "；".join(deduped_parts)[:500].rstrip("； ")
+
+
+def _resolve_recommendation_query(
+    db: DbSession,
+    current_user: User,
+    payload: QuestionRecommendationRequest,
+) -> str:
+    if payload.recommendation_mode == "keyword":
+        return payload.question or ""
+
+    conversation = db.scalar(
+        select(Conversation)
+        .options(_message_load_option())
+        .where(
+            Conversation.id == payload.conversation_id,
+            Conversation.student_id == current_user.id,
+        )
+    )
+    if not conversation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    seed = _conversation_recommendation_seed(conversation)
+    if not seed:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Conversation has no usable context")
+    return seed
 
 
 def _instant_stream(
@@ -342,7 +395,8 @@ def recommend_questions(
     db: DbSession,
     current_user: CurrentUser,
 ) -> list[QuestionRecommendationRead]:
-    decision = filter_service.check_question(payload.question, payload.subject)
+    recommendation_query = _resolve_recommendation_query(db, current_user, payload)
+    decision = filter_service.check_question(recommendation_query, payload.subject)
     if not decision.allowed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is not a supported academic prompt")
 
@@ -351,7 +405,7 @@ def recommend_questions(
     rows = rag_service.recommend_questions(
         db,
         subject,
-        payload.question,
+        recommendation_query,
         student_grade=_effective_recommendation_grade(current_user, payload),
         limit=payload.limit,
         difficulty_preference=payload.difficulty_preference,

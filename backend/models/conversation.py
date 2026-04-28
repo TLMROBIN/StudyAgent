@@ -40,19 +40,29 @@ TOPIC_PREFIXES = [
 
 
 def summarize_conversation_topic(subject: str, content: str | None) -> str:
-    normalized = re.sub(r"\s+", " ", (content or "").strip())
-    if normalized == IMAGE_ONLY_MESSAGE_PLACEHOLDER:
-        return f"{subject}图片答疑"
+    normalized = normalize_conversation_seed(content)
+    if not normalized:
+        if re.sub(r"\s+", " ", (content or "").strip()) == IMAGE_ONLY_MESSAGE_PLACEHOLDER:
+            return f"{subject}图片答疑"
+        return f"{subject}答疑"
     for prefix in TOPIC_PREFIXES:
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix) :].strip()
             break
-    normalized = normalized.strip("：:；;，,。！？!?、 ")
-    if not normalized:
-        return f"{subject}答疑"
     if len(normalized) > TOPIC_MAX_LENGTH:
         return f"{normalized[:TOPIC_MAX_LENGTH].rstrip()}..."
     return normalized
+
+
+def normalize_conversation_seed(content: str | None) -> str:
+    normalized = re.sub(r"\s+", " ", (content or "").strip())
+    if not normalized or normalized == IMAGE_ONLY_MESSAGE_PLACEHOLDER:
+        return ""
+    for prefix in TOPIC_PREFIXES:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+            break
+    return normalized.strip("：:；;，,。！？!?、 ")
 
 
 class Conversation(TimestampMixin, Base):

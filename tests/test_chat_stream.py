@@ -18,7 +18,9 @@ from backend.config import Settings
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
-from backend.models.conversation import ChatMessageAttachment, GuidanceStage, Message, MessageRole
+from pydantic import ValidationError
+
+from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
@@ -1103,3 +1105,83 @@ def test_recommend_questions_passes_difficulty_preference_to_rag(monkeypatch):
         assert captured["student_grade"] == 2
     finally:
         session.close()
+
+
+def test_recommend_questions_can_use_conversation_context_seed(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    captured: dict[str, object] = {}
+    try:
+        conversation = Conversation(student_id=current_user.id, subject="物理")
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+
+        session.add_all(
+            [
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.USER,
+                    content="牛顿第二定律受力分析总是不会列方程",
+                    turn_index=0,
+                    guidance_stage=GuidanceStage.INITIAL,
+                ),
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.ASSISTANT,
+                    content="先说说你准备把哪些力画出来。",
+                    turn_index=0,
+                    guidance_stage=GuidanceStage.INITIAL,
+                ),
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.USER,
+                    content="请围绕下面这道题继续引导我，不要直接给答案：斜面上的木块受力分析和加速度怎么判断",
+                    turn_index=1,
+                    guidance_stage=GuidanceStage.HINT,
+                ),
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(
+            chat_router.rag_service,
+            "recommend_questions",
+            lambda db, subject, question, **kwargs: captured.update(
+                {"subject": subject, "question": question, **kwargs}
+            ) or [],
+        )
+
+        result = chat_router.recommend_questions(
+            QuestionRecommendationRequest(
+                subject="物理",
+                recommendation_mode="context",
+                conversation_id=conversation.id,
+                difficulty_preference="standard",
+            ),
+            session,
+            current_user,
+        )
+
+        assert result == []
+        assert captured["subject"] == "物理"
+        assert captured["student_grade"] == 2
+        assert captured["difficulty_preference"] == "standard"
+        assert captured["question"] == (
+            "牛顿第二定律受力分析总是不会列方程；斜面上的木块受力分析和加速度怎么判断"
+        )
+    finally:
+        session.close()
+
+
+def test_recommendation_request_requires_conversation_id_for_context_mode():
+    try:
+        QuestionRecommendationRequest(
+            subject="物理",
+            recommendation_mode="context",
+        )
+    except ValidationError as exc:
+        assert "Conversation id is required for context recommendations" in str(exc)
+    else:
+        raise AssertionError("Expected context recommendation payload to require conversation_id")

@@ -23,6 +23,8 @@ interface ConversationSummary {
   resolved: boolean
 }
 
+type RecommendationMode = 'context' | 'keyword'
+
 const RECOMMENDATION_FETCH_LIMIT = 3
 const RECOMMENDATION_PAGE_SIZE = 3
 const recommendationDifficultyOptions = [
@@ -62,9 +64,12 @@ const guidanceStage = ref('initial_guidance')
 const recommendationPool = ref<QuestionRecommendation[]>([])
 const recommendationOffset = ref(0)
 const recommendationSeed = ref('')
+const recommendationSeedMode = ref<RecommendationMode | ''>('')
 const recommendationLoading = ref(false)
 const recommendationError = ref('')
 const recommendationDifficulty = ref<'basic' | 'standard' | 'advanced'>('basic')
+const recommendationMode = ref<RecommendationMode>('context')
+const recommendationKeyword = ref('')
 const chatStreamRef = ref<HTMLElement | null>(null)
 const imageInputRef = ref<HTMLInputElement | null>(null)
 const pendingImageFile = ref<File | null>(null)
@@ -81,16 +86,11 @@ const visibleRecommendations = computed(() => (
 const canSend = computed(() => Boolean(form.message.trim() || pendingImageFile.value))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
 const guidanceStageLabel = computed(() => stageLabel(guidanceStage.value))
-
-const activeRecommendationSeed = computed(() => {
-  if (recommendationSeed.value) {
-    return recommendationSeed.value
+const canRequestRecommendations = computed(() => {
+  if (recommendationMode.value === 'keyword') {
+    return recommendationKeyword.value.trim().length >= 2
   }
-  const draft = form.message.trim()
-  if (draft) {
-    return draft
-  }
-  return getLastUserMessage()
+  return Boolean(currentConversationId.value && getLastUserMessage())
 })
 
 function scrollToBottom() {
@@ -124,13 +124,8 @@ async function openConversation(id: number) {
     attachment: item.attachment || null,
   }))
   await preloadMessageAttachments(messages.value)
+  resetRecommendations()
   queueScrollToBottom()
-  const latestUserMessage = getLastUserMessage()
-  if (latestUserMessage) {
-    void loadRecommendations(latestUserMessage, { silent: true })
-  } else {
-    resetRecommendations()
-  }
 }
 
 async function toggleResolved() {
@@ -268,6 +263,7 @@ function resetRecommendations() {
   recommendationPool.value = []
   recommendationOffset.value = 0
   recommendationSeed.value = ''
+  recommendationSeedMode.value = ''
   recommendationError.value = ''
 }
 
@@ -365,6 +361,22 @@ function recommendationDetail(error: unknown): string {
   return '推荐题获取失败，请稍后重试'
 }
 
+function recommendationModeLabel(mode: RecommendationMode): string {
+  return mode === 'context' ? '当前问答上下文' : '学生关键词'
+}
+
+function currentRecommendationContextLabel(): string {
+  const latestUserMessage = getLastUserMessage()
+  if (latestUserMessage) {
+    return latestUserMessage
+  }
+  const currentConversation = conversations.value.find((item) => item.id === currentConversationId.value)
+  if (currentConversation) {
+    return conversationTopic(currentConversation)
+  }
+  return '当前问答上下文'
+}
+
 function chatFailureMessage(error: unknown): string {
   if (error instanceof Error) {
     const message = error.message.trim()
@@ -381,26 +393,48 @@ function chatFailureMessage(error: unknown): string {
   return '发送失败，请稍后重试'
 }
 
-async function loadRecommendations(seedText: string, options: { silent?: boolean } = {}) {
-  const seed = seedText.trim()
-  if (!seed) {
-    if (!options.silent) {
-      ElMessage.info('先输入问题，或先发送一条消息后再推荐练习')
-    }
-    return
-  }
-
+async function requestRecommendations(options: { silent?: boolean } = {}) {
   recommendationLoading.value = true
-  recommendationSeed.value = seed
   recommendationError.value = ''
   recommendationOffset.value = 0
   try {
-    const data = await fetchQuestionRecommendations({
-      subject: form.subject,
-      question: seed,
-      limit: RECOMMENDATION_FETCH_LIMIT,
-      difficulty_preference: recommendationDifficulty.value,
-    })
+    const payload = recommendationMode.value === 'context'
+      ? {
+          subject: form.subject,
+          recommendation_mode: 'context' as const,
+          conversation_id: currentConversationId.value,
+          limit: RECOMMENDATION_FETCH_LIMIT,
+          difficulty_preference: recommendationDifficulty.value,
+        }
+      : {
+          subject: form.subject,
+          recommendation_mode: 'keyword' as const,
+          question: recommendationKeyword.value.trim(),
+          limit: RECOMMENDATION_FETCH_LIMIT,
+          difficulty_preference: recommendationDifficulty.value,
+        }
+
+    if (recommendationMode.value === 'context' && !currentConversationId.value) {
+      if (!options.silent) {
+        ElMessage.info('请先发送至少一条消息，再按当前问答上下文推荐题目')
+      }
+      recommendationLoading.value = false
+      return
+    }
+    if (recommendationMode.value === 'keyword' && recommendationKeyword.value.trim().length < 2) {
+      if (!options.silent) {
+        ElMessage.info('请输入至少 2 个字的关键词')
+      }
+      recommendationLoading.value = false
+      return
+    }
+
+    recommendationSeed.value = recommendationMode.value === 'context'
+      ? currentRecommendationContextLabel()
+      : recommendationKeyword.value.trim()
+    recommendationSeedMode.value = recommendationMode.value
+
+    const data = await fetchQuestionRecommendations(payload)
     recommendationPool.value = data
     await preloadAssets(data.flatMap((item) => item.assets))
     if (!data.length) {
@@ -421,7 +455,7 @@ async function loadRecommendations(seedText: string, options: { silent?: boolean
 }
 
 function refreshRecommendations() {
-  void loadRecommendations(activeRecommendationSeed.value)
+  void requestRecommendations()
 }
 
 function switchRecommendationDifficulty(nextDifficulty: 'basic' | 'standard' | 'advanced') {
@@ -429,7 +463,17 @@ function switchRecommendationDifficulty(nextDifficulty: 'basic' | 'standard' | '
     return
   }
   recommendationDifficulty.value = nextDifficulty
-  void loadRecommendations(activeRecommendationSeed.value, { silent: true })
+  if (recommendationSeedMode.value) {
+    void requestRecommendations({ silent: true })
+  }
+}
+
+function changeRecommendationMode(nextMode: RecommendationMode) {
+  if (recommendationMode.value === nextMode) {
+    return
+  }
+  recommendationMode.value = nextMode
+  resetRecommendations()
 }
 
 function rotateRecommendations() {
@@ -441,8 +485,8 @@ function rotateRecommendations() {
     recommendationOffset.value = nextOffset
     return
   }
-  if (recommendationSeed.value) {
-    void loadRecommendations(recommendationSeed.value, { silent: true })
+  if (recommendationSeedMode.value) {
+    void requestRecommendations({ silent: true })
   }
 }
 
@@ -522,11 +566,7 @@ async function sendMessage() {
       { signal: streamAbortController.signal, retryAttempts: 2, retryDelayMs: 1200 },
     )
     await loadConversations()
-    if (message) {
-      void loadRecommendations(message, { silent: true })
-    } else {
-      resetRecommendations()
-    }
+    resetRecommendations()
   } catch (error) {
     const last = messages.value[messages.value.length - 1]
     if (error instanceof DOMException && error.name === 'AbortError') {
@@ -673,13 +713,6 @@ onMounted(async () => {
           <button class="primary-button" :disabled="sending || !canSend" @click="sendMessage">
             {{ sending ? '生成中...' : '发送问题' }}
           </button>
-          <button
-            class="ghost-button"
-            :disabled="sending || recommendationLoading"
-            @click="refreshRecommendations"
-          >
-            {{ recommendationLoading ? '推荐中...' : '推荐同类题' }}
-          </button>
           <button v-if="sending" class="ghost-button" @click="stopStreaming()">停止生成</button>
         </div>
       </div>
@@ -691,6 +724,34 @@ onMounted(async () => {
             <h2>推荐练习</h2>
             <p class="panel-subcopy">
               推荐题图片会保留在卡片中；带入聊天时仍只会自动带入题干文字，不会自动进入聊天理解。
+            </p>
+          </div>
+          <div class="recommendation-controls">
+            <div class="row-actions">
+              <button
+                :class="recommendationMode === 'context' ? 'primary-button' : 'ghost-button'"
+                :disabled="recommendationLoading"
+                @click="changeRecommendationMode('context')"
+              >
+                按当前问答上下文
+              </button>
+              <button
+                :class="recommendationMode === 'keyword' ? 'primary-button' : 'ghost-button'"
+                :disabled="recommendationLoading"
+                @click="changeRecommendationMode('keyword')"
+              >
+                按关键词
+              </button>
+            </div>
+            <el-input
+              v-if="recommendationMode === 'keyword'"
+              v-model="recommendationKeyword"
+              :disabled="recommendationLoading"
+              maxlength="500"
+              placeholder="输入知识点、题型或章节关键词，例如：牛顿第二定律 受力分析"
+            />
+            <p v-else class="panel-subcopy">
+              将根据当前会话主题与最近提问，从题库里匹配相近题目。
             </p>
           </div>
           <div class="row-actions">
@@ -706,8 +767,15 @@ onMounted(async () => {
               </button>
             </div>
             <button
+              class="primary-button"
+              :disabled="recommendationLoading || !canRequestRecommendations"
+              @click="refreshRecommendations"
+            >
+              {{ recommendationLoading ? '推荐中...' : '获取推荐题' }}
+            </button>
+            <button
               class="ghost-button"
-              :disabled="recommendationLoading || !activeRecommendationSeed"
+              :disabled="recommendationLoading || !recommendationSeedMode"
               @click="rotateRecommendations"
             >
               换一批
@@ -716,14 +784,14 @@ onMounted(async () => {
         </div>
 
         <p v-if="recommendationSeed" class="recommendation-seed">
-          当前推荐依据：{{ recommendationSeed }}
+          当前推荐依据：{{ recommendationModeLabel(recommendationSeedMode || recommendationMode) }} / {{ recommendationSeed }}
         </p>
         <p v-if="recommendationError" class="recommendation-state recommendation-state--error">
           {{ recommendationError }}
         </p>
         <p v-else-if="recommendationLoading" class="recommendation-state">正在匹配相似练习题...</p>
         <p v-else-if="!hasRecommendations" class="recommendation-state">
-          发送问题后会自动推荐同类练习，也可以直接根据当前输入手动推荐。
+          请选择推荐方式后手动获取推荐题；系统不会再自动生成推荐结果。
         </p>
 
         <div v-if="hasRecommendations" class="recommendation-grid">
