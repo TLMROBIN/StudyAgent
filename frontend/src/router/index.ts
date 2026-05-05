@@ -3,14 +3,13 @@ import { createRouter, createWebHistory } from 'vue-router'
 import pinia from '../pinia'
 import { useAuthStore } from '../stores/auth'
 import { forceLoginRedirect } from '../utils/navigation'
-
-const Login = () => import('../views/Login.vue')
-const StudentChat = () => import('../views/StudentChat.vue')
-const AdminDashboard = () => import('../views/AdminDashboard.vue')
-const KnowledgeManage = () => import('../views/KnowledgeManage.vue')
-const AuditLogs = () => import('../views/AuditLogs.vue')
-const AgentConfig = () => import('../views/AgentConfig.vue')
-const UserManage = () => import('../views/UserManage.vue')
+import AdminDashboard from '../views/AdminDashboard.vue'
+import AgentConfig from '../views/AgentConfig.vue'
+import AuditLogs from '../views/AuditLogs.vue'
+import KnowledgeManage from '../views/KnowledgeManage.vue'
+import Login from '../views/Login.vue'
+import StudentChat from '../views/StudentChat.vue'
+import UserManage from '../views/UserManage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -23,6 +22,7 @@ const router = createRouter({
     { path: '/admin/audit', component: AuditLogs, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/agent', component: AgentConfig, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/users', component: UserManage, meta: { requiresAuth: true, roles: ['admin'] } },
+    { path: '/:pathMatch(.*)*', redirect: '/login' },
   ],
 })
 
