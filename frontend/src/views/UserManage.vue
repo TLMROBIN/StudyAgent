@@ -37,6 +37,7 @@ type GradeStatus = 'unset' | '1' | '2' | '3' | 'graduated'
 
 const users = ref<UserRow[]>([])
 const importResult = ref<ImportResult | null>(null)
+const usersLoading = ref(false)
 const gradeOptions = [
   { label: '未设置', value: 'unset' },
   { label: '高一', value: '1' },
@@ -50,6 +51,11 @@ const form = reactive({
   classroom_name: '',
   grade_status: 'unset' as GradeStatus,
 })
+const filters = reactive({
+  keyword: '',
+  grade: '',
+  classroom_name: '',
+})
 const editDialogVisible = ref(false)
 const editForm = reactive({
   id: 0,
@@ -61,8 +67,30 @@ const editForm = reactive({
 })
 
 async function loadUsers() {
-  const { data } = await api.get<UserRow[]>('/admin/users')
-  users.value = data
+  usersLoading.value = true
+  try {
+    const params: Record<string, string> = {}
+    if (filters.keyword.trim()) {
+      params.keyword = filters.keyword.trim()
+    }
+    if (filters.grade) {
+      params.grade = filters.grade
+    }
+    if (filters.classroom_name.trim()) {
+      params.classroom_name = filters.classroom_name.trim()
+    }
+    const { data } = await api.get<UserRow[]>('/admin/users', { params })
+    users.value = data
+  } finally {
+    usersLoading.value = false
+  }
+}
+
+async function resetFilters() {
+  filters.keyword = ''
+  filters.grade = ''
+  filters.classroom_name = ''
+  await loadUsers()
 }
 
 function parseGradePayload(gradeStatus: GradeStatus) {
@@ -288,6 +316,36 @@ onMounted(loadUsers)
           <p class="eyebrow">User Table</p>
           <h2>当前账号</h2>
         </div>
+        <div class="toolbar">
+          <button class="ghost-button" :disabled="usersLoading" @click="loadUsers">刷新</button>
+        </div>
+      </div>
+      <div class="user-form-grid user-filter-grid">
+        <el-input
+          v-model="filters.keyword"
+          clearable
+          placeholder="按姓名搜索"
+          @keyup.enter="loadUsers"
+          @clear="loadUsers"
+        />
+        <el-select v-model="filters.grade" clearable placeholder="按年级筛选" @change="loadUsers" @clear="loadUsers">
+          <el-option label="未设置" value="unset" />
+          <el-option label="高一" value="1" />
+          <el-option label="高二" value="2" />
+          <el-option label="高三" value="3" />
+          <el-option label="毕业" value="graduated" />
+        </el-select>
+        <el-input
+          v-model="filters.classroom_name"
+          clearable
+          placeholder="按班级筛选，如 3班"
+          @keyup.enter="loadUsers"
+          @clear="loadUsers"
+        />
+        <div class="toolbar">
+          <button class="primary-button" :disabled="usersLoading" @click="loadUsers">筛选</button>
+          <button class="ghost-button" :disabled="usersLoading" @click="resetFilters">清空</button>
+        </div>
       </div>
       <article v-for="item in users" :key="item.id" class="table-row">
         <strong>{{ item.full_name }}</strong>
@@ -301,6 +359,7 @@ onMounted(loadUsers)
         <button class="ghost-button" @click="resetPassword(item.id)">重置密码</button>
         <button class="ghost-button danger-text" @click="deleteUser(item)">删除</button>
       </article>
+      <p v-if="!users.length" class="panel-subcopy">暂无匹配账号。</p>
     </section>
   </section>
 

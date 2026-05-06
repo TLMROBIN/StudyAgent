@@ -132,8 +132,32 @@ def _apply_managed_user_payload(
 
 
 @router.get("/users", response_model=list[UserRead])
-def list_users(db: DbSession, current_user: CurrentAdmin) -> list[UserRead]:
-    users = db.scalars(select(User).order_by(User.created_at.desc())).all()
+def list_users(
+    db: DbSession,
+    current_user: CurrentAdmin,
+    grade: str | None = None,
+    classroom_name: str | None = None,
+    keyword: str | None = None,
+) -> list[UserRead]:
+    statement = select(User).options(selectinload(User.classroom)).order_by(User.created_at.desc())
+
+    normalized_grade = (grade or "").strip().lower()
+    if normalized_grade in {"1", "2", "3"}:
+        statement = statement.where(User.grade == int(normalized_grade), User.graduated_at.is_(None))
+    elif normalized_grade == "unset":
+        statement = statement.where(User.grade.is_(None), User.graduated_at.is_(None))
+    elif normalized_grade == "graduated":
+        statement = statement.where(User.graduated_at.is_not(None))
+
+    normalized_classroom_name = _normalized_classroom_name(classroom_name)
+    if normalized_classroom_name:
+        statement = statement.join(User.classroom).where(Classroom.name.contains(normalized_classroom_name))
+
+    normalized_keyword = (keyword or "").strip()
+    if normalized_keyword:
+        statement = statement.where(User.full_name.contains(normalized_keyword))
+
+    users = db.scalars(statement).all()
     return [UserRead.model_validate(user) for user in users]
 
 

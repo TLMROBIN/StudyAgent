@@ -201,6 +201,61 @@ def test_import_users_supports_xlsx_and_teacher_rows(monkeypatch):
         session.close()
 
 
+def test_list_users_supports_grade_classroom_and_name_filters():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        class_one = Classroom(grade=1, name="1班")
+        class_two = Classroom(grade=2, name="2班")
+        zhang = User(
+            username="zhangsan1",
+            full_name="张三",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=1,
+            classroom=class_one,
+        )
+        li = User(
+            username="lisi2",
+            full_name="李四",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=2,
+            classroom=class_two,
+        )
+        teacher = User(
+            username="wanglaoshi",
+            full_name="王老师",
+            role=UserRole.TEACHER,
+            password_hash="hash",
+        )
+        session.add_all([admin_user, class_one, class_two, zhang, li, teacher])
+        session.commit()
+        session.refresh(admin_user)
+
+        filtered = admin_router.list_users(
+            session,
+            admin_user,
+            grade="1",
+            classroom_name="1班",
+            keyword="张",
+        )
+        teacher_match = admin_router.list_users(session, admin_user, keyword="王")
+        empty = admin_router.list_users(session, admin_user, grade="1", classroom_name="2班")
+
+        assert [item.full_name for item in filtered] == ["张三"]
+        assert [item.full_name for item in teacher_match] == ["王老师"]
+        assert empty == []
+    finally:
+        session.close()
+
+
 def test_create_user_auto_generates_username_and_default_password(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()
