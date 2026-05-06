@@ -8,7 +8,7 @@ Create Date: 2026-04-01 10:30:00
 from alembic import op
 
 from backend.database import Base
-from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
+from backend.models import agent_config, audit_log, conversation, knowledge, llm_provider, user  # noqa: F401
 
 revision = "20260401_0001"
 down_revision = None

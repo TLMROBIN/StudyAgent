@@ -276,7 +276,7 @@
   - 全量后端测试：`17 passed`
   - 前端构建：`npm run build` 已通过
 - 真实外部模型联调结果（MiniMax）：
-  - `.env` 主模型已切换为 MiniMax `MiniMax-M2.7`
+  - `.env` 主模型已切换为 MiniMax `MiniMax-M2.7-highspeed`
   - 已确认 MiniMax OpenAI 兼容流式接口可正常返回 `200`
   - 已确认 MiniMax 原始输出会带 `<think>...</think>` 推理块
   - 已在应用层过滤该推理块后复测，确认对外输出中不再包含 `<think>` 标签

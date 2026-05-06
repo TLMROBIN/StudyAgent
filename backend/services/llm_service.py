@@ -9,6 +9,7 @@ from typing import AsyncIterator
 import httpx
 
 from backend.config import get_settings
+from backend.database import SessionLocal
 
 OPEN_THINK_TAG = "<think>"
 CLOSE_THINK_TAG = "</think>"
@@ -100,6 +101,7 @@ class LLMService:
     def __init__(self) -> None:
         settings = get_settings()
         self.settings = settings
+        self._session_factory = SessionLocal
         self.providers = [
             ProviderState(
                 name=settings.llm_primary_name,
@@ -115,6 +117,37 @@ class LLMService:
             ),
         ]
 
+    def _runtime_providers(self) -> list[ProviderState]:
+        configured = self._database_providers()
+        return configured or self.providers
+
+    def _database_providers(self) -> list[ProviderState]:
+        try:
+            from sqlalchemy import select
+
+            from backend.models.llm_provider import LLMProviderConfig
+
+            session = self._session_factory()
+            try:
+                items = session.scalars(
+                    select(LLMProviderConfig)
+                    .where((LLMProviderConfig.is_active.is_(True)) | (LLMProviderConfig.is_fallback.is_(True)))
+                    .order_by(LLMProviderConfig.is_active.desc(), LLMProviderConfig.id.asc())
+                ).all()
+                return [
+                    ProviderState(
+                        name=item.name,
+                        base_url=item.base_url,
+                        api_key=item.api_key,
+                        model=item.model,
+                    )
+                    for item in items
+                ]
+            finally:
+                session.close()
+        except Exception:
+            return []
+
     async def generate_response(self, messages: list[dict[str, str]], fallback_text: str) -> str:
         chunks: list[str] = []
         async for chunk in self.stream_response(messages, fallback_text):
@@ -122,7 +155,7 @@ class LLMService:
         return "".join(chunks).strip()
 
     async def stream_response(self, messages: list[dict[str, str]], fallback_text: str) -> AsyncIterator[str]:
-        for provider in self.providers:
+        for provider in self._runtime_providers():
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:
@@ -228,7 +261,7 @@ class LLMService:
                 ],
             }
         ]
-        for provider in self.providers:
+        for provider in self._runtime_providers():
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:

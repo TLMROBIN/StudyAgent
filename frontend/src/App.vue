@@ -46,7 +46,7 @@ const navigationItems = computed<NavigationItem[]>(() => {
   if (auth.user?.role === 'admin') {
     items.push(
       { to: '/admin/audit', label: '审计日志', shortLabel: '审计' },
-      { to: '/admin/agent', label: '智能体配置', shortLabel: '配置' },
+      { to: '/admin/agent', label: '模型与配置', shortLabel: '配置' },
       { to: '/admin/users', label: '用户管理', shortLabel: '用户' },
     )
   }

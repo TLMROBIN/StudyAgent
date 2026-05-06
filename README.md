@@ -146,7 +146,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d backend wor
 
 ## LLM 默认配置
 
-- `.env.example` 当前默认主模型为 MiniMax `MiniMax-M2.7`
+- `.env.example` 当前默认主模型为 MiniMax `MiniMax-M2.7-highspeed`
 - 默认备选模型为通义千问 `qwen-plus`
 - 若你的正式环境仍使用 DeepSeek，可直接覆盖对应 `LLM_PRIMARY_*` 环境变量
 

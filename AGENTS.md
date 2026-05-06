@@ -44,7 +44,7 @@
 | 测试 | pytest | 8.4.2 |
 | 压测 | Locust | 2.37.14 |
 
-**LLM Provider**：主 MiniMax（`MiniMax-M2.7`），备 通义千问（`qwen-plus`）；均为 OpenAI 兼容接口，可通过环境变量切换到 DeepSeek。
+**LLM Provider**：主 MiniMax（`MiniMax-M2.7-highspeed`），备 通义千问（`qwen-plus`）；均为 OpenAI 兼容接口，可通过环境变量切换到 DeepSeek。
 
 ---
 
@@ -208,7 +208,7 @@ curl -fsS http://127.0.0.1:8002/health
 ```bash
 # LLM Provider
 LLM_PRIMARY_BASE_URL=https://api.minimax.chat/v1
-LLM_PRIMARY_MODEL=MiniMax-M2.7
+LLM_PRIMARY_MODEL=MiniMax-M2.7-highspeed
 LLM_FALLBACK_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_FALLBACK_MODEL=qwen-plus
 

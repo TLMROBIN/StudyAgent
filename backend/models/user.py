@@ -62,6 +62,7 @@ class User(TimestampMixin, Base):
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="student")
     uploaded_documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="creator")
     created_agent_configs: Mapped[list["AgentConfig"]] = relationship(back_populates="creator")
+    created_llm_provider_configs: Mapped[list["LLMProviderConfig"]] = relationship(back_populates="creator")
 
     @property
     def is_graduated(self) -> bool:
@@ -91,3 +92,4 @@ if TYPE_CHECKING:
     from backend.models.agent_config import AgentConfig
     from backend.models.conversation import Conversation
     from backend.models.knowledge import KnowledgeDocument
+    from backend.models.llm_provider import LLMProviderConfig

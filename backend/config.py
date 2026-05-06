@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     llm_primary_name: str = Field(default="minimax", alias="LLM_PRIMARY_NAME")
     llm_primary_base_url: str | None = Field(default="https://api.minimaxi.com/v1", alias="LLM_PRIMARY_BASE_URL")
     llm_primary_api_key: str | None = Field(default=None, alias="LLM_PRIMARY_API_KEY")
-    llm_primary_model: str = Field(default="MiniMax-M2.7", alias="LLM_PRIMARY_MODEL")
+    llm_primary_model: str = Field(default="MiniMax-M2.7-highspeed", alias="LLM_PRIMARY_MODEL")
 
     llm_fallback_name: str = Field(default="qwen", alias="LLM_FALLBACK_NAME")
     llm_fallback_base_url: str | None = Field(default=None, alias="LLM_FALLBACK_BASE_URL")

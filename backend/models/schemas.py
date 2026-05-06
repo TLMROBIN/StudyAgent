@@ -353,6 +353,38 @@ class AgentConfigRead(BaseModel):
     created_at: datetime
 
 
+class LLMProviderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    base_url: str = Field(min_length=1, max_length=255)
+    api_key: str = Field(min_length=1, max_length=512)
+    model: str = Field(min_length=1, max_length=128)
+
+
+class LLMProviderUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    base_url: str = Field(min_length=1, max_length=255)
+    api_key: str | None = Field(default=None, max_length=512)
+    model: str = Field(min_length=1, max_length=128)
+
+
+class LLMProviderSelectionUpdate(BaseModel):
+    active_provider_id: int
+    fallback_provider_id: int | None = None
+
+
+class LLMProviderRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    model: str
+    has_api_key: bool
+    is_active: bool
+    is_fallback: bool
+    created_at: datetime
+
+
 class AuditLogRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
