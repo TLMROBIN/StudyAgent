@@ -103,7 +103,7 @@ function toggleSidebar() {
           <div class="sidebar-brand">
             <p class="eyebrow">StudyAgent</p>
             <h1 class="brand-title">{{ sidebarCollapsed ? '答疑' : '高中学科答疑' }}</h1>
-            <p v-if="!sidebarCollapsed" class="brand-copy">检索增强 + 苏格拉底引导，先帮学生想清楚，再帮助学生做出来。</p>
+            <p v-if="!sidebarCollapsed" class="brand-copy">专属知识库 + 苏格拉底引导，先帮你想清楚，再帮你做出来。</p>
           </div>
           <button class="sidebar-toggle" @click="toggleSidebar">
             {{ sidebarCollapsed ? '展开' : '收起' }}

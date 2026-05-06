@@ -54,13 +54,13 @@ async function submit() {
       <p class="eyebrow">LAN Classroom AI</p>
       <h1>让答疑更像一场耐心的推理训练</h1>
       <p>
-        StudyAgent 先过滤非学科问题，再结合知识库与多轮引导，帮助学生把思路一步步搭出来。
+        StudyAgent 你的专属苏格拉底式导师，结合知识库与多轮引导，帮助你一步步形成思路，锻炼思维能力，建立完整的知识体系。
       </p>
       <ul class="feature-list">
-        <li>支持学生历史记录与已解决标记</li>
-        <li>管理端可查看统计、上传资料、调整智能体策略</li>
-        <li>面向平板设备设计，适配局域网部署</li>
+        <li>不限量问答，支持相关题目推荐匹配知识点、年级、难易度。</li>
+        <li>面向平板设备设计，适配局域网部署，不依赖外部网络。</li>
       </ul>
+      <p class="login-note login-note--hero">目前仅具备物理知识库与题库，其他学科等待完善中</p>
     </div>
     <div class="login-card">
       <div class="login-card-head">
@@ -80,6 +80,7 @@ async function submit() {
         <el-form-item label="密码">
           <el-input v-model="studentForm.password" show-password placeholder="输入密码" />
         </el-form-item>
+        <p class="login-note">初始账号：姓名全拼+班级号；初始密码姓名全拼+123456</p>
       </el-form>
       <el-form v-else class="login-form" @submit.prevent="submit">
         <el-form-item label="用户名">

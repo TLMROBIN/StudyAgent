@@ -734,6 +734,43 @@ textarea {
   color: var(--ink);
 }
 
+.user-delete-confirm {
+  border-radius: 8px;
+  border: 1px solid rgba(24, 33, 47, 0.12);
+  box-shadow: 0 20px 50px rgba(24, 33, 47, 0.18);
+}
+
+.user-delete-confirm .el-message-box__btns {
+  gap: 10px;
+}
+
+.user-delete-confirm__cancel,
+.user-delete-confirm__confirm {
+  min-width: 76px;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-weight: 700;
+}
+
+.user-delete-confirm__cancel {
+  border: 1px solid rgba(24, 33, 47, 0.16);
+  background: rgba(24, 33, 47, 0.06);
+  color: var(--ink);
+}
+
+.user-delete-confirm__confirm {
+  border: 1px solid #c2410c;
+  background: #dc2626;
+  color: #fff;
+}
+
+.user-delete-confirm__confirm:hover,
+.user-delete-confirm__confirm:focus {
+  border-color: #991b1b;
+  background: #b91c1c;
+  color: #fff;
+}
+
 .login-page {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(420px, 500px);
@@ -795,6 +832,20 @@ textarea {
 
 .login-submit {
   min-height: 48px;
+}
+
+.login-note {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(15, 118, 110, 0.08);
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.login-note--hero {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff8ed;
 }
 
 .feature-list {

@@ -213,6 +213,9 @@ async function deleteUser(user: UserRow) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      customClass: 'user-delete-confirm',
+      confirmButtonClass: 'user-delete-confirm__confirm',
+      cancelButtonClass: 'user-delete-confirm__cancel',
     })
     await api.delete(`/admin/users/${user.id}`)
     ElMessage.success('用户已删除')

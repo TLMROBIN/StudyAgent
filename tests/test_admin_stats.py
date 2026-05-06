@@ -399,6 +399,49 @@ def test_delete_user_removes_teacher(monkeypatch):
         session.close()
 
 
+def test_delete_user_removes_student_with_conversations(monkeypatch):
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        student = User(
+            username="zhangsan1",
+            full_name="张三",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=1,
+            classroom=Classroom(grade=1, name="1班"),
+        )
+        session.add_all([admin_user, student])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(student)
+
+        conversation_row = Conversation(
+            student_id=student.id,
+            subject="数学",
+            guidance_stage=GuidanceStage.INITIAL,
+        )
+        session.add(conversation_row)
+        session.commit()
+        session.refresh(conversation_row)
+        session.add(Message(conversation_id=conversation_row.id, role=MessageRole.USER, content="函数怎么做"))
+        session.commit()
+
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        admin_router.delete_user(student.id, session, admin_user, request)
+
+        assert session.get(User, student.id) is None
+        assert session.get(Conversation, conversation_row.id) is None
+    finally:
+        session.close()
+
+
 def test_reset_password_uses_generated_default(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()

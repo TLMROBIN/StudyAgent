@@ -59,7 +59,7 @@ class User(TimestampMixin, Base):
 
     classroom: Mapped[Classroom | None] = relationship(back_populates="students")
     teacher_classrooms: Mapped[list[Classroom]] = relationship(secondary=teacher_classes, back_populates="teachers")
-    conversations: Mapped[list["Conversation"]] = relationship(back_populates="student")
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="student", cascade="all, delete-orphan")
     uploaded_documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="creator")
     created_agent_configs: Mapped[list["AgentConfig"]] = relationship(back_populates="creator")
     created_llm_provider_configs: Mapped[list["LLMProviderConfig"]] = relationship(back_populates="creator")

@@ -123,7 +123,7 @@ services:
   grafana:
     image: grafana/grafana:12.2.0
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     depends_on:
       - prometheus
     environment:
