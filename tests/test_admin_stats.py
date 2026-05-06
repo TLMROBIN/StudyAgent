@@ -256,6 +256,34 @@ def test_list_users_supports_grade_classroom_and_name_filters():
         session.close()
 
 
+def test_list_classroom_options_can_follow_grade_filter():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        class_one = Classroom(grade=1, name="1班")
+        class_two = Classroom(grade=2, name="2班")
+        class_three = Classroom(grade=2, name="3班")
+        session.add_all([admin_user, class_one, class_two, class_three])
+        session.commit()
+        session.refresh(admin_user)
+
+        all_options = admin_router.list_classrooms(session, admin_user)
+        grade_two_options = admin_router.list_classrooms(session, admin_user, grade="2")
+        unset_options = admin_router.list_classrooms(session, admin_user, grade="unset")
+
+        assert [(item.grade, item.name) for item in all_options] == [(1, "1班"), (2, "2班"), (2, "3班")]
+        assert [(item.grade, item.name) for item in grade_two_options] == [(2, "2班"), (2, "3班")]
+        assert unset_options == []
+    finally:
+        session.close()
+
+
 def test_create_user_auto_generates_username_and_default_password(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()

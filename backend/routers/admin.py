@@ -8,9 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.dependencies import CurrentAdmin, DbSession
+from backend.grade_utils import format_grade_label
 from backend.models.audit_log import AuditLog
 from backend.models.schemas import (
     AuditLogRead,
+    ClassroomOptionRead,
     PasswordResetRequest,
     UserCreate,
     UserImportIssue,
@@ -159,6 +161,31 @@ def list_users(
 
     users = db.scalars(statement).all()
     return [UserRead.model_validate(user) for user in users]
+
+
+@router.get("/classrooms", response_model=list[ClassroomOptionRead])
+def list_classrooms(
+    db: DbSession,
+    current_user: CurrentAdmin,
+    grade: str | None = None,
+) -> list[ClassroomOptionRead]:
+    statement = select(Classroom).order_by(Classroom.grade.asc(), Classroom.name.asc())
+    normalized_grade = (grade or "").strip().lower()
+    if normalized_grade in {"1", "2", "3"}:
+        statement = statement.where(Classroom.grade == int(normalized_grade))
+    elif normalized_grade in {"unset", "graduated"}:
+        return []
+
+    classrooms = db.scalars(statement).all()
+    return [
+        ClassroomOptionRead(
+            id=classroom.id,
+            grade=classroom.grade,
+            name=classroom.name,
+            label=f"{format_grade_label(classroom.grade) or ''}{classroom.name}",
+        )
+        for classroom in classrooms
+    ]
 
 
 @router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)

@@ -18,6 +18,13 @@ interface UserRow {
   must_change_password: boolean
 }
 
+interface ClassroomOption {
+  id: number
+  grade: number
+  name: string
+  label: string
+}
+
 interface ImportIssue {
   row_number: number
   full_name?: string | null
@@ -36,8 +43,10 @@ interface ImportResult {
 type GradeStatus = 'unset' | '1' | '2' | '3' | 'graduated'
 
 const users = ref<UserRow[]>([])
+const classroomOptions = ref<ClassroomOption[]>([])
 const importResult = ref<ImportResult | null>(null)
 const usersLoading = ref(false)
+const classroomsLoading = ref(false)
 const gradeOptions = [
   { label: '未设置', value: 'unset' },
   { label: '高一', value: '1' },
@@ -86,10 +95,34 @@ async function loadUsers() {
   }
 }
 
+async function loadClassrooms() {
+  classroomsLoading.value = true
+  try {
+    const params: Record<string, string> = {}
+    if (filters.grade) {
+      params.grade = filters.grade
+    }
+    const { data } = await api.get<ClassroomOption[]>('/admin/classrooms', { params })
+    classroomOptions.value = data
+    if (filters.classroom_name && !data.some((item) => item.name === filters.classroom_name)) {
+      filters.classroom_name = ''
+    }
+  } finally {
+    classroomsLoading.value = false
+  }
+}
+
+async function handleGradeFilterChange() {
+  filters.classroom_name = ''
+  await loadClassrooms()
+  await loadUsers()
+}
+
 async function resetFilters() {
   filters.keyword = ''
   filters.grade = ''
   filters.classroom_name = ''
+  await loadClassrooms()
   await loadUsers()
 }
 
@@ -128,7 +161,7 @@ async function createUser() {
     classroom_name: '',
     grade_status: 'unset',
   })
-  await loadUsers()
+  await Promise.all([loadUsers(), loadClassrooms()])
 }
 
 async function importStudents(file: File) {
@@ -139,7 +172,7 @@ async function importStudents(file: File) {
   })
   importResult.value = data
   ElMessage.success(`批量创建已处理：新增 ${data.created}，跳过 ${data.skipped_existing}，异常 ${data.invalid}`)
-  await loadUsers()
+  await Promise.all([loadUsers(), loadClassrooms()])
 }
 
 async function resetPassword(userId: number) {
@@ -171,7 +204,7 @@ async function saveUserEdit() {
   await api.put(`/admin/users/${editForm.id}`, payload)
   ElMessage.success('用户信息已更新；如姓名或班级变化，登录账号会自动重算')
   editDialogVisible.value = false
-  await loadUsers()
+  await Promise.all([loadUsers(), loadClassrooms()])
 }
 
 async function deleteUser(user: UserRow) {
@@ -203,7 +236,9 @@ function formatImportReason(reason: string) {
   return mapping[reason] || reason
 }
 
-onMounted(loadUsers)
+onMounted(async () => {
+  await Promise.all([loadUsers(), loadClassrooms()])
+})
 </script>
 
 <template>
@@ -328,20 +363,24 @@ onMounted(loadUsers)
           @keyup.enter="loadUsers"
           @clear="loadUsers"
         />
-        <el-select v-model="filters.grade" clearable placeholder="按年级筛选" @change="loadUsers" @clear="loadUsers">
+        <el-select v-model="filters.grade" clearable placeholder="按年级筛选" @change="handleGradeFilterChange" @clear="handleGradeFilterChange">
           <el-option label="未设置" value="unset" />
           <el-option label="高一" value="1" />
           <el-option label="高二" value="2" />
           <el-option label="高三" value="3" />
           <el-option label="毕业" value="graduated" />
         </el-select>
-        <el-input
+        <el-select
           v-model="filters.classroom_name"
           clearable
-          placeholder="按班级筛选，如 3班"
-          @keyup.enter="loadUsers"
+          filterable
+          :disabled="classroomsLoading || !classroomOptions.length"
+          placeholder="按班级筛选"
+          @change="loadUsers"
           @clear="loadUsers"
-        />
+        >
+          <el-option v-for="item in classroomOptions" :key="item.id" :label="item.label" :value="item.name" />
+        </el-select>
         <div class="toolbar">
           <button class="primary-button" :disabled="usersLoading" @click="loadUsers">筛选</button>
           <button class="ghost-button" :disabled="usersLoading" @click="resetFilters">清空</button>

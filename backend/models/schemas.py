@@ -66,6 +66,15 @@ class UserRead(BaseModel):
     is_active: bool
 
 
+class ClassroomOptionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    grade: int
+    name: str
+    label: str
+
+
 class UserCreate(BaseModel):
     full_name: str = Field(min_length=1, max_length=64)
     role: UserRole
