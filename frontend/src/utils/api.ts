@@ -216,10 +216,21 @@ function extractResponseDetail(payload: string, status: number): string {
         return parsed.detail
       }
     } catch {
-      if (payload.trim()) {
-        return payload.trim()
+      const trimmedPayload = payload.trim()
+      if (status === 502 || status === 503 || status === 504) {
+        return '服务暂时不可用，请稍后重试'
+      }
+      if (/^\s*</.test(trimmedPayload) || /<html[\s>]/i.test(trimmedPayload)) {
+        return '请求失败，请稍后重试'
+      }
+      if (trimmedPayload) {
+        return trimmedPayload
       }
     }
+  }
+
+  if (status === 502 || status === 503 || status === 504) {
+    return '服务暂时不可用，请稍后重试'
   }
 
   return `Request failed with status ${status}`

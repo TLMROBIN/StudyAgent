@@ -32,10 +32,14 @@ class SocraticService:
 
     def infer_question_type(self, question: str) -> str:
         lowered = question.strip()
-        if any(keyword in lowered for keyword in ["求", "计算", "解", "证明", "推导"]):
+        exercise_signals = ["求", "计算", "证明", "推导", "答案", "选项", "如图", "第", "解方程", "解不等式"]
+        concept_signals = ["什么是", "是什么意思", "区别", "概念", "定义", "原理", "为什么"]
+        if any(keyword in lowered for keyword in exercise_signals):
             return "calculation"
         if any(keyword in lowered for keyword in ["分析", "评价", "说明原因", "材料"]):
             return "analysis"
+        if any(keyword in lowered for keyword in concept_signals):
+            return "concept_explanation"
         return "concept"
 
     def build_prompt(
@@ -63,6 +67,11 @@ class SocraticService:
             "涉及数学、物理、化学中的公式、方程、上下标或希腊字母时，请使用标准 LaTeX 书写。",
             "行内公式使用 $...$，独立公式使用 $$...$$，不要使用图片或伪公式文本代替。",
         ]
+        if question_type == "concept_explanation":
+            system_sections.append(
+                "基础知识解释模式：先用 2-4 句解释基础概念，再问 1 个检查理解的问题。"
+                "不要代写题目最终答案；如果问题其实是具体习题，转为引导式提问。"
+            )
         if image_related:
             system_sections.append(
                 "本轮依赖图片理解作答。你的每一轮回复都必须明确说明：你是 AI，可能会看错图片或理解得不完全准确，需要和学生一起讨论探索。"

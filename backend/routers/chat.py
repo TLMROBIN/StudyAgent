@@ -59,6 +59,10 @@ STREAM_HEARTBEAT_SECONDS = 15
 STREAM_FORCE_FLUSH_CHARS = 96
 STREAM_GUARD_TAIL_CHARS = 24
 STREAM_BOUNDARY_CHARS = {"。", "！", "？", "!", "?", "；", ";", "\n"}
+EMPTY_CHAT_RESPONSE_FALLBACK = (
+    "我刚刚没有生成出有效内容。我们换一种方式继续："
+    "请你把题目条件或卡住的一步再发我一次，我会先帮你整理已知条件。"
+)
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> str:
@@ -564,9 +568,12 @@ async def stream_chat(
             mime_type=attachment_record.mime_type,
             subject=payload.subject,
             user_text=payload.message,
+            image_path=str(chat_attachment_service.resolve_path(attachment_record.storage_key)),
+            attachment_id=attachment_record.id,
         )
         attachment_record.ocr_status = {
-            "ocr": "ocr_only",
+            "mineru_ocr": "mineru_ocr",
+            "ocr": "llm_ocr",
             "multimodal": "multimodal_fallback",
             "failed": "failed",
         }.get(image_understanding.source, "pending")
@@ -826,6 +833,8 @@ async def stream_chat(
 
             if has_image_turn:
                 emitted_text = filter_service.ensure_image_disclaimer(emitted_text)
+            if should_send_done and not emitted_text.strip():
+                emitted_text = EMPTY_CHAT_RESPONSE_FALLBACK
             if should_send_done:
                 yield _sse_event("done", {"content": emitted_text})
         finally:

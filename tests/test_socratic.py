@@ -48,6 +48,35 @@ def test_build_prompt_requires_image_turn_disclaimer():
     assert "一起讨论探索" in system_text
 
 
+def test_basic_concept_question_uses_explanation_mode():
+    prompt = socratic_service.build_prompt(
+        question="什么是惯性",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "问题类型：concept_explanation" in system_text
+    assert "2-4 句解释基础概念" in system_text
+    assert "1 个检查理解的问题" in system_text
+
+
+def test_exercise_question_stays_guided_even_with_answer_language():
+    prompt = socratic_service.build_prompt(
+        question="这道题答案是多少",
+        subject="数学",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "问题类型：calculation" in system_text
+    assert "基础知识解释模式" not in system_text
+
+
 def test_image_low_confidence_text_contains_required_disclaimer():
     text = socratic_service.image_low_confidence_text("数学")
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import {
@@ -71,9 +71,11 @@ const recommendationDifficulty = ref<'basic' | 'standard' | 'advanced'>('basic')
 const recommendationMode = ref<RecommendationMode>('context')
 const recommendationKeyword = ref('')
 const chatStreamRef = ref<HTMLElement | null>(null)
-const imageInputRef = ref<HTMLInputElement | null>(null)
+const cameraInputRef = ref<HTMLInputElement | null>(null)
+const galleryInputRef = ref<HTMLInputElement | null>(null)
 const pendingImageFile = ref<File | null>(null)
 const pendingImagePreviewUrl = ref('')
+const previousSubject = ref(form.subject)
 let streamAbortController: AbortController | null = null
 let stopRequested = false
 const localAttachmentUrls = new Set<string>()
@@ -117,6 +119,7 @@ async function openConversation(id: number) {
   clearLocalAttachmentUrls()
   const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
   form.subject = data.subject
+  previousSubject.value = data.subject
   guidanceStage.value = data.guidance_stage
   messages.value = data.messages.map((item) => ({
     role: item.role,
@@ -135,6 +138,43 @@ async function toggleResolved() {
   await api.post(`/chat/${currentConversationId.value}/resolve`, { resolved: true })
   await loadConversations()
   ElMessage.success('已标记为已解决')
+}
+
+function startNewConversation(options: { subject?: string } = {}) {
+  currentConversationId.value = null
+  messages.value = []
+  guidanceStage.value = 'initial_guidance'
+  if (options.subject) {
+    form.subject = options.subject
+    previousSubject.value = options.subject
+  }
+  resetPendingImage()
+  clearLocalAttachmentUrls()
+  resetRecommendations()
+  queueScrollToBottom()
+}
+
+async function handleSubjectChange(nextSubject: string) {
+  const oldSubject = previousSubject.value
+  if (!currentConversationId.value || messages.value.length === 0) {
+    previousSubject.value = nextSubject
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '切换学科建议新建对话，避免不同学科上下文混在一起。',
+      '新建对话',
+      {
+        confirmButtonText: '新建对话',
+        cancelButtonText: '留在当前对话',
+        type: 'warning',
+      },
+    )
+    startNewConversation({ subject: nextSubject })
+  } catch {
+    form.subject = oldSubject
+  }
 }
 
 function stopStreaming(showNotice = true) {
@@ -191,8 +231,11 @@ function resetPendingImage(options: { preservePreview?: boolean } = {}) {
   }
   pendingImageFile.value = null
   pendingImagePreviewUrl.value = ''
-  if (imageInputRef.value) {
-    imageInputRef.value.value = ''
+  if (cameraInputRef.value) {
+    cameraInputRef.value.value = ''
+  }
+  if (galleryInputRef.value) {
+    galleryInputRef.value.value = ''
   }
 }
 
@@ -202,9 +245,15 @@ function updatePendingImage(file: File) {
   pendingImagePreviewUrl.value = URL.createObjectURL(file)
 }
 
-function triggerImagePicker() {
+function triggerCameraCapture() {
   if (!sending.value) {
-    imageInputRef.value?.click()
+    cameraInputRef.value?.click()
+  }
+}
+
+function triggerGalleryPicker() {
+  if (!sending.value) {
+    galleryInputRef.value?.click()
   }
 }
 
@@ -565,6 +614,11 @@ async function sendMessage() {
       },
       { signal: streamAbortController.signal, retryAttempts: 2, retryDelayMs: 1200 },
     )
+    const last = messages.value[messages.value.length - 1]
+    if (last && last.role === 'assistant' && !last.content.trim()) {
+      last.content = '这次没有收到有效回复，请重新发送一次，或补充题目条件后再试。'
+      queueScrollToBottom()
+    }
     await loadConversations()
     resetRecommendations()
   } catch (error) {
@@ -608,7 +662,10 @@ onMounted(async () => {
           <p class="eyebrow">Student Workspace</p>
           <h2>对话历史</h2>
         </div>
-        <button class="ghost-button" @click="loadConversations">刷新</button>
+        <div class="row-actions">
+          <button class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
+          <button class="ghost-button" @click="loadConversations">刷新</button>
+        </div>
       </div>
       <div class="conversation-list">
         <button
@@ -664,13 +721,21 @@ onMounted(async () => {
 
       <div class="chat-controls">
         <input
-          ref="imageInputRef"
+          ref="cameraInputRef"
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style="display: none"
+          @change="handleImageSelection"
+        />
+        <input
+          ref="galleryInputRef"
           type="file"
           accept="image/*"
           style="display: none"
           @change="handleImageSelection"
         />
-        <el-select v-model="form.subject" :disabled="sending" placeholder="选择学科">
+        <el-select v-model="form.subject" :disabled="sending" placeholder="选择学科" @change="handleSubjectChange">
           <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
         </el-select>
         <el-input
@@ -698,7 +763,8 @@ onMounted(async () => {
             <span>{{ pendingImageFile?.name || '待发送图片' }}</span>
           </a>
           <div class="row-actions">
-            <button class="ghost-button" :disabled="sending" @click="triggerImagePicker">替换图片</button>
+            <button class="ghost-button" :disabled="sending" @click="triggerCameraCapture">重新拍照</button>
+            <button class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">从相册替换</button>
             <button class="ghost-button" :disabled="sending" @click="removePendingImage">移除图片</button>
           </div>
         </div>
@@ -707,8 +773,9 @@ onMounted(async () => {
         </p>
         <p v-if="sending" class="stream-hint">正在流式生成，可随时停止。</p>
         <div class="chat-actions">
-          <button class="ghost-button" :disabled="sending" @click="triggerImagePicker">
-            {{ pendingImageFile ? '替换图片' : '上传图片 / 拍照' }}
+          <button class="ghost-button" :disabled="sending" @click="triggerCameraCapture">拍照</button>
+          <button class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">
+            {{ pendingImageFile ? '从相册替换' : '从相册选择' }}
           </button>
           <button class="primary-button" :disabled="sending || !canSend" @click="sendMessage">
             {{ sending ? '生成中...' : '发送问题' }}

@@ -112,6 +112,7 @@ class MineruService:
         document_id: int,
         start_page: int = 0,
         end_page: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> PDFParseResult:
         if self.settings.pdf_parser_backend != "mineru":
             raise MineruStartupError("MinerU PDF parser backend is not enabled")
@@ -122,6 +123,27 @@ class MineruService:
             requested_device=self.settings.mineru_device,
             start_page=start_page,
             end_page=end_page,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def ocr_image_via_pdf(
+        self,
+        image_path: str,
+        *,
+        task_id: int,
+        document_id: int,
+        timeout_seconds: int | None = None,
+    ) -> PDFParseResult:
+        source = Path(image_path)
+        task_dir = Path(self.settings.task_artifact_path) / str(task_id)
+        pdf_path = task_dir / "chat-image-ocr-source.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_single_image_pdf(source, pdf_path)
+        return self.parse_pdf(
+            str(pdf_path),
+            task_id=task_id,
+            document_id=-abs(document_id),
+            timeout_seconds=timeout_seconds,
         )
 
     def _parse_content_list_document(
@@ -133,6 +155,7 @@ class MineruService:
         requested_device: str,
         start_page: int,
         end_page: int | None,
+        timeout_seconds: int | None = None,
     ) -> PDFParseResult:
         source_suffix = Path(file_path).suffix.lower()
 
@@ -159,7 +182,13 @@ class MineruService:
         ]
         env = self._build_runtime_env(runtime_device)
 
-        run = self._run_parse_command(command, env, runtime_artifact, runtime_device=runtime_device, requested_device=requested_device)
+        run_kwargs: dict[str, Any] = {
+            "runtime_device": runtime_device,
+            "requested_device": requested_device,
+        }
+        if timeout_seconds is not None:
+            run_kwargs["timeout_seconds"] = timeout_seconds
+        run = self._run_parse_command(command, env, runtime_artifact, **run_kwargs)
 
         stdout = run["stdout"]
         stderr = run["stderr"]
@@ -248,6 +277,17 @@ class MineruService:
                 "content_list_path": str(content_list_path),
             },
         )
+
+    def _write_single_image_pdf(self, source: Path, target: Path) -> None:
+        try:
+            from PIL import Image
+
+            with Image.open(source) as image:
+                if image.mode in {"RGBA", "LA", "P"}:
+                    image = image.convert("RGB")
+                image.save(target, "PDF", resolution=150.0)
+        except Exception as exc:
+            raise MineruStartupError(f"Failed to prepare chat image for MinerU OCR: {exc}") from exc
 
     def _normalize_block(
         self,
@@ -496,6 +536,7 @@ class MineruService:
         *,
         runtime_device: str,
         requested_device: str,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         gpu_samples: list[dict[str, Any]] = []
         baseline_samples = self._sample_gpu_processes()
@@ -520,7 +561,8 @@ class MineruService:
         sampler.start()
 
         try:
-            stdout, stderr = proc.communicate(timeout=self.settings.mineru_parse_timeout_seconds)
+            parse_timeout = timeout_seconds or self.settings.mineru_parse_timeout_seconds
+            stdout, stderr = proc.communicate(timeout=parse_timeout)
         except subprocess.TimeoutExpired:
             stop_event.set()
             with suppress(Exception):
@@ -540,7 +582,7 @@ class MineruService:
                 stderr="timeout",
             )
             raise MineruTimeoutError(
-                f"MinerU parse exceeded {self.settings.mineru_parse_timeout_seconds}s timeout"
+                f"MinerU parse exceeded {parse_timeout}s timeout"
             )
         finally:
             stop_event.set()

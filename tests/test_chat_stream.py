@@ -184,6 +184,45 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         session.close()
 
 
+def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        if False:
+            yield ""
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+
+    try:
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="函数单调性第一步怎么想"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        assert [event for event, _ in events] == ["meta", "done"]
+        assert events[-1][1]["content"] == chat_router.EMPTY_CHAT_RESPONSE_FALLBACK
+
+        stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
+        assert len(stored_messages) == 2
+        assert stored_messages[1].role == MessageRole.ASSISTANT
+        assert stored_messages[1].content == chat_router.EMPTY_CHAT_RESPONSE_FALLBACK
+    finally:
+        session.close()
+
+
 def test_chat_stream_rewrites_unsafe_output_before_emitting(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
@@ -422,7 +461,52 @@ def test_chat_stream_supports_image_only_messages_and_persists_attachment(monkey
         assert stored_messages[0].content == "[图片提问]"
         assert len(attachments) == 1
         assert attachments[0].original_filename == "question.png"
-        assert attachments[0].ocr_status == "ocr_only"
+        assert attachments[0].ocr_status == "llm_ocr"
+    finally:
+        session.close()
+
+
+def test_chat_stream_records_mineru_ocr_status_for_image_turn(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看 OCR 提取出的已知条件。"
+
+    async def fake_understand(**kwargs):
+        assert kwargs["image_path"]
+        assert kwargs["attachment_id"]
+        return ImageUnderstandingResult(
+            filter_text="已知函数 f(x)=x^2，求单调区间",
+            prompt_summary="已知函数 f(x)=x^2，求单调区间",
+            ocr_raw_text="已知函数 f(x)=x^2，求单调区间",
+            confidence_level="high",
+            source="mineru_ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "", "request_id": "mineru-image-1"},
+        files={"image": ("question.png", _make_test_image_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    session = session_factory()
+    try:
+        attachment = session.scalar(select(ChatMessageAttachment))
+        assert attachment is not None
+        assert attachment.ocr_status == "mineru_ocr"
     finally:
         session.close()
 
