@@ -594,6 +594,54 @@ def test_chat_history_includes_attachment_payload_for_image_turn(monkeypatch):
     assert messages[0]["attachment"]["url"].startswith("/api/chat/attachments/")
 
 
+def test_student_can_delete_own_conversation(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先看题干条件。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    stream_response = client.post("/api/chat/stream", json={"subject": "数学", "message": "函数题怎么想"})
+    assert stream_response.status_code == 200
+
+    conversation_id = client.get("/api/chat/history").json()[0]["id"]
+    delete_response = client.delete(f"/api/chat/{conversation_id}")
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"status": "deleted"}
+    assert client.get("/api/chat/history").json() == []
+
+
+def test_student_cannot_delete_another_students_conversation():
+    session_factory = _build_session_factory()
+    owner = _create_student(session_factory)
+    intruder = _create_user(session_factory, role=UserRole.STUDENT)
+
+    session = session_factory()
+    try:
+        conversation_row = Conversation(student_id=owner.id, subject="数学")
+        session.add(conversation_row)
+        session.commit()
+        session.refresh(conversation_row)
+        conversation_id = conversation_row.id
+    finally:
+        session.close()
+
+    intruder_client = _build_chat_test_client(session_factory, intruder)
+    assert intruder_client.delete(f"/api/chat/{conversation_id}").status_code == 404
+
+    owner_client = _build_chat_test_client(session_factory, owner)
+    assert owner_client.get("/api/chat/history").json()[0]["id"] == conversation_id
+
+
 def test_chat_attachment_route_is_private_to_owner(monkeypatch):
     session_factory = _build_session_factory()
     owner = _create_student(session_factory)

@@ -432,6 +432,28 @@ textarea {
   border-radius: 16px;
 }
 
+.conversation-card__open {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-card__actions {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.ghost-button--danger {
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.08);
+}
+
 .conversation-card--compact strong,
 .conversation-card--compact span {
   width: 100%;
@@ -940,6 +962,7 @@ textarea {
 }
 
 .preview-dialog,
+.password-dialog,
 .preview-summary,
 .preview-chunk-list {
   display: grid;

@@ -393,6 +393,18 @@ def resolve_conversation(
     return ConversationRead.model_validate(conversation)
 
 
+@router.delete("/{conversation_id}")
+def delete_conversation(conversation_id: int, db: DbSession, current_user: CurrentUser) -> dict[str, str]:
+    conversation = db.scalar(
+        select(Conversation).where(Conversation.id == conversation_id, Conversation.student_id == current_user.id)
+    )
+    if not conversation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    db.delete(conversation)
+    db.commit()
+    return {"status": "deleted"}
+
+
 @router.post("/recommendations", response_model=list[QuestionRecommendationRead])
 def recommend_questions(
     payload: QuestionRecommendationRequest,

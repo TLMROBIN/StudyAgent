@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'v
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
+import { useAuthStore } from '../stores/auth'
 import {
   api,
   type ChatConversationRead,
@@ -13,6 +14,7 @@ import {
   type KnowledgeAsset,
   type QuestionRecommendation,
 } from '../utils/api'
+import { forceLoginRedirect } from '../utils/navigation'
 import { collectInlineAssetIds, renderRichText, type InlineRichTextAsset } from '../utils/richText'
 
 interface ConversationSummary {
@@ -56,10 +58,18 @@ const form = reactive({
   subject: '数学',
   message: '',
 })
+const passwordForm = reactive({
+  currentPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+})
 const conversations = ref<ConversationSummary[]>([])
 const messages = ref<ChatMessageRead[]>([])
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
+const passwordDialogVisible = ref(false)
+const passwordChanging = ref(false)
+const deletingConversationIds = ref<Set<number>>(new Set())
 const guidanceStage = ref('initial_guidance')
 const recommendationPool = ref<QuestionRecommendation[]>([])
 const recommendationOffset = ref(0)
@@ -80,6 +90,7 @@ let streamAbortController: AbortController | null = null
 let stopRequested = false
 const localAttachmentUrls = new Set<string>()
 const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
+const authStore = useAuthStore()
 
 const visibleRecommendations = computed(() => (
   recommendationPool.value.slice(recommendationOffset.value, recommendationOffset.value + RECOMMENDATION_PAGE_SIZE)
@@ -152,6 +163,83 @@ function startNewConversation(options: { subject?: string } = {}) {
   clearLocalAttachmentUrls()
   resetRecommendations()
   queueScrollToBottom()
+}
+
+function openPasswordDialog() {
+  passwordForm.currentPassword = ''
+  passwordForm.newPassword = ''
+  passwordForm.confirmPassword = ''
+  passwordDialogVisible.value = true
+}
+
+async function submitPasswordChange() {
+  if (!passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword) {
+    ElMessage.info('请完整填写当前密码和新密码')
+    return
+  }
+  if (passwordForm.newPassword.length < 6) {
+    ElMessage.error('新密码至少需要 6 位')
+    return
+  }
+  if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+    ElMessage.error('两次输入的新密码不一致')
+    return
+  }
+  passwordChanging.value = true
+  try {
+    await authStore.changePassword(passwordForm.currentPassword, passwordForm.newPassword)
+    ElMessage.success('密码已修改，请重新登录')
+    passwordDialogVisible.value = false
+    forceLoginRedirect()
+  } catch (error) {
+    const detail = (
+      error as {
+        response?: {
+          data?: {
+            detail?: string
+          }
+        }
+      }
+    )?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '密码修改失败，请检查当前密码')
+  } finally {
+    passwordChanging.value = false
+  }
+}
+
+async function deleteConversation(item: ConversationSummary) {
+  if (sending.value || deletingConversationIds.value.has(item.id)) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除“${conversationTopic(item)}”吗？删除后该对话记录将不再显示。`,
+      '删除对话',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  deletingConversationIds.value = new Set(deletingConversationIds.value).add(item.id)
+  try {
+    await api.delete(`/chat/${item.id}`)
+    if (currentConversationId.value === item.id) {
+      startNewConversation({ subject: form.subject })
+    }
+    await loadConversations()
+    ElMessage.success('对话已删除')
+  } catch {
+    ElMessage.error('对话删除失败，请稍后重试')
+  } finally {
+    const next = new Set(deletingConversationIds.value)
+    next.delete(item.id)
+    deletingConversationIds.value = next
+  }
 }
 
 async function handleSubjectChange(nextSubject: string) {
@@ -664,21 +752,32 @@ onMounted(async () => {
         </div>
         <div class="row-actions">
           <button class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
+          <button class="ghost-button" :disabled="sending" @click="openPasswordDialog">修改密码</button>
           <button class="ghost-button" @click="loadConversations">刷新</button>
         </div>
       </div>
       <div class="conversation-list">
-        <button
+        <article
           v-for="item in conversations"
           :key="item.id"
           class="conversation-card conversation-card--compact"
-          @click="openConversation(item.id)"
         >
-          <strong class="conversation-card__topic">{{ conversationTopic(item) }}</strong>
-          <span class="conversation-card__meta">{{ item.subject }}</span>
-          <span>{{ stageLabel(item.guidance_stage) }}</span>
-          <span>{{ item.resolved ? '已解决' : '进行中' }}</span>
-        </button>
+          <button class="conversation-card__open" @click="openConversation(item.id)">
+            <strong class="conversation-card__topic">{{ conversationTopic(item) }}</strong>
+            <span class="conversation-card__meta">{{ item.subject }}</span>
+            <span>{{ stageLabel(item.guidance_stage) }}</span>
+            <span>{{ item.resolved ? '已解决' : '进行中' }}</span>
+          </button>
+          <div class="row-actions conversation-card__actions">
+            <button
+              class="ghost-button ghost-button--danger"
+              :disabled="sending || deletingConversationIds.has(item.id)"
+              @click="deleteConversation(item)"
+            >
+              {{ deletingConversationIds.has(item.id) ? '删除中...' : '删除' }}
+            </button>
+          </div>
+        </article>
       </div>
     </aside>
 
@@ -920,5 +1019,46 @@ onMounted(async () => {
         </div>
       </section>
     </section>
+
+    <el-dialog
+      v-model="passwordDialogVisible"
+      title="修改密码"
+      width="420px"
+      destroy-on-close
+    >
+      <div class="password-dialog">
+        <el-input
+          v-model="passwordForm.currentPassword"
+          type="password"
+          show-password
+          autocomplete="current-password"
+          placeholder="当前密码"
+        />
+        <el-input
+          v-model="passwordForm.newPassword"
+          type="password"
+          show-password
+          autocomplete="new-password"
+          placeholder="新密码，至少 6 位"
+        />
+        <el-input
+          v-model="passwordForm.confirmPassword"
+          type="password"
+          show-password
+          autocomplete="new-password"
+          placeholder="再次输入新密码"
+          @keyup.enter="submitPasswordChange"
+        />
+        <p class="panel-subcopy">修改成功后，当前账号会退出登录，其他设备上的旧登录态也会失效。</p>
+      </div>
+      <template #footer>
+        <div class="row-actions">
+          <button class="ghost-button" :disabled="passwordChanging" @click="passwordDialogVisible = false">取消</button>
+          <button class="primary-button" :disabled="passwordChanging" @click="submitPasswordChange">
+            {{ passwordChanging ? '修改中...' : '确认修改' }}
+          </button>
+        </div>
+      </template>
+    </el-dialog>
   </section>
 </template>

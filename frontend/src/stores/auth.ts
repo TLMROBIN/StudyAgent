@@ -98,6 +98,14 @@ export const useAuthStore = defineStore('auth', {
       })
       this.user = data
     },
+    async changePassword(currentPassword: string, newPassword: string) {
+      await api.post('/auth/change-password', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+      this.clearSession()
+      resetSessionExpiredState()
+    },
     async logout() {
       try {
         const accessToken = getStoredAccessToken()
