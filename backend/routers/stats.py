@@ -2,11 +2,11 @@ import csv
 import io
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse, Response
 
 from backend.dependencies import CurrentUser, DbSession
-from backend.models.schemas import ClassroomStat, StatsOverview, StudentPortrait, StudentProfile
+from backend.models.schemas import ClassroomStat, StatsOverview, StudentPortrait, StudentProfile, UsageTrend
 from backend.models.user import UserRole
 from backend.services.stats_service import stats_service
 from backend.time_utils import serialize_datetime_for_api
@@ -32,6 +32,29 @@ def classroom_breakdown(db: DbSession, current_user: CurrentUser) -> list[Classr
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
     rows = stats_service.classroom_breakdown(db, current_user)
     return [ClassroomStat(**row) for row in rows]
+
+
+@router.get("/usage-trend", response_model=UsageTrend)
+def usage_trend(
+    db: DbSession,
+    current_user: CurrentUser,
+    granularity: Literal["day", "week", "month"] = "day",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    subjects: list[str] = Query(default_factory=list),
+) -> UsageTrend:
+    if current_user.role == UserRole.STUDENT:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+    return UsageTrend(
+        **stats_service.usage_trend(
+            db,
+            current_user,
+            granularity=granularity,
+            start_date=start_date,
+            end_date=end_date,
+            subjects=subjects,
+        )
+    )
 
 
 @router.get("/portraits", response_model=list[StudentPortrait])

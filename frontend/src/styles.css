@@ -927,6 +927,85 @@ textarea {
   color: var(--muted);
 }
 
+.panel-header--wrap {
+  flex-wrap: wrap;
+}
+
+.trend-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.trend-subjects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.trend-chart {
+  min-height: 280px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.trend-svg {
+  display: block;
+  width: 100%;
+  min-width: 640px;
+  height: 280px;
+}
+
+.trend-grid line {
+  stroke: rgba(24, 33, 47, 0.1);
+}
+
+.trend-grid text,
+.trend-axis text {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+.trend-line {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trend-point {
+  stroke: #fffaf0;
+  stroke-width: 2;
+}
+
+.trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.trend-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.trend-legend-item i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
 .mono-block {
   margin: 0;
   padding: 12px 14px;

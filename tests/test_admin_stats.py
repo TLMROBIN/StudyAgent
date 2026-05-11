@@ -1,6 +1,6 @@
 import asyncio
 import io
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -90,6 +90,72 @@ def test_stats_service_returns_classroom_breakdown_and_portraits():
         assert portrait_rows[0]["login_account"] == "zhangsan1"
         assert portrait_rows[0]["focus_subject"] == "数学"
         assert portrait_rows[0]["fallback_ratio"] == 1.0
+    finally:
+        session.close()
+
+
+def test_stats_service_usage_trend_groups_by_day_and_selected_subjects():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        classroom = Classroom(grade=1, name="1班")
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        student = User(
+            username="zhangsan1",
+            full_name="张三",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=1,
+            classroom=classroom,
+        )
+        session.add_all([classroom, admin_user, student])
+        session.commit()
+        session.refresh(student)
+
+        rows = [
+            Conversation(
+                student_id=student.id,
+                subject="数学",
+                created_at=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+            ),
+            Conversation(
+                student_id=student.id,
+                subject="物理",
+                created_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+            ),
+            Conversation(
+                student_id=student.id,
+                subject="数学",
+                created_at=datetime(2026, 5, 3, 9, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 5, 3, 9, 0, tzinfo=UTC),
+            ),
+        ]
+        session.add_all(rows)
+        session.commit()
+
+        trend = stats_service.usage_trend(
+            session,
+            admin_user,
+            granularity="day",
+            start_date="2026-05-01",
+            end_date="2026-05-03",
+            subjects=["数学"],
+        )
+
+        assert trend["granularity"] == "day"
+        assert trend["labels"] == ["2026-05-01", "2026-05-02", "2026-05-03"]
+        assert trend["available_subjects"] == ["数学", "物理"]
+        assert trend["series"] == [
+            {"name": "总次数", "subject": None, "data": [2, 0, 1]},
+            {"name": "数学", "subject": "数学", "data": [1, 0, 1]},
+        ]
     finally:
         session.close()
 

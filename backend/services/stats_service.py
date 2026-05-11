@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -29,6 +31,71 @@ class StatsService:
                 {"subject": subject, "count": count}
                 for subject, count in sorted(subject_counter.items(), key=lambda item: (-item[1], item[0]))
             ],
+        }
+
+    def usage_trend(
+        self,
+        db: Session,
+        viewer: User,
+        *,
+        granularity: Literal["day", "week", "month"] = "day",
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+        subjects: list[str] | None = None,
+    ) -> dict:
+        students = self._scoped_students(db, viewer)
+        conversations = self._flatten_conversations(students)
+        requested_subjects = [subject.strip() for subject in (subjects or []) if subject.strip()]
+        available_subjects = sorted({conversation.subject for conversation in conversations if conversation.subject})
+
+        today = datetime.now(UTC).date()
+        start = self._coerce_date(start_date) or (today - timedelta(days=29))
+        end = self._coerce_date(end_date) or today
+        if start > end:
+            start, end = end, start
+
+        labels = self._period_labels(start, end, granularity)
+        label_set = set(labels)
+        total_counts = dict.fromkeys(labels, 0)
+        subject_counts: dict[str, dict[str, int]] = {
+            subject: dict.fromkeys(labels, 0) for subject in requested_subjects
+        }
+
+        for conversation in conversations:
+            conversation_date = self._as_date(conversation.created_at)
+            if conversation_date is None or conversation_date < start or conversation_date > end:
+                continue
+            label = self._period_label(conversation_date, granularity)
+            if label not in label_set:
+                continue
+            total_counts[label] += 1
+            if conversation.subject in subject_counts:
+                subject_counts[conversation.subject][label] += 1
+
+        series = [
+            {
+                "name": "总次数",
+                "subject": None,
+                "data": [total_counts[label] for label in labels],
+            }
+        ]
+        for subject in requested_subjects:
+            if subject in subject_counts:
+                series.append(
+                    {
+                        "name": subject,
+                        "subject": subject,
+                        "data": [subject_counts[subject][label] for label in labels],
+                    }
+                )
+
+        return {
+            "granularity": granularity,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "labels": labels,
+            "available_subjects": available_subjects,
+            "series": series,
         }
 
     def student_profile(self, db: Session, student_id: int) -> dict:
@@ -163,6 +230,59 @@ class StatsService:
     @staticmethod
     def _conversation_turns(conversation: Conversation) -> int:
         return sum(1 for message in conversation.messages if message.role == MessageRole.USER)
+
+    @staticmethod
+    def _coerce_date(value: str | date | None) -> date | None:
+        if value is None:
+            return None
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(value)
+
+    @staticmethod
+    def _as_date(value: datetime | None) -> date | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.date()
+        return value.astimezone(UTC).date()
+
+    @classmethod
+    def _period_labels(cls, start: date, end: date, granularity: str) -> list[str]:
+        labels = []
+        cursor = cls._period_start(start, granularity)
+        final = cls._period_start(end, granularity)
+        while cursor <= final:
+            labels.append(cls._period_label(cursor, granularity))
+            cursor = cls._next_period(cursor, granularity)
+        return labels
+
+    @staticmethod
+    def _period_start(value: date, granularity: str) -> date:
+        if granularity == "week":
+            return value - timedelta(days=value.weekday())
+        if granularity == "month":
+            return value.replace(day=1)
+        return value
+
+    @classmethod
+    def _period_label(cls, value: date, granularity: str) -> str:
+        start = cls._period_start(value, granularity)
+        if granularity == "month":
+            return start.strftime("%Y-%m")
+        if granularity == "week":
+            return start.isoformat()
+        return value.isoformat()
+
+    @staticmethod
+    def _next_period(value: date, granularity: str) -> date:
+        if granularity == "week":
+            return value + timedelta(days=7)
+        if granularity == "month":
+            if value.month == 12:
+                return value.replace(year=value.year + 1, month=1, day=1)
+            return value.replace(month=value.month + 1, day=1)
+        return value + timedelta(days=1)
 
 
 stats_service = StatsService()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import MetricTile from '../components/MetricTile.vue'
@@ -10,6 +10,21 @@ interface OverviewData {
   resolved_rate: number
   average_turns: number
   by_subject: Array<{ subject: string; count: number }>
+}
+
+interface UsageTrendSeries {
+  name: string
+  subject?: string | null
+  data: number[]
+}
+
+interface UsageTrend {
+  granularity: 'day' | 'week' | 'month'
+  start_date: string
+  end_date: string
+  labels: string[]
+  available_subjects: string[]
+  series: UsageTrendSeries[]
 }
 
 interface ClassroomStat {
@@ -41,6 +56,80 @@ const overview = ref<OverviewData>({
 const classStats = ref<ClassroomStat[]>([])
 const portraits = ref<StudentPortrait[]>([])
 const loading = ref(false)
+const trendLoading = ref(false)
+const trendGranularity = ref<'day' | 'week' | 'month'>('day')
+const selectedSubjects = ref<string[]>([])
+const today = new Date()
+const start = new Date(today)
+start.setDate(today.getDate() - 29)
+const trendDateRange = ref<[string, string]>([toDateValue(start), toDateValue(today)])
+const trend = ref<UsageTrend>({
+  granularity: 'day',
+  start_date: trendDateRange.value[0],
+  end_date: trendDateRange.value[1],
+  labels: [],
+  available_subjects: [],
+  series: [],
+})
+const trendColors = ['#0f766e', '#db6b2c', '#2563eb', '#7c3aed', '#be123c', '#15803d', '#b45309', '#0891b2', '#4b5563']
+const granularityOptions = [
+  { label: '每日', value: 'day' },
+  { label: '每周', value: 'week' },
+  { label: '每月', value: 'month' },
+]
+
+function toDateValue(value: Date) {
+  const year = value.getFullYear()
+  const month = `${value.getMonth() + 1}`.padStart(2, '0')
+  const day = `${value.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const chartModel = computed(() => {
+  const labels = trend.value.labels
+  const series = trend.value.series
+  const width = 760
+  const height = 280
+  const padding = { top: 24, right: 24, bottom: 42, left: 44 }
+  const plotWidth = width - padding.left - padding.right
+  const plotHeight = height - padding.top - padding.bottom
+  const maxValue = Math.max(1, ...series.flatMap((item) => item.data))
+  const xFor = (index: number) => {
+    if (labels.length <= 1) {
+      return padding.left + plotWidth / 2
+    }
+    return padding.left + (index / (labels.length - 1)) * plotWidth
+  }
+  const yFor = (value: number) => padding.top + plotHeight - (value / maxValue) * plotHeight
+  const labelStep = Math.max(1, Math.ceil(labels.length / 6))
+
+  return {
+    width,
+    height,
+    maxValue,
+    grid: [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+      const value = Math.round(maxValue * (1 - ratio))
+      return { y: padding.top + plotHeight * ratio, value }
+    }),
+    xLabels: labels
+      .map((label, index) => ({ label, index, x: xFor(index) }))
+      .filter((item, index) => index === 0 || index === labels.length - 1 || index % labelStep === 0),
+    lines: series.map((item, seriesIndex) => {
+      const points = item.data.map((value, index) => ({
+        x: xFor(index),
+        y: yFor(value),
+        value,
+        label: labels[index],
+      }))
+      return {
+        ...item,
+        color: trendColors[seriesIndex % trendColors.length],
+        points,
+        path: points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' '),
+      }
+    }),
+  }
+})
 
 function formatPercent(value: number) {
   return `${(value * 100).toFixed(1)}%`
@@ -78,6 +167,29 @@ async function loadDashboard() {
   }
 }
 
+async function loadTrend() {
+  trendLoading.value = true
+  try {
+    const params = new URLSearchParams()
+    params.set('granularity', trendGranularity.value)
+    const [startDate, endDate] = trendDateRange.value || []
+    if (startDate) {
+      params.set('start_date', startDate)
+    }
+    if (endDate) {
+      params.set('end_date', endDate)
+    }
+    selectedSubjects.value.forEach((subject) => params.append('subjects', subject))
+    const { data } = await api.get<UsageTrend>('/stats/usage-trend', { params })
+    trend.value = data
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('趋势数据加载失败')
+  } finally {
+    trendLoading.value = false
+  }
+}
+
 async function exportStats() {
   try {
     const { data } = await api.get('/stats/export', {
@@ -96,7 +208,12 @@ async function exportStats() {
   }
 }
 
-onMounted(loadDashboard)
+watch([trendGranularity, selectedSubjects, trendDateRange], loadTrend, { deep: true })
+
+onMounted(() => {
+  void loadDashboard()
+  void loadTrend()
+})
 </script>
 
 <template>
@@ -131,6 +248,74 @@ onMounted(loadDashboard)
           </div>
           <strong>{{ item.count }}</strong>
         </article>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-header panel-header--wrap">
+        <div>
+          <p class="eyebrow">Usage Trend</p>
+          <h2>使用次数变化</h2>
+        </div>
+        <div class="trend-controls">
+          <el-segmented v-model="trendGranularity" :options="granularityOptions" />
+          <el-date-picker
+            v-model="trendDateRange"
+            type="daterange"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            value-format="YYYY-MM-DD"
+            :clearable="false"
+          />
+        </div>
+      </div>
+      <div class="trend-subjects">
+        <span>学科</span>
+        <el-checkbox-group v-model="selectedSubjects">
+          <el-checkbox v-for="subject in trend.available_subjects" :key="subject" :label="subject" :value="subject" />
+        </el-checkbox-group>
+      </div>
+      <div v-loading="trendLoading" class="trend-chart">
+        <svg
+          v-if="trend.labels.length"
+          class="trend-svg"
+          :viewBox="`0 0 ${chartModel.width} ${chartModel.height}`"
+          role="img"
+          aria-label="使用次数折线图"
+        >
+          <g class="trend-grid">
+            <g v-for="line in chartModel.grid" :key="line.y">
+              <line x1="44" x2="736" :y1="line.y" :y2="line.y" />
+              <text x="32" :y="line.y + 4" text-anchor="end">{{ line.value }}</text>
+            </g>
+          </g>
+          <g class="trend-axis">
+            <text v-for="item in chartModel.xLabels" :key="`${item.label}-${item.index}`" :x="item.x" y="266" text-anchor="middle">
+              {{ item.label }}
+            </text>
+          </g>
+          <g v-for="line in chartModel.lines" :key="line.name">
+            <path class="trend-line" :d="line.path" :stroke="line.color" />
+            <circle
+              v-for="point in line.points"
+              :key="`${line.name}-${point.label}`"
+              class="trend-point"
+              :cx="point.x"
+              :cy="point.y"
+              r="4"
+              :fill="line.color"
+            >
+              <title>{{ line.name }} · {{ point.label }}：{{ point.value }}</title>
+            </circle>
+          </g>
+        </svg>
+        <p v-else class="panel-subcopy">当前范围暂无使用数据。</p>
+      </div>
+      <div class="trend-legend">
+        <span v-for="line in chartModel.lines" :key="line.name" class="trend-legend-item">
+          <i :style="{ background: line.color }"></i>
+          {{ line.name }}
+        </span>
       </div>
     </section>
     <section class="panel">

@@ -414,6 +414,21 @@ class SubjectStat(BaseModel):
     count: int
 
 
+class UsageTrendSeries(BaseModel):
+    name: str
+    subject: str | None = None
+    data: list[int]
+
+
+class UsageTrend(BaseModel):
+    granularity: str
+    start_date: str
+    end_date: str
+    labels: list[str]
+    available_subjects: list[str]
+    series: list[UsageTrendSeries]
+
+
 class ClassroomStat(BaseModel):
     classroom_label: str
     grade: int | None = None
