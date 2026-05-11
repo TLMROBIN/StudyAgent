@@ -13,6 +13,12 @@ from backend.services.student_grade_service import student_grade_service
 from backend.services.store_service import store
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 class AuthService:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -52,7 +58,7 @@ class AuthService:
     def _authenticate(self, db: Session, user: User | None, password: str, client_ip: str | None = None) -> User | None:
         if not user or not user.is_active:
             return None
-        if user.locked_until and user.locked_until > datetime.now(UTC):
+        if user.locked_until and _as_utc(user.locked_until) > datetime.now(UTC):
             return None
         attempt_key = f"login:{user.id}:{client_ip or 'unknown'}"
         attempts = int(store.get(attempt_key) or "0")
