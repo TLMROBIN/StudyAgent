@@ -280,12 +280,13 @@ class MineruService:
 
     def _write_single_image_pdf(self, source: Path, target: Path) -> None:
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
 
             with Image.open(source) as image:
+                image = ImageOps.exif_transpose(image)
                 if image.mode in {"RGBA", "LA", "P"}:
                     image = image.convert("RGB")
-                image.save(target, "PDF", resolution=150.0)
+                image.save(target, "PDF", resolution=float(self.settings.chat_image_pdf_dpi))
         except Exception as exc:
             raise MineruStartupError(f"Failed to prepare chat image for MinerU OCR: {exc}") from exc
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from backend.config import Settings
 from backend.services.mineru_service import MineruGpuPreflightError, MineruGpuRuntimeError, MineruService
@@ -83,6 +84,25 @@ def test_parse_pdf_fails_closed_when_cuda_runtime_drops(tmp_path, monkeypatch):
         service.parse_pdf(str(source_file), task_id=12, document_id=23)
 
     assert calls == ["cuda"]
+
+
+def test_chat_image_pdf_uses_high_resolution_for_ocr(tmp_path, monkeypatch):
+    service = build_service(tmp_path)
+    source_file = tmp_path / "question.png"
+    Image.new("RGB", (32, 32), color="white").save(source_file)
+    captured: dict[str, object] = {}
+
+    def fake_save(self, target, file_format=None, **kwargs):
+        captured["target"] = target
+        captured["file_format"] = file_format
+        captured["resolution"] = kwargs.get("resolution")
+
+    monkeypatch.setattr(Image.Image, "save", fake_save)
+
+    service._write_single_image_pdf(source_file, tmp_path / "question.pdf")
+
+    assert captured["file_format"] == "PDF"
+    assert captured["resolution"] == 300.0
 
 
 def test_flatten_content_repairs_split_office_textstyle_runs_and_keeps_formula_markers(tmp_path):

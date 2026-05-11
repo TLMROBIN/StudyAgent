@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from dataclasses import dataclass
 import re
 
@@ -61,9 +62,13 @@ class ChatImageUnderstandingService:
                 must_short_circuit=True,
             )
 
-        ocr_raw_text = await llm_service.extract_image_text(
+        llm_image_bytes, llm_mime_type = self._prepare_llm_image_payload(
             image_bytes=image_bytes,
             mime_type=mime_type,
+        )
+        ocr_raw_text = await llm_service.extract_image_text(
+            image_bytes=llm_image_bytes,
+            mime_type=llm_mime_type,
             subject=subject,
         )
         normalized_ocr = self.normalize_text(ocr_raw_text)
@@ -91,8 +96,8 @@ class ChatImageUnderstandingService:
 
         multimodal_summary = self.normalize_text(
             await llm_service.summarize_academic_image(
-                image_bytes=image_bytes,
-                mime_type=mime_type,
+                image_bytes=llm_image_bytes,
+                mime_type=llm_mime_type,
                 subject=subject,
                 user_text=user_text,
                 ocr_text=normalized_ocr,
@@ -170,9 +175,15 @@ class ChatImageUnderstandingService:
         return backend
 
     def _assess_ocr_confidence(self, text: str) -> str:
-        if len(text) >= 28:
+        normalized = self.normalize_text(text)
+        compact = normalized.replace(" ", "")
+        if len(compact) < 6:
+            return "low"
+        if self._meaningful_char_ratio(compact) < 0.45:
+            return "low"
+        if len(compact) >= 24:
             return "high"
-        if len(text) >= 10:
+        if self._looks_sufficient_for_direct_use(normalized):
             return "medium"
         return "low"
 
@@ -192,6 +203,64 @@ class ChatImageUnderstandingService:
             for token in ["求", "解", "图", "函数", "方程", "受力", "电路", "化学", "物理", "数学", "证明"]
         )
         return academic_signal_count >= 1 or any(char.isdigit() for char in text)
+
+    @staticmethod
+    def _meaningful_char_ratio(text: str) -> float:
+        if not text:
+            return 0.0
+        formula_symbols = set("+-*/=^_().,，。:：;；<>≤≥√∠παβγθλΩ%[]{}")
+        meaningful_count = sum(char.isalnum() or char in formula_symbols for char in text)
+        return meaningful_count / len(text)
+
+    def _prepare_llm_image_payload(self, *, image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+        try:
+            from PIL import Image, ImageFilter, ImageOps
+
+            with Image.open(BytesIO(image_bytes)) as source:
+                image = ImageOps.exif_transpose(source)
+                if image.mode in {"RGBA", "LA"}:
+                    background = Image.new("RGB", image.size, "white")
+                    alpha = image.getchannel("A")
+                    background.paste(image.convert("RGB"), mask=alpha)
+                    image = background
+                elif image.mode == "P":
+                    image = image.convert("RGB")
+                elif image.mode != "RGB":
+                    image = image.convert("RGB")
+
+                image = self._resize_for_ocr(image)
+                image = ImageOps.autocontrast(image, cutoff=1)
+                image = image.filter(ImageFilter.SHARPEN)
+
+                output = BytesIO()
+                image.save(
+                    output,
+                    format="JPEG",
+                    quality=max(75, min(95, int(self.settings.chat_image_preprocess_jpeg_quality))),
+                    optimize=True,
+                )
+                return output.getvalue(), "image/jpeg"
+        except Exception:
+            return image_bytes, mime_type
+
+    def _resize_for_ocr(self, image):
+        width, height = image.size
+        long_edge = max(width, height)
+        if long_edge <= 0:
+            return image
+        min_long_edge = max(1, int(self.settings.chat_image_preprocess_min_long_edge))
+        max_long_edge = max(min_long_edge, int(self.settings.chat_image_preprocess_max_long_edge))
+        scale = 1.0
+        if long_edge < min_long_edge:
+            scale = min_long_edge / long_edge
+        elif long_edge > max_long_edge:
+            scale = max_long_edge / long_edge
+        if scale == 1.0:
+            return image
+        from PIL import Image
+
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        return image.resize((max(1, round(width * scale)), max(1, round(height * scale))), resampling)
 
 
 chat_image_understanding_service = ChatImageUnderstandingService()

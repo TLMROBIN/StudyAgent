@@ -86,8 +86,12 @@ class Settings(BaseSettings):
         alias="CHAT_ALLOWED_IMAGE_MIME_TYPES",
     )
     chat_image_ocr_backend: str = Field(default="hybrid", alias="CHAT_IMAGE_OCR_BACKEND")
-    chat_image_ocr_timeout_seconds: int = Field(default=8, alias="CHAT_IMAGE_OCR_TIMEOUT_SECONDS")
+    chat_image_ocr_timeout_seconds: int = Field(default=20, alias="CHAT_IMAGE_OCR_TIMEOUT_SECONDS")
     chat_image_mineru_min_text_chars: int = Field(default=10, alias="CHAT_IMAGE_MINERU_MIN_TEXT_CHARS")
+    chat_image_preprocess_min_long_edge: int = Field(default=1200, alias="CHAT_IMAGE_PREPROCESS_MIN_LONG_EDGE")
+    chat_image_preprocess_max_long_edge: int = Field(default=2400, alias="CHAT_IMAGE_PREPROCESS_MAX_LONG_EDGE")
+    chat_image_preprocess_jpeg_quality: int = Field(default=92, alias="CHAT_IMAGE_PREPROCESS_JPEG_QUALITY")
+    chat_image_pdf_dpi: float = Field(default=300.0, alias="CHAT_IMAGE_PDF_DPI")
     allowed_upload_extensions: str = Field(default=".pdf,.docx,.txt,.md,.tex", alias="ALLOWED_UPLOAD_EXTENSIONS")
     allowed_upload_mime_types: str = Field(
         default=(
