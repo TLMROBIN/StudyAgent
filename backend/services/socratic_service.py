@@ -7,6 +7,9 @@ from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEH
 from backend.services.filter_service import filter_service
 
 
+RECENT_HISTORY_MESSAGE_LIMIT = 12
+
+
 @dataclass
 class PromptPackage:
     messages: list[dict[str, str]]
@@ -87,7 +90,7 @@ class SocraticService:
             system_sections.append(f"知识库参考：{retrieved_context}")
 
         messages = [{"role": "system", "content": "\n".join(system_sections)}]
-        for role, content in history[-6:]:
+        for role, content in self._history_for_prompt(history):
             messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": question})
         return PromptPackage(
@@ -150,6 +153,19 @@ class SocraticService:
         if not image_related:
             return text
         return filter_service.ensure_image_disclaimer(text)
+
+    def _history_for_prompt(self, history: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        recent_history = history[-RECENT_HISTORY_MESSAGE_LIMIT:]
+        if len(history) <= RECENT_HISTORY_MESSAGE_LIMIT:
+            return recent_history
+
+        original_user_turn = next(
+            ((role, content) for role, content in history if role == "user" and content.strip()),
+            None,
+        )
+        if not original_user_turn or original_user_turn in recent_history:
+            return recent_history
+        return [original_user_turn, *recent_history]
 
 
 socratic_service = SocraticService()

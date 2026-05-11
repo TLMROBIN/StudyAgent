@@ -77,6 +77,29 @@ def test_exercise_question_stays_guided_even_with_answer_language():
     assert "基础知识解释模式" not in system_text
 
 
+def test_build_prompt_preserves_original_question_after_repeated_stuck_turns():
+    history = [
+        ("user", "已知函数 f(x)=x^2-2x，求最小值怎么想？"),
+        ("assistant", "先找定义域，再观察二次函数的结构。"),
+        ("user", "还是不会"),
+        ("assistant", "先想它能不能配方。"),
+        ("user", "没生成有效内容"),
+        ("assistant", "那我们换一种提示。"),
+        ("user", "还是不会"),
+        ("assistant", "先写出平方项和一次项。"),
+    ]
+
+    prompt = socratic_service.build_prompt(
+        question="继续",
+        subject="数学",
+        history=history,
+        retrieved_context="",
+        system_prompt="",
+    )
+
+    assert any("f(x)=x^2-2x" in message["content"] for message in prompt.messages)
+
+
 def test_image_low_confidence_text_contains_required_disclaimer():
     text = socratic_service.image_low_confidence_text("数学")
 
