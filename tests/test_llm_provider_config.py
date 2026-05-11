@@ -149,3 +149,44 @@ def test_llm_service_uses_selected_database_providers_before_environment(monkeyp
 
     assert chunks == ["数据库模型响应"]
     assert seen == [("Selected", "https://selected.example/v1", "selected-model")]
+
+
+def test_llm_service_exposes_builtin_student_chat_models():
+    service = LLMService()
+
+    options = service.chat_model_options()
+
+    assert [
+        (item["key"], item["name"], item["description"]) for item in options
+    ] == [
+        ("minimax-m27", "MiniMax-M2.7", "highspeed"),
+        ("qwen2.5-vl", "qwen2.5-vl", "图片理解推荐使用，但响应速度可能较慢。"),
+    ]
+
+
+def test_llm_service_can_stream_with_builtin_local_vl_model(monkeypatch):
+    service = LLMService()
+    seen: list[tuple[str, str, str, str]] = []
+
+    async def fake_stream(provider, messages) -> AsyncIterator[str]:
+        seen.append((provider.name, provider.base_url or "", provider.api_key or "", provider.model))
+        yield "本地模型响应"
+
+    monkeypatch.setattr(service, "_stream_openai_compatible", fake_stream)
+
+    async def collect_chunks() -> list[str]:
+        return [
+            chunk
+            async for chunk in service.stream_response(
+                [{"role": "user", "content": "看图题怎么入手"}],
+                "兜底",
+                model_key="qwen2.5-vl",
+            )
+        ]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert chunks == ["本地模型响应"]
+    assert seen == [
+        ("qwen2.5-vl", "http://10.50.159.63:8001/v1", "EMPTY", "qwen2.5-vl-72b-instruct")
+    ]

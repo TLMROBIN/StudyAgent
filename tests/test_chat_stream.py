@@ -184,6 +184,54 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         session.close()
 
 
+def test_student_can_list_builtin_chat_models():
+    session_factory = _build_session_factory()
+    client = _build_chat_test_client(session_factory, _create_student(session_factory))
+
+    response = client.get("/api/chat/models")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"key": "minimax-m27", "name": "MiniMax-M2.7", "description": "highspeed"},
+        {"key": "qwen2.5-vl", "name": "qwen2.5-vl", "description": "图片理解推荐使用，但响应速度可能较慢。"},
+    ]
+
+
+def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    selected_models: list[str | None] = []
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        selected_models.append(model_key)
+        yield "先读图中条件。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="资料片段", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="这张图怎么分析", llm_model="qwen2.5-vl"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+    finally:
+        session.close()
+
+    assert selected_models == ["qwen2.5-vl"]
+    assert events[-1][1]["content"] == "先读图中条件。"
+
+
 def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)

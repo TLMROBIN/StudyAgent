@@ -98,6 +98,9 @@ class ProviderState:
 
 
 class LLMService:
+    DEFAULT_CHAT_MODEL_KEY = "minimax-m27"
+    LOCAL_VL_CHAT_MODEL_KEY = "qwen2.5-vl"
+
     def __init__(self) -> None:
         settings = get_settings()
         self.settings = settings
@@ -116,10 +119,43 @@ class LLMService:
                 model=settings.llm_fallback_model,
             ),
         ]
+        self._local_vl_provider = ProviderState(
+            name=settings.llm_local_vl_name,
+            base_url=settings.llm_local_vl_base_url,
+            api_key=settings.llm_local_vl_api_key,
+            model=settings.llm_local_vl_model,
+        )
+
+    def chat_model_options(self) -> list[dict[str, str]]:
+        return [
+            {
+                "key": self.DEFAULT_CHAT_MODEL_KEY,
+                "name": "MiniMax-M2.7",
+                "description": "highspeed",
+            },
+            {
+                "key": self.LOCAL_VL_CHAT_MODEL_KEY,
+                "name": "qwen2.5-vl",
+                "description": "图片理解推荐使用，但响应速度可能较慢。",
+            },
+        ]
+
+    def normalize_chat_model_key(self, model_key: str | None) -> str:
+        candidate = (model_key or self.DEFAULT_CHAT_MODEL_KEY).strip()
+        allowed = {item["key"] for item in self.chat_model_options()}
+        if candidate not in allowed:
+            raise ValueError(f"Unsupported chat model: {candidate}")
+        return candidate
 
     def _runtime_providers(self) -> list[ProviderState]:
         configured = self._database_providers()
         return configured or self.providers
+
+    def _providers_for_chat_model(self, model_key: str | None) -> list[ProviderState]:
+        selected_key = self.normalize_chat_model_key(model_key)
+        if selected_key == self.LOCAL_VL_CHAT_MODEL_KEY:
+            return [self._local_vl_provider]
+        return self._runtime_providers()
 
     def _database_providers(self) -> list[ProviderState]:
         try:
@@ -154,8 +190,14 @@ class LLMService:
             chunks.append(chunk)
         return "".join(chunks).strip()
 
-    async def stream_response(self, messages: list[dict[str, str]], fallback_text: str) -> AsyncIterator[str]:
-        for provider in self._runtime_providers():
+    async def stream_response(
+        self,
+        messages: list[dict[str, str]],
+        fallback_text: str,
+        *,
+        model_key: str | None = None,
+    ) -> AsyncIterator[str]:
+        for provider in self._providers_for_chat_model(model_key):
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:

@@ -6,9 +6,11 @@ import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
 import {
   api,
+  type ChatModelOption,
   type ChatConversationRead,
   type ChatMessageAttachment,
   type ChatMessageRead,
+  fetchChatModels,
   fetchQuestionRecommendations,
   streamChat,
   type KnowledgeAsset,
@@ -40,6 +42,10 @@ const GUIDANCE_STAGE_LABELS: Record<string, string> = {
   fallback_walkthrough: '兜底讲解',
 }
 const subjects = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
+const DEFAULT_CHAT_MODELS: ChatModelOption[] = [
+  { key: 'minimax-m27', name: 'MiniMax-M2.7', description: 'highspeed' },
+  { key: 'qwen2.5-vl', name: 'qwen2.5-vl', description: '图片理解推荐使用，但响应速度可能较慢。' },
+]
 const resourceTypeOptions = [
   { value: 'knowledge_note', label: '知识讲义' },
   { value: 'textbook', label: '教材' },
@@ -57,6 +63,7 @@ const IMAGE_ONLY_PLACEHOLDER = '[图片提问]'
 const form = reactive({
   subject: '数学',
   message: '',
+  llmModel: 'minimax-m27',
 })
 const passwordForm = reactive({
   currentPassword: '',
@@ -86,6 +93,7 @@ const galleryInputRef = ref<HTMLInputElement | null>(null)
 const pendingImageFile = ref<File | null>(null)
 const pendingImagePreviewUrl = ref('')
 const previousSubject = ref(form.subject)
+const chatModels = ref<ChatModelOption[]>(DEFAULT_CHAT_MODELS)
 let streamAbortController: AbortController | null = null
 let stopRequested = false
 const localAttachmentUrls = new Set<string>()
@@ -122,6 +130,18 @@ function queueScrollToBottom() {
 async function loadConversations() {
   const { data } = await api.get<ConversationSummary[]>('/chat/history')
   conversations.value = data
+}
+
+async function loadChatModels() {
+  try {
+    const models = await fetchChatModels()
+    chatModels.value = models.length ? models : DEFAULT_CHAT_MODELS
+    if (!chatModels.value.some((item) => item.key === form.llmModel)) {
+      form.llmModel = chatModels.value[0]?.key || 'minimax-m27'
+    }
+  } catch {
+    chatModels.value = DEFAULT_CHAT_MODELS
+  }
 }
 
 async function openConversation(id: number) {
@@ -667,6 +687,7 @@ async function sendMessage() {
         subject: form.subject,
         message,
         conversation_id: currentConversationId.value,
+        llm_model: form.llmModel,
         image,
       },
       ({ event, data }) => {
@@ -738,6 +759,7 @@ onBeforeUnmount(() => {
 })
 
 onMounted(async () => {
+  await loadChatModels()
   await loadConversations()
 })
 </script>
@@ -837,6 +859,21 @@ onMounted(async () => {
         <el-select v-model="form.subject" :disabled="sending" placeholder="选择学科" @change="handleSubjectChange">
           <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
         </el-select>
+        <div class="chat-model-picker" role="radiogroup" aria-label="选择对话模型">
+          <button
+            v-for="model in chatModels"
+            :key="model.key"
+            type="button"
+            :class="['chat-model-option', { 'chat-model-option--active': form.llmModel === model.key }]"
+            :disabled="sending"
+            role="radio"
+            :aria-checked="form.llmModel === model.key"
+            @click="form.llmModel = model.key"
+          >
+            <span class="chat-model-option__name">{{ model.name }}</span>
+            <span class="chat-model-option__description">{{ model.description }}</span>
+          </button>
+        </div>
         <el-input
           v-model="form.message"
           :disabled="sending"

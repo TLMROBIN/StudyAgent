@@ -33,6 +33,7 @@ class QuestionCacheService:
         guidance_stage: GuidanceStage,
         agent_version: int,
         chunks: list[KnowledgeChunk],
+        llm_model: str | None = None,
     ) -> QuestionCacheLookup:
         cache_key = self._build_key(
             subject=subject,
@@ -40,6 +41,7 @@ class QuestionCacheService:
             guidance_stage=guidance_stage,
             agent_version=agent_version,
             chunks=chunks,
+            llm_model=llm_model,
         )
         if not cache_key:
             return QuestionCacheLookup(cache_key=None, answer=None)
@@ -74,6 +76,7 @@ class QuestionCacheService:
         guidance_stage: GuidanceStage,
         agent_version: int,
         chunks: list[KnowledgeChunk],
+        llm_model: str | None = None,
     ) -> str | None:
         normalized_question = self.normalize_question(question)
         if not normalized_question:
@@ -85,6 +88,7 @@ class QuestionCacheService:
             "guidance_stage": guidance_stage.value,
             "agent_version": agent_version,
             "chunk_ids": [chunk.id for chunk in chunks],
+            "llm_model": (llm_model or "").strip(),
         }
         digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         return f"question_cache:{digest}"

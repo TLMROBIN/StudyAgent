@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     llm_fallback_api_key: str | None = Field(default=None, alias="LLM_FALLBACK_API_KEY")
     llm_fallback_model: str = Field(default="qwen-plus", alias="LLM_FALLBACK_MODEL")
 
+    llm_local_vl_name: str = Field(default="qwen2.5-vl", alias="LLM_LOCAL_VL_NAME")
+    llm_local_vl_base_url: str = Field(default="http://10.50.159.63:8001/v1", alias="LLM_LOCAL_VL_BASE_URL")
+    llm_local_vl_api_key: str = Field(default="EMPTY", alias="LLM_LOCAL_VL_API_KEY")
+    llm_local_vl_model: str = Field(default="qwen2.5-vl-72b-instruct", alias="LLM_LOCAL_VL_MODEL")
+
     llm_max_qps: int = Field(default=10, alias="LLM_MAX_QPS")
     llm_request_timeout_seconds: int = Field(default=30, alias="LLM_REQUEST_TIMEOUT_SECONDS")
     llm_circuit_breaker_threshold: int = Field(default=3, alias="LLM_CIRCUIT_BREAKER_THRESHOLD")

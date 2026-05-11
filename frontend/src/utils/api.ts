@@ -66,7 +66,14 @@ export interface StreamChatRequest {
   message?: string
   conversation_id?: number | null
   request_id?: string | null
+  llm_model?: string | null
   image?: File | null
+}
+
+export interface ChatModelOption {
+  key: string
+  name: string
+  description: string
 }
 
 export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment
@@ -190,6 +197,11 @@ export async function fetchQuestionRecommendations(
   payload: QuestionRecommendationRequest,
 ): Promise<QuestionRecommendation[]> {
   const { data } = await api.post<QuestionRecommendation[]>('/chat/recommendations', payload)
+  return data
+}
+
+export async function fetchChatModels(): Promise<ChatModelOption[]> {
+  const { data } = await api.get<ChatModelOption[]>('/chat/models')
   return data
 }
 
@@ -373,6 +385,10 @@ function buildStreamChatFormData(payload: StreamChatRequest): FormData {
 
   if (typeof payload.request_id === 'string' && payload.request_id) {
     formData.append('request_id', payload.request_id)
+  }
+
+  if (typeof payload.llm_model === 'string' && payload.llm_model) {
+    formData.append('llm_model', payload.llm_model)
   }
 
   if (payload.image instanceof File) {

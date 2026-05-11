@@ -26,6 +26,7 @@ from backend.models.conversation import (
     normalize_conversation_seed,
 )
 from backend.models.schemas import (
+    ChatModelOptionRead,
     ChatRequest,
     ConversationRead,
     QuestionRecommendationRead,
@@ -63,6 +64,22 @@ EMPTY_CHAT_RESPONSE_FALLBACK = (
     "我刚刚没有生成出有效内容。我们换一种方式继续："
     "请你把题目条件或卡住的一步再发我一次，我会先帮你整理已知条件。"
 )
+
+
+def _chat_model_key_or_422(model_key: str | None) -> str:
+    try:
+        return llm_service.normalize_chat_model_key(model_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+def _stream_llm_response(messages: list[dict[str, str]], fallback_text: str, *, model_key: str):
+    try:
+        return llm_service.stream_response(messages, fallback_text, model_key=model_key)
+    except TypeError as exc:
+        if "model_key" not in str(exc):
+            raise
+        return llm_service.stream_response(messages, fallback_text)
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> str:
@@ -310,6 +327,7 @@ async def _parse_stream_request_payload(request: Request) -> tuple[ChatRequest, 
             message=str(form.get("message") or ""),
             conversation_id=int(conversation_id_raw) if conversation_id_raw else None,
             request_id=request_id_raw or None,
+            llm_model=str(form.get("llm_model") or "").strip() or None,
         )
         return payload, image
 
@@ -337,6 +355,11 @@ def _build_prompt_question(*, payload_message: str, subject: str, understanding:
 
 def _build_short_circuit_reply(subject: str) -> str:
     return socratic_service.image_low_confidence_text(subject)
+
+
+@router.get("/models", response_model=list[ChatModelOptionRead])
+def list_chat_models(current_user: CurrentUser) -> list[ChatModelOptionRead]:
+    return [ChatModelOptionRead(**item) for item in llm_service.chat_model_options()]
 
 
 @router.get("/history", response_model=list[ConversationRead])
@@ -446,6 +469,7 @@ async def stream_chat(
     started = perf_counter()
     chat_request_total.inc()
     has_image_turn = image_upload is not None
+    selected_model_key = _chat_model_key_or_422(payload.llm_model)
     image_content: bytes | None = None
     stored_attachment: StoredChatAttachment | None = None
     attachment_record: ChatMessageAttachment | None = None
@@ -461,6 +485,7 @@ async def stream_chat(
         question=user_message_content,
         conversation_id=payload.conversation_id,
         image_sha256=image_sha256,
+        llm_model=selected_model_key,
     )
 
     replay_state = request_replay_service.load(user_id=current_user.id, request_id=payload.request_id)
@@ -701,6 +726,7 @@ async def stream_chat(
             guidance_stage=prompt.stage,
             agent_version=active_config.version if active_config else 0,
             chunks=retrieval.chunks,
+            llm_model=selected_model_key,
         )
         if cache_lookup.answer:
             response_text = filter_service.ensure_image_disclaimer(cache_lookup.answer) if has_image_turn else cache_lookup.answer
@@ -770,7 +796,7 @@ async def stream_chat(
                     "request_id": getattr(request.state, "request_id", None),
                 },
             )
-            llm_stream = llm_service.stream_response(prompt.messages, prompt.fallback_text)
+            llm_stream = _stream_llm_response(prompt.messages, prompt.fallback_text, model_key=selected_model_key)
 
             while True:
                 if await request.is_disconnected():

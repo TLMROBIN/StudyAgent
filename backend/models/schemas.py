@@ -136,6 +136,13 @@ class ChatRequest(BaseModel):
     message: str = ""
     conversation_id: int | None = None
     request_id: str | None = None
+    llm_model: str | None = Field(default="minimax-m27", max_length=64)
+
+
+class ChatModelOptionRead(BaseModel):
+    key: str
+    name: str
+    description: str
 
 
 class QuestionRecommendationRequest(BaseModel):

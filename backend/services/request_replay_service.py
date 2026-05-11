@@ -33,12 +33,14 @@ class RequestReplayService:
         question: str,
         conversation_id: int | None,
         image_sha256: str | None = None,
+        llm_model: str | None = None,
     ) -> str:
         payload = {
             "subject": subject.strip(),
             "question": question.strip(),
             "conversation_id": conversation_id,
             "image_sha256": image_sha256,
+            "llm_model": (llm_model or "").strip(),
         }
         return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
