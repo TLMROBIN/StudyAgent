@@ -1328,13 +1328,14 @@ def get_document_asset(
             status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
         )
     asset_dir = rag_service.document_asset_dir(document_id).resolve()
-    asset_path = (asset_dir / asset_name).resolve()
+    candidate_path = rag_service.document_asset_dir(document_id) / asset_name
+    asset_path = candidate_path.resolve()
     if asset_dir not in asset_path.parents or not asset_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found"
         )
-    media_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
-    return FileResponse(asset_path, media_type=media_type, filename=asset_path.name)
+    media_type = mimetypes.guess_type(candidate_path.name)[0] or "application/octet-stream"
+    return FileResponse(candidate_path, media_type=media_type, filename=candidate_path.name)
 
 
 @router.post(
