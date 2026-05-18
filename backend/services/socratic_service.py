@@ -81,6 +81,10 @@ class SocraticService:
             system_sections.append(f"当前学生年级：{format_grade_label(student_grade) or f'{student_grade}年级'}")
         if image_summary:
             system_sections.append(f"图片理解摘要：{image_summary}")
+            system_sections.append(
+                "图片摘要可用时，回复必须先引用图片理解摘要中的1-2个具体关键词，"
+                "再围绕这些条件提出苏格拉底式引导问题；不要只使用通用话术。"
+            )
         if image_confidence:
             system_sections.append(f"图片理解置信度：{image_confidence}")
         if retrieved_context:

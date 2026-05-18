@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from base64 import b64encode
 import json
+import logging
 import re
 from typing import AsyncIterator
 
@@ -11,6 +12,9 @@ import httpx
 
 from backend.config import get_settings
 from backend.database import SessionLocal
+from backend.services.metrics_service import llm_stream_fallback_total, llm_stream_provider_failure_total
+
+logger = logging.getLogger(__name__)
 
 OPEN_THINK_TAG = "<think>"
 CLOSE_THINK_TAG = "</think>"
@@ -307,7 +311,9 @@ class LLMService:
         *,
         model_key: str | None = None,
     ) -> AsyncIterator[str]:
-        for provider in self._providers_for_chat_model(model_key):
+        selected_model_key = self.normalize_chat_model_key(model_key)
+        fallback_reason = "no_available_provider"
+        for provider in self._providers_for_chat_model(selected_model_key):
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:
@@ -318,10 +324,41 @@ class LLMService:
                 if yielded:
                     self._reset_provider(provider)
                     return
-            except Exception:
+                fallback_reason = "empty_stream"
+                llm_stream_provider_failure_total.labels(
+                    provider=provider.name,
+                    model_key=selected_model_key,
+                    reason=fallback_reason,
+                ).inc()
+                logger.warning(
+                    "llm_stream_provider_failure reason=%s provider=%s model=%s model_key=%s",
+                    fallback_reason,
+                    provider.name,
+                    provider.model,
+                    selected_model_key,
+                )
+                self._mark_provider_failure(provider)
+            except Exception as exc:
+                fallback_reason = "provider_exception"
+                llm_stream_provider_failure_total.labels(
+                    provider=provider.name,
+                    model_key=selected_model_key,
+                    reason=fallback_reason,
+                ).inc()
+                logger.warning(
+                    "llm_stream_provider_failure reason=%s provider=%s model=%s model_key=%s error_type=%s error=%s",
+                    fallback_reason,
+                    provider.name,
+                    provider.model,
+                    selected_model_key,
+                    type(exc).__name__,
+                    str(exc)[:300],
+                )
                 self._mark_provider_failure(provider)
 
         if fallback_text:
+            llm_stream_fallback_total.labels(model_key=selected_model_key, reason=fallback_reason).inc()
+            logger.warning("llm_stream_fallback reason=%s model_key=%s", fallback_reason, selected_model_key)
             yield fallback_text
 
     async def extract_image_text(

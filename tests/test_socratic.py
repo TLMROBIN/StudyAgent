@@ -48,6 +48,23 @@ def test_build_prompt_requires_image_turn_disclaimer():
     assert "一起讨论探索" in system_text
 
 
+def test_build_prompt_requires_grounding_on_image_summary():
+    prompt = socratic_service.build_prompt(
+        question="请看图",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+        image_summary="匀强电场、匀强磁场、带电微粒沿直线运动。",
+        image_confidence="high",
+        image_related=True,
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "必须先引用图片理解摘要中的1-2个具体关键词" in system_text
+    assert "匀强电场、匀强磁场、带电微粒沿直线运动" in system_text
+
+
 def test_basic_concept_question_uses_explanation_mode():
     prompt = socratic_service.build_prompt(
         question="什么是惯性",

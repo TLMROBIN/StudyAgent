@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 import asyncio
+import logging
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -190,6 +191,27 @@ def test_llm_service_can_stream_with_builtin_local_vl_model(monkeypatch):
     assert seen == [
         ("qwen2.5-vl", "http://10.50.159.63:8001/v1", "EMPTY", "qwen2.5-vl-72b-instruct")
     ]
+
+
+def test_llm_service_logs_empty_stream_fallback(monkeypatch, caplog):
+    service = LLMService()
+    service.providers[0].api_key = "test-key"
+
+    async def fake_stream(provider, messages) -> AsyncIterator[str]:
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_stream_openai_compatible", fake_stream)
+
+    async def collect_chunks() -> list[str]:
+        return [chunk async for chunk in service.stream_response([{"role": "user", "content": "看图"}], "兜底")]
+
+    with caplog.at_level(logging.WARNING, logger="backend.services.llm_service"):
+        chunks = asyncio.run(collect_chunks())
+
+    assert chunks == ["兜底"]
+    assert "empty_stream" in caplog.text
+    assert "MiniMax-M2.7-highspeed" in caplog.text
 
 
 def test_llm_service_uses_vision_provider_for_image_completion(monkeypatch):

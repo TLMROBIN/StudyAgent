@@ -13,6 +13,16 @@ chat_stream_safety_rewrite_total = Counter(
     "chat_stream_safety_rewrite_total",
     "Stream responses rewritten due to unsafe output",
 )
+llm_stream_provider_failure_total = Counter(
+    "llm_stream_provider_failure_total",
+    "LLM streaming provider failures before fallback or retry",
+    ["provider", "model_key", "reason"],
+)
+llm_stream_fallback_total = Counter(
+    "llm_stream_fallback_total",
+    "LLM streaming requests served by fallback text",
+    ["model_key", "reason"],
+)
 sse_active_connections = Gauge("sse_active_connections", "Active SSE connections")
 llm_queue_depth = Gauge("llm_queue_depth", "Current chat waiting queue depth")
 filter_blocked_total = Counter("filter_blocked_total", "Blocked non-subject requests")
