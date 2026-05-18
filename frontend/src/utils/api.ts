@@ -76,6 +76,12 @@ export interface ChatModelOption {
   description: string
 }
 
+export interface ChatModelStatus {
+  key: string
+  status: 'available' | 'unavailable' | 'unknown'
+  message: string
+}
+
 export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment
 
 export interface QuestionRecommendationRequest {
@@ -202,6 +208,11 @@ export async function fetchQuestionRecommendations(
 
 export async function fetchChatModels(): Promise<ChatModelOption[]> {
   const { data } = await api.get<ChatModelOption[]>('/chat/models')
+  return data
+}
+
+export async function fetchChatModelStatuses(): Promise<ChatModelStatus[]> {
+  const { data } = await api.get<ChatModelStatus[]>('/chat/models/status')
   return data
 }
 

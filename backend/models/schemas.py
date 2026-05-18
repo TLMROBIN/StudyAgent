@@ -145,6 +145,12 @@ class ChatModelOptionRead(BaseModel):
     description: str
 
 
+class ChatModelStatusRead(BaseModel):
+    key: str
+    status: Literal["available", "unavailable", "unknown"]
+    message: str = ""
+
+
 class QuestionRecommendationRequest(BaseModel):
     subject: str
     recommendation_mode: Literal["context", "keyword"] = "keyword"

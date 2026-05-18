@@ -244,3 +244,24 @@ def test_llm_service_falls_back_to_local_vl_when_selected_model_cannot_see_image
 
     assert asyncio.run(extract_text()) == "题干：已知函数图像经过点 A"
     assert seen == ["minimax", "qwen2.5-vl"]
+
+
+def test_llm_service_reports_chat_model_statuses(monkeypatch):
+    service = LLMService()
+
+    async def fake_probe(provider):
+        if provider.name == "qwen2.5-vl":
+            return False, "连接失败"
+        return True, ""
+
+    monkeypatch.setattr(service, "_probe_openai_compatible", fake_probe)
+
+    async def collect_statuses():
+        return await service.chat_model_statuses(force_refresh=True)
+
+    statuses = asyncio.run(collect_statuses())
+
+    assert [(item["key"], item["status"], item["message"]) for item in statuses] == [
+        ("minimax-m27", "available", ""),
+        ("qwen2.5-vl", "unavailable", "连接失败"),
+    ]

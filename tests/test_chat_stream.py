@@ -197,6 +197,27 @@ def test_student_can_list_builtin_chat_models():
     ]
 
 
+def test_student_can_list_chat_model_statuses(monkeypatch):
+    session_factory = _build_session_factory()
+    client = _build_chat_test_client(session_factory, _create_student(session_factory))
+
+    async def fake_statuses(*, force_refresh=False):
+        return [
+            {"key": "minimax-m27", "status": "available", "message": ""},
+            {"key": "qwen2.5-vl", "status": "unavailable", "message": "连接失败"},
+        ]
+
+    monkeypatch.setattr(chat_router.llm_service, "chat_model_statuses", fake_statuses)
+
+    response = client.get("/api/chat/models/status")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"key": "minimax-m27", "status": "available", "message": ""},
+        {"key": "qwen2.5-vl", "status": "unavailable", "message": "连接失败"},
+    ]
+
+
 def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)

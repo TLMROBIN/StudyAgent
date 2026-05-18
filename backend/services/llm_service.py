@@ -138,6 +138,8 @@ class LLMService:
             api_key=settings.llm_local_vl_api_key,
             model=settings.llm_local_vl_model,
         )
+        self._model_status_cache: dict[str, tuple[datetime, dict[str, str]]] = {}
+        self._model_status_ttl_seconds = 20
 
     def chat_model_options(self) -> list[dict[str, str]]:
         return [
@@ -169,6 +171,70 @@ class LLMService:
         if selected_key == self.LOCAL_VL_CHAT_MODEL_KEY:
             return [self._local_vl_provider]
         return self._runtime_providers()
+
+    async def chat_model_statuses(self, *, force_refresh: bool = False) -> list[dict[str, str]]:
+        statuses: list[dict[str, str]] = []
+        for option in self.chat_model_options():
+            key = option["key"]
+            cached = self._model_status_cache.get(key)
+            if cached and not force_refresh:
+                checked_at, status = cached
+                if (datetime.now(UTC) - checked_at).total_seconds() < self._model_status_ttl_seconds:
+                    statuses.append(status)
+                    continue
+
+            status = await self._check_chat_model_status(key)
+            self._model_status_cache[key] = (datetime.now(UTC), status)
+            statuses.append(status)
+        return statuses
+
+    async def _check_chat_model_status(self, model_key: str) -> dict[str, str]:
+        providers = self._providers_for_chat_model(model_key)
+        if not providers:
+            return {"key": model_key, "status": "unavailable", "message": "模型未配置"}
+
+        failure_message = ""
+        for provider in providers:
+            ok, message = await self._probe_openai_compatible(provider)
+            if ok:
+                return {"key": model_key, "status": "available", "message": ""}
+            failure_message = failure_message or message
+        return {"key": model_key, "status": "unavailable", "message": failure_message or "模型不可用"}
+
+    async def _probe_openai_compatible(self, provider: ProviderState) -> tuple[bool, str]:
+        if not provider.base_url or not provider.api_key:
+            return False, "模型未配置"
+        if not provider.available:
+            return False, "模型服务暂时熔断"
+
+        headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": provider.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "temperature": 0,
+            "stream": False,
+            "max_tokens": 1,
+        }
+        url = provider.base_url.rstrip("/") + "/chat/completions"
+        timeout = httpx.Timeout(min(float(self.settings.llm_request_timeout_seconds), 3.0))
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+            return True, ""
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in {401, 403}:
+                return False, "认证失败"
+            if status_code in {402, 429}:
+                return False, "额度不足或请求受限"
+            if status_code >= 500:
+                return False, "模型服务异常"
+            return False, f"模型服务返回 {status_code}"
+        except httpx.TimeoutException:
+            return False, "模型探测超时"
+        except httpx.HTTPError:
+            return False, "连接失败或服务未运行"
 
     def _database_providers(self) -> list[ProviderState]:
         try:

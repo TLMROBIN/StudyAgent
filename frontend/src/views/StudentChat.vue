@@ -7,9 +7,11 @@ import { useAuthStore } from '../stores/auth'
 import {
   api,
   type ChatModelOption,
+  type ChatModelStatus,
   type ChatConversationRead,
   type ChatMessageAttachment,
   type ChatMessageRead,
+  fetchChatModelStatuses,
   fetchChatModels,
   fetchQuestionRecommendations,
   streamChat,
@@ -60,6 +62,7 @@ const difficultyOptions = [
   { value: 'challenge', label: '挑战' },
 ]
 const IMAGE_ONLY_PLACEHOLDER = '[图片提问]'
+const MODEL_STATUS_REFRESH_MS = 30000
 const form = reactive({
   subject: '数学',
   message: '',
@@ -94,7 +97,10 @@ const pendingImageFile = ref<File | null>(null)
 const pendingImagePreviewUrl = ref('')
 const previousSubject = ref(form.subject)
 const chatModels = ref<ChatModelOption[]>(DEFAULT_CHAT_MODELS)
+const chatModelStatuses = ref<Record<string, ChatModelStatus>>({})
+const modelStatusLoading = ref(false)
 let streamAbortController: AbortController | null = null
+let modelStatusTimer: ReturnType<typeof window.setInterval> | null = null
 let stopRequested = false
 const localAttachmentUrls = new Set<string>()
 const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
@@ -104,7 +110,10 @@ const visibleRecommendations = computed(() => (
   recommendationPool.value.slice(recommendationOffset.value, recommendationOffset.value + RECOMMENDATION_PAGE_SIZE)
 ))
 
-const canSend = computed(() => Boolean(form.message.trim() || pendingImageFile.value))
+const selectedModelStatus = computed(() => chatModelStatuses.value[form.llmModel]?.status || 'unknown')
+const canSend = computed(() => (
+  Boolean(form.message.trim() || pendingImageFile.value) && selectedModelStatus.value !== 'unavailable'
+))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
 const guidanceStageLabel = computed(() => stageLabel(guidanceStage.value))
 const canRequestRecommendations = computed(() => {
@@ -142,6 +151,48 @@ async function loadChatModels() {
   } catch {
     chatModels.value = DEFAULT_CHAT_MODELS
   }
+}
+
+async function refreshChatModelStatuses() {
+  modelStatusLoading.value = true
+  try {
+    const statuses = await fetchChatModelStatuses()
+    chatModelStatuses.value = Object.fromEntries(statuses.map((item) => [item.key, item]))
+  } catch {
+    chatModelStatuses.value = {}
+  } finally {
+    modelStatusLoading.value = false
+  }
+}
+
+function chatModelStatus(modelKey: string): ChatModelStatus {
+  return chatModelStatuses.value[modelKey] || {
+    key: modelKey,
+    status: modelStatusLoading.value ? 'unknown' : 'unknown',
+    message: modelStatusLoading.value ? '检测中' : '状态未知',
+  }
+}
+
+function chatModelStatusLabel(modelKey: string): string {
+  const status = chatModelStatus(modelKey)
+  if (status.status === 'available') {
+    return '可用'
+  }
+  if (status.status === 'unavailable') {
+    return status.message || '不可用'
+  }
+  return modelStatusLoading.value ? '检测中' : '状态未知'
+}
+
+function isChatModelUnavailable(modelKey: string): boolean {
+  return chatModelStatus(modelKey).status === 'unavailable'
+}
+
+function selectChatModel(modelKey: string) {
+  if (sending.value || isChatModelUnavailable(modelKey)) {
+    return
+  }
+  form.llmModel = modelKey
 }
 
 async function openConversation(id: number) {
@@ -753,6 +804,10 @@ async function sendMessage() {
 }
 
 onBeforeUnmount(() => {
+  if (modelStatusTimer) {
+    window.clearInterval(modelStatusTimer)
+    modelStatusTimer = null
+  }
   stopStreaming(false)
   resetPendingImage()
   clearLocalAttachmentUrls()
@@ -760,6 +815,10 @@ onBeforeUnmount(() => {
 
 onMounted(async () => {
   await loadChatModels()
+  await refreshChatModelStatuses()
+  modelStatusTimer = window.setInterval(() => {
+    void refreshChatModelStatuses()
+  }, MODEL_STATUS_REFRESH_MS)
   await loadConversations()
 })
 </script>
@@ -864,13 +923,20 @@ onMounted(async () => {
             v-for="model in chatModels"
             :key="model.key"
             type="button"
-            :class="['chat-model-option', { 'chat-model-option--active': form.llmModel === model.key }]"
-            :disabled="sending"
+            :class="[
+              'chat-model-option',
+              `chat-model-option--${chatModelStatus(model.key).status}`,
+              { 'chat-model-option--active': form.llmModel === model.key },
+            ]"
+            :disabled="sending || isChatModelUnavailable(model.key)"
             role="radio"
             :aria-checked="form.llmModel === model.key"
-            @click="form.llmModel = model.key"
+            @click="selectChatModel(model.key)"
           >
-            <span class="chat-model-option__name">{{ model.name }}</span>
+            <span class="chat-model-option__head">
+              <span class="chat-model-option__name">{{ model.name }}</span>
+              <span class="chat-model-status">{{ chatModelStatusLabel(model.key) }}</span>
+            </span>
             <span class="chat-model-option__description">{{ model.description }}</span>
           </button>
         </div>

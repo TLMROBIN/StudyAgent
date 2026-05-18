@@ -27,6 +27,7 @@ from backend.models.conversation import (
 )
 from backend.models.schemas import (
     ChatModelOptionRead,
+    ChatModelStatusRead,
     ChatRequest,
     ConversationRead,
     QuestionRecommendationRead,
@@ -360,6 +361,11 @@ def _build_short_circuit_reply(subject: str) -> str:
 @router.get("/models", response_model=list[ChatModelOptionRead])
 def list_chat_models(current_user: CurrentUser) -> list[ChatModelOptionRead]:
     return [ChatModelOptionRead(**item) for item in llm_service.chat_model_options()]
+
+
+@router.get("/models/status", response_model=list[ChatModelStatusRead])
+async def list_chat_model_statuses(current_user: CurrentUser) -> list[ChatModelStatusRead]:
+    return [ChatModelStatusRead(**item) for item in await llm_service.chat_model_statuses()]
 
 
 @router.get("/history", response_model=list[ConversationRead])
