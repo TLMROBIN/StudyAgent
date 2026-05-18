@@ -1,4 +1,9 @@
 .venv/
+.env
+.env.*
+!.env.example
+.omx/
+.cache/
 frontend/node_modules/
 frontend/dist/
 __pycache__/
@@ -11,6 +16,9 @@ tests/__pycache__/
 .DS_Store
 *.pyc
 *.pyo
+data/
+logs/
+*.log
 data/chromadb/
 data/uploads/
 data/tasks/
