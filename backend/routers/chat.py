@@ -616,6 +616,7 @@ async def stream_chat(
             attachment_id=attachment_record.id,
         )
         attachment_record.ocr_status = {
+            "paddleocr": "paddleocr",
             "mineru_ocr": "mineru_ocr",
             "ocr": "llm_ocr",
             "multimodal": "multimodal_fallback",

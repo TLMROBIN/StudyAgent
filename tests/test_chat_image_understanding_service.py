@@ -45,6 +45,88 @@ def test_understand_upscales_tiny_images_before_llm_ocr(monkeypatch):
     assert max(captured["size"]) >= 1200
 
 
+def test_understand_uses_paddleocr_backend_before_llm(monkeypatch, tmp_path):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
+    service = ChatImageUnderstandingService(settings=settings)
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(_make_png_bytes())
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        raise AssertionError("paddleocr backend should not call LLM OCR after confident text")
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(
+        service,
+        "_run_paddleocr",
+        lambda path: "4. 如图，空间存在水平向左的匀强电场和垂直纸面向外的匀强磁场，求正确说法。",
+    )
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="物理",
+            user_text="",
+            image_path=str(image_path),
+        )
+    )
+
+    assert result.source == "paddleocr"
+    assert result.confidence_level == "high"
+    assert "匀强电场" in result.prompt_summary
+
+
+def test_paddleocr_backend_flattens_common_result_shapes(monkeypatch, tmp_path):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
+    service = ChatImageUnderstandingService(settings=settings)
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(_make_png_bytes())
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            pass
+
+        def ocr(self, path):
+            return [
+                [
+                    [[[0, 0], [1, 0], [1, 1], [0, 1]], ("如图，空间存在匀强电场", 0.98)],
+                    [[[0, 1], [1, 1], [1, 2], [0, 2]], ("A. 微粒可能带正电", 0.96)],
+                ]
+            ]
+
+    monkeypatch.setattr(service, "_paddleocr_class", lambda: FakePaddleOCR)
+
+    assert service._run_paddleocr(str(image_path)) == "如图，空间存在匀强电场 A. 微粒可能带正电"
+
+
+def test_paddleocr_backend_uses_lightweight_v3_constructor(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
+    service = ChatImageUnderstandingService(settings=settings)
+    captured: dict[str, object] = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    service._create_paddleocr(FakePaddleOCR)
+
+    assert captured["use_doc_orientation_classify"] is False
+    assert captured["use_doc_unwarping"] is False
+    assert captured["use_textline_orientation"] is False
+    assert captured["lang"] == "ch"
+
+
+def test_paddleocr_backend_reports_missing_dependency(monkeypatch, tmp_path):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
+    service = ChatImageUnderstandingService(settings=settings)
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(_make_png_bytes())
+
+    monkeypatch.setattr(service, "_paddleocr_class", lambda: None)
+
+    assert service._try_paddleocr_sync(image_path=str(image_path)) is None
+
+
 def test_ocr_confidence_rejects_long_garbage_text():
     service = ChatImageUnderstandingService(settings=Settings())
 

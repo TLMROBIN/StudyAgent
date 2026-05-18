@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 from dataclasses import dataclass
+from functools import cached_property
 import re
+from typing import Any
 
 from backend.config import Settings, get_settings
 from backend.services.llm_service import llm_service
@@ -47,6 +49,19 @@ class ChatImageUnderstandingService:
         image_path: str | None = None,
         attachment_id: int | None = None,
     ) -> ImageUnderstandingResult:
+        paddleocr_result = await self._try_paddleocr_ocr(image_path=image_path)
+        if paddleocr_result is not None:
+            return paddleocr_result
+        if self._ocr_backend() == "paddleocr":
+            return ImageUnderstandingResult(
+                filter_text="",
+                prompt_summary="",
+                ocr_raw_text="",
+                confidence_level="low",
+                source="failed",
+                must_short_circuit=True,
+            )
+
         mineru_result = await self._try_mineru_ocr(
             image_path=image_path,
             attachment_id=attachment_id,
@@ -167,13 +182,125 @@ class ChatImageUnderstandingService:
             )
         return None
 
+    async def _try_paddleocr_ocr(self, *, image_path: str | None) -> ImageUnderstandingResult | None:
+        backend = self._ocr_backend()
+        if backend not in {"hybrid", "paddleocr"} or not image_path:
+            return None
+        return await asyncio.to_thread(self._try_paddleocr_sync, image_path=image_path)
+
+    def _try_paddleocr_sync(self, *, image_path: str) -> ImageUnderstandingResult | None:
+        try:
+            raw_text = self._run_paddleocr(image_path)
+        except Exception:
+            return None
+
+        normalized_text = self.normalize_text(raw_text)
+        confidence_level = self._assess_ocr_confidence(normalized_text)
+        if confidence_level == "high" or (
+            confidence_level == "medium" and self._looks_sufficient_for_direct_use(normalized_text)
+        ):
+            return ImageUnderstandingResult(
+                filter_text=normalized_text,
+                prompt_summary=normalized_text,
+                ocr_raw_text=raw_text,
+                confidence_level=confidence_level,
+                source="paddleocr",
+                must_short_circuit=False,
+            )
+        return None
+
+    def _run_paddleocr(self, image_path: str) -> str:
+        paddleocr_class = self._paddleocr_class()
+        if paddleocr_class is None:
+            return ""
+        ocr = self._paddleocr_instance(paddleocr_class)
+        if hasattr(ocr, "ocr"):
+            result = ocr.ocr(image_path)
+        elif hasattr(ocr, "predict"):
+            result = ocr.predict(input=image_path)
+        else:
+            return ""
+        return self._flatten_paddleocr_text(result)
+
+    @cached_property
+    def _cached_paddleocr(self):
+        paddleocr_class = self._paddleocr_class()
+        if paddleocr_class is None:
+            return None
+        return self._create_paddleocr(paddleocr_class)
+
+    def _paddleocr_instance(self, paddleocr_class):
+        cached = self._cached_paddleocr
+        if cached is not None and isinstance(cached, paddleocr_class):
+            return cached
+        return self._create_paddleocr(paddleocr_class)
+
+    @staticmethod
+    def _paddleocr_class():
+        try:
+            from paddleocr import PaddleOCR
+        except Exception:
+            return None
+        return PaddleOCR
+
+    @staticmethod
+    def _create_paddleocr(paddleocr_class):
+        try:
+            return paddleocr_class(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                lang="ch",
+            )
+        except TypeError:
+            return paddleocr_class(use_angle_cls=False, lang="ch")
+
+    def _flatten_paddleocr_text(self, result: Any) -> str:
+        texts: list[str] = []
+        self._collect_paddleocr_text(result, texts)
+        return self.normalize_text(" ".join(texts))
+
+    def _collect_paddleocr_text(self, value: Any, texts: list[str]) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                texts.append(text)
+            return
+        if isinstance(value, dict):
+            for key in ("rec_text", "text", "transcription"):
+                text = value.get(key)
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+            for key in ("rec_texts", "texts"):
+                items = value.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, str) and item.strip():
+                            texts.append(item.strip())
+            return
+        if isinstance(value, tuple):
+            if value and isinstance(value[0], str):
+                texts.append(value[0].strip())
+                return
+            for item in value:
+                self._collect_paddleocr_text(item, texts)
+            return
+        if isinstance(value, list):
+            if len(value) >= 2 and isinstance(value[1], tuple) and value[1] and isinstance(value[1][0], str):
+                texts.append(value[1][0].strip())
+                return
+            for item in value:
+                self._collect_paddleocr_text(item, texts)
+
     @staticmethod
     def normalize_text(text: str) -> str:
         return _WHITESPACE_PATTERN.sub(" ", (text or "").strip())
 
     def _ocr_backend(self) -> str:
         backend = str(self.settings.chat_image_ocr_backend or "hybrid").strip().lower()
-        if backend not in {"hybrid", "mineru", "llm"}:
+        if backend not in {"hybrid", "paddleocr", "mineru", "llm"}:
             return "hybrid"
         return backend
 
