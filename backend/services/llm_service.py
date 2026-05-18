@@ -36,6 +36,16 @@ def _partial_tag_suffix_length(text: str, tag: str) -> int:
     return 0
 
 
+def _content_text(content: object) -> str:
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict)
+        )
+    return str(content or "")
+
+
 class ThinkingContentFilter:
     def __init__(self) -> None:
         self.buffer = ""
@@ -349,6 +359,7 @@ class LLMService:
 
     async def _stream_openai_compatible(self, provider: ProviderState, messages: list[dict[str, str]]):
         content_filter = ThinkingContentFilter()
+        emitted_text = ""
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
         payload = {
             "model": provider.model,
@@ -369,14 +380,20 @@ class LLMService:
                         break
                     payload = json.loads(data)
                     choice = payload.get("choices", [{}])[0]
-                    delta = choice.get("delta", {}).get("content")
-                    if delta:
-                        visible_text = content_filter.feed(delta)
+                    delta = _content_text(choice.get("delta", {}).get("content"))
+                    message_content = _content_text(choice.get("message", {}).get("content"))
+                    text = delta or message_content
+                    if text and emitted_text and text.startswith(emitted_text):
+                        text = text[len(emitted_text) :]
+                    if text:
+                        visible_text = content_filter.feed(text)
                         if visible_text:
+                            emitted_text += visible_text
                             yield visible_text
 
         final_visible_text = content_filter.flush()
         if final_visible_text:
+            emitted_text += final_visible_text
             yield final_visible_text
 
     async def _generate_image_completion(
@@ -451,14 +468,7 @@ class LLMService:
             response.raise_for_status()
             body = response.json()
         message = body.get("choices", [{}])[0].get("message", {})
-        content = message.get("content", "")
-        if isinstance(content, list):
-            return "".join(
-                str(item.get("text") or "")
-                for item in content
-                if isinstance(item, dict)
-            )
-        return str(content or "")
+        return _content_text(message.get("content", ""))
 
     @staticmethod
     def _image_data_url(*, image_bytes: bytes, mime_type: str) -> str:
