@@ -358,6 +358,22 @@ def _build_short_circuit_reply(subject: str) -> str:
     return socratic_service.image_low_confidence_text(subject)
 
 
+def _build_image_grounded_fallback(
+    *,
+    fallback_text: str,
+    subject: str,
+    understanding: ImageUnderstandingResult | None,
+) -> str:
+    if not understanding or understanding.confidence_level == "low":
+        return fallback_text
+    summary = " ".join((understanding.prompt_summary or "").split())
+    if not summary:
+        return fallback_text
+    if len(summary) > 160:
+        summary = f"{summary[:160].rstrip()}..."
+    return f"我识别到这张{subject}题图里主要有：{summary}\n\n{fallback_text}"
+
+
 @router.get("/models", response_model=list[ChatModelOptionRead])
 def list_chat_models(current_user: CurrentUser) -> list[ChatModelOptionRead]:
     return [ChatModelOptionRead(**item) for item in llm_service.chat_model_options()]
@@ -722,6 +738,11 @@ async def stream_chat(
         image_confidence=image_understanding.confidence_level if image_understanding else None,
         image_related=has_image_turn,
     )
+    fallback_text = _build_image_grounded_fallback(
+        fallback_text=prompt.fallback_text,
+        subject=subject,
+        understanding=image_understanding if has_image_turn else None,
+    )
     cache_lookup = QuestionCacheLookup(cache_key=None, answer=None)
     if question_cache_service.is_cacheable(
         history_pairs=history_pairs,
@@ -804,7 +825,7 @@ async def stream_chat(
                     "request_id": getattr(request.state, "request_id", None),
                 },
             )
-            llm_stream = _stream_llm_response(prompt.messages, prompt.fallback_text, model_key=selected_model_key)
+            llm_stream = _stream_llm_response(prompt.messages, fallback_text, model_key=selected_model_key)
 
             while True:
                 if await request.is_disconnected():
@@ -878,7 +899,7 @@ async def stream_chat(
                     yield _sse_event("chunk", {"content": segment})
 
             if should_send_done and not emitted_text.strip():
-                emitted_text = prompt.fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
+                emitted_text = fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
             if has_image_turn:
                 emitted_text = filter_service.ensure_image_disclaimer(emitted_text)
             if should_send_done:

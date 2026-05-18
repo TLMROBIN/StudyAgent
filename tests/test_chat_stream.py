@@ -331,6 +331,8 @@ def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
     final_text = events[-1][1]["content"]
     assert [event for event, _ in events] == ["meta", "done"]
     assert final_text != chat_router.filter_service.image_uncertainty_text
+    assert "我识别到这张数学题图里主要有" in final_text
+    assert "函数图像经过点 A" in final_text
     assert "先不要急着算结果" in final_text
     assert "我是 AI" in final_text
 
