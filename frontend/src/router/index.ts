@@ -28,14 +28,15 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore(pinia)
-  const isAuthenticated = await auth.ensureSessionReady()
 
   if (to.meta.public) {
-    if (to.path === '/login' && isAuthenticated && auth.user) {
+    if (to.path === '/login' && auth.initialized && auth.user) {
       return auth.user.role === 'student' ? '/student' : '/admin'
     }
     return true
   }
+
+  const isAuthenticated = await auth.ensureSessionReady()
 
   if (to.meta.requiresAuth && !isAuthenticated) {
     forceLoginRedirect()
