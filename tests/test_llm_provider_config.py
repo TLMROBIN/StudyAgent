@@ -190,3 +190,57 @@ def test_llm_service_can_stream_with_builtin_local_vl_model(monkeypatch):
     assert seen == [
         ("qwen2.5-vl", "http://10.50.159.63:8001/v1", "EMPTY", "qwen2.5-vl-72b-instruct")
     ]
+
+
+def test_llm_service_uses_selected_default_model_for_image_completion(monkeypatch):
+    service = LLMService()
+    service.providers[0].api_key = "primary-secret"
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        service,
+        "_runtime_providers",
+        lambda: [
+            service.providers[0],
+        ],
+    )
+
+    async def fake_complete(provider, messages):
+        seen.append(provider.name)
+        return "图片题干"
+
+    monkeypatch.setattr(service, "_complete_openai_compatible", fake_complete)
+
+    async def extract_text():
+        return await service.extract_image_text(
+            image_bytes=b"fake-image",
+            mime_type="image/png",
+            subject="数学",
+        )
+
+    assert asyncio.run(extract_text()) == "图片题干"
+    assert seen == ["minimax"]
+
+
+def test_llm_service_falls_back_to_local_vl_when_selected_model_cannot_see_image(monkeypatch):
+    service = LLMService()
+    service.providers[0].api_key = "primary-secret"
+    seen: list[str] = []
+
+    async def fake_complete(provider, messages):
+        seen.append(provider.name)
+        if provider.name == "minimax":
+            return "目前没有收到任何图片可供识别。"
+        return "题干：已知函数图像经过点 A"
+
+    monkeypatch.setattr(service, "_complete_openai_compatible", fake_complete)
+
+    async def extract_text():
+        return await service.extract_image_text(
+            image_bytes=b"fake-image",
+            mime_type="image/png",
+            subject="数学",
+        )
+
+    assert asyncio.run(extract_text()) == "题干：已知函数图像经过点 A"
+    assert seen == ["minimax", "qwen2.5-vl"]

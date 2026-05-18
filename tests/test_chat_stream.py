@@ -559,6 +559,45 @@ def test_chat_stream_records_mineru_ocr_status_for_image_turn(monkeypatch):
         session.close()
 
 
+def test_chat_stream_passes_selected_model_to_image_understanding(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    seen: dict[str, object] = {}
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        yield "先看图中标出的条件。"
+
+    async def fake_understand(**kwargs):
+        seen["model_key"] = kwargs["model_key"]
+        return ImageUnderstandingResult(
+            filter_text="已知函数图像和坐标点",
+            prompt_summary="题目给了一张函数图像，并标出了一个坐标点。",
+            ocr_raw_text="函数图像 坐标点",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "", "llm_model": "minimax-m27"},
+        files={"image": ("question.png", _make_test_image_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert seen["model_key"] == "minimax-m27"
+
+
 def test_chat_stream_short_circuits_low_confidence_images(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)

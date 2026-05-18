@@ -43,6 +43,7 @@ class ChatImageUnderstandingService:
         mime_type: str,
         subject: str,
         user_text: str,
+        model_key: str | None = None,
         image_path: str | None = None,
         attachment_id: int | None = None,
     ) -> ImageUnderstandingResult:
@@ -70,6 +71,7 @@ class ChatImageUnderstandingService:
             image_bytes=llm_image_bytes,
             mime_type=llm_mime_type,
             subject=subject,
+            model_key=model_key,
         )
         normalized_ocr = self.normalize_text(ocr_raw_text)
         confidence_level = self._assess_ocr_confidence(normalized_ocr)
@@ -101,6 +103,7 @@ class ChatImageUnderstandingService:
                 subject=subject,
                 user_text=user_text,
                 ocr_text=normalized_ocr,
+                model_key=model_key,
             )
         )
         multimodal_confidence = self._assess_multimodal_confidence(multimodal_summary)
@@ -176,6 +179,8 @@ class ChatImageUnderstandingService:
 
     def _assess_ocr_confidence(self, text: str) -> str:
         normalized = self.normalize_text(text)
+        if self._looks_like_no_image_received(normalized):
+            return "low"
         compact = normalized.replace(" ", "")
         if len(compact) < 6:
             return "low"
@@ -188,6 +193,8 @@ class ChatImageUnderstandingService:
         return "low"
 
     def _assess_multimodal_confidence(self, text: str) -> str:
+        if self._looks_like_no_image_received(text):
+            return "low"
         if len(text) >= 24:
             return "high"
         if len(text) >= 10:
@@ -196,6 +203,8 @@ class ChatImageUnderstandingService:
 
     @staticmethod
     def _looks_sufficient_for_direct_use(text: str) -> bool:
+        if ChatImageUnderstandingService._looks_like_no_image_received(text):
+            return False
         if len(text) < 10:
             return False
         academic_signal_count = sum(
@@ -203,6 +212,22 @@ class ChatImageUnderstandingService:
             for token in ["求", "解", "图", "函数", "方程", "受力", "电路", "化学", "物理", "数学", "证明"]
         )
         return academic_signal_count >= 1 or any(char.isdigit() for char in text)
+
+    @staticmethod
+    def _looks_like_no_image_received(text: str) -> bool:
+        normalized = _WHITESPACE_PATTERN.sub("", (text or "").strip())
+        if not normalized:
+            return False
+        patterns = [
+            r"(?:没有|未|没)收到.*图片",
+            r"(?:没有|未|没)看到.*图片",
+            r"看不到.*图片",
+            r"无法(?:查看|识别|读取|看清).*图片",
+            r"不能(?:看到|查看|识别|读取).*图片",
+            r"请(?:重新)?上传.*图片",
+            r"图片.*(?:未|没有|没)提供",
+        ]
+        return any(re.search(pattern, normalized) for pattern in patterns)
 
     @staticmethod
     def _meaningful_char_ratio(text: str) -> float:

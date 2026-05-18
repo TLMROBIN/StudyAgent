@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from base64 import b64encode
 import json
+import re
 from typing import AsyncIterator
 
 import httpx
@@ -13,6 +14,18 @@ from backend.database import SessionLocal
 
 OPEN_THINK_TAG = "<think>"
 CLOSE_THINK_TAG = "</think>"
+NO_IMAGE_RECEIVED_PATTERNS = [
+    re.compile(pattern)
+    for pattern in [
+        r"(?:没有|未|没)收到.*图片",
+        r"(?:没有|未|没)看到.*图片",
+        r"看不到.*图片",
+        r"无法(?:查看|识别|读取|看清).*图片",
+        r"不能(?:看到|查看|识别|读取).*图片",
+        r"请(?:重新)?上传.*图片",
+        r"图片.*(?:未|没有|没)提供",
+    ]
+]
 
 
 def _partial_tag_suffix_length(text: str, tag: str) -> int:
@@ -214,7 +227,14 @@ class LLMService:
         if fallback_text:
             yield fallback_text
 
-    async def extract_image_text(self, *, image_bytes: bytes, mime_type: str, subject: str) -> str:
+    async def extract_image_text(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        subject: str,
+        model_key: str | None = None,
+    ) -> str:
         prompt = (
             f"你现在执行高中{subject}题目图片的 OCR。"
             "只提取图片里能明确看清的文字、数字、公式、标签。"
@@ -225,6 +245,7 @@ class LLMService:
             prompt=prompt,
             image_bytes=image_bytes,
             mime_type=mime_type,
+            model_key=model_key,
         )
 
     async def summarize_academic_image(
@@ -235,6 +256,7 @@ class LLMService:
         subject: str,
         user_text: str,
         ocr_text: str,
+        model_key: str | None = None,
     ) -> str:
         prompt = (
             f"你在辅助理解一张高中{subject}题目图片。"
@@ -247,6 +269,7 @@ class LLMService:
             prompt=prompt,
             image_bytes=image_bytes,
             mime_type=mime_type,
+            model_key=model_key,
         )
 
     def _reset_provider(self, provider: ProviderState) -> None:
@@ -290,7 +313,14 @@ class LLMService:
         if final_visible_text:
             yield final_visible_text
 
-    async def _generate_image_completion(self, *, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+    async def _generate_image_completion(
+        self,
+        *,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str,
+        model_key: str | None = None,
+    ) -> str:
         messages = [
             {
                 "role": "user",
@@ -303,17 +333,42 @@ class LLMService:
                 ],
             }
         ]
-        for provider in self._runtime_providers():
+        for provider in self._image_completion_providers(model_key):
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:
                 text = await self._complete_openai_compatible(provider, messages)
-                if text:
+                if text and not self._looks_like_no_image_received(text):
                     self._reset_provider(provider)
                     return text.strip()
             except Exception:
                 self._mark_provider_failure(provider)
         return ""
+
+    def _image_completion_providers(self, model_key: str | None) -> list[ProviderState]:
+        providers: list[ProviderState] = []
+
+        for provider in self._providers_for_chat_model(model_key):
+            self._append_unique_provider(providers, provider)
+        self._append_unique_provider(providers, self._local_vl_provider)
+        for provider in self._runtime_providers():
+            self._append_unique_provider(providers, provider)
+        return providers
+
+    @staticmethod
+    def _append_unique_provider(providers: list[ProviderState], provider: ProviderState) -> None:
+        if not any(
+            existing.name == provider.name
+            and existing.base_url == provider.base_url
+            and existing.model == provider.model
+            for existing in providers
+        ):
+            providers.append(provider)
+
+    @staticmethod
+    def _looks_like_no_image_received(text: str) -> bool:
+        normalized = re.sub(r"\s+", "", (text or "").strip())
+        return bool(normalized) and any(pattern.search(normalized) for pattern in NO_IMAGE_RECEIVED_PATTERNS)
 
     async def _complete_openai_compatible(self, provider: ProviderState, messages: list[dict[str, object]]) -> str:
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}

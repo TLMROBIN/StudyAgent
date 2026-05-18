@@ -605,6 +605,7 @@ async def stream_chat(
             mime_type=attachment_record.mime_type,
             subject=payload.subject,
             user_text=payload.message,
+            model_key=selected_model_key,
             image_path=str(chat_attachment_service.resolve_path(attachment_record.storage_key)),
             attachment_id=attachment_record.id,
         )

@@ -19,7 +19,7 @@ def test_understand_upscales_tiny_images_before_llm_ocr(monkeypatch):
     service = ChatImageUnderstandingService(settings=settings)
     captured: dict[str, object] = {}
 
-    async def fake_extract_image_text(*, image_bytes: bytes, mime_type: str, subject: str) -> str:
+    async def fake_extract_image_text(*, image_bytes: bytes, mime_type: str, subject: str, **kwargs) -> str:
         captured["mime_type"] = mime_type
         with Image.open(BytesIO(image_bytes)) as image:
             captured["size"] = image.size
@@ -51,3 +51,10 @@ def test_ocr_confidence_rejects_long_garbage_text():
     assert service._assess_ocr_confidence("||||||||||||||||||||||||||||||||||||||||") == "low"
     assert service._assess_ocr_confidence("求 x 满足 x^2=4") == "medium"
     assert service._assess_ocr_confidence("已知函数 f(x)=x^2 的图像经过原点，求单调区间。") == "high"
+
+
+def test_image_understanding_rejects_no_image_received_text():
+    service = ChatImageUnderstandingService(settings=Settings())
+
+    assert service._assess_ocr_confidence("目前没有收到任何图片可供识别。") == "low"
+    assert service._assess_multimodal_confidence("我没有看到图片，请重新上传。") == "low"
