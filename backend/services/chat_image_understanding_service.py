@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from io import BytesIO
 from dataclasses import dataclass
 from functools import cached_property
+from io import BytesIO
+import os
 import re
 from typing import Any
 
@@ -237,6 +238,8 @@ class ChatImageUnderstandingService:
 
     @staticmethod
     def _paddleocr_class():
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        os.environ.setdefault("DISABLE_MODEL_SOURCE_CHECK", "True")
         try:
             from paddleocr import PaddleOCR
         except Exception:

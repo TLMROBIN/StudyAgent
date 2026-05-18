@@ -99,6 +99,17 @@ def test_paddleocr_backend_flattens_common_result_shapes(monkeypatch, tmp_path):
     assert service._run_paddleocr(str(image_path)) == "如图，空间存在匀强电场 A. 微粒可能带正电"
 
 
+def test_paddleocr_backend_disables_remote_source_check(monkeypatch):
+    monkeypatch.delenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", raising=False)
+    monkeypatch.delenv("DISABLE_MODEL_SOURCE_CHECK", raising=False)
+    service = ChatImageUnderstandingService(settings=Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr"))
+
+    service._paddleocr_class()
+
+    assert image_service_module.os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"
+    assert image_service_module.os.environ["DISABLE_MODEL_SOURCE_CHECK"] == "True"
+
+
 def test_paddleocr_backend_uses_lightweight_v3_constructor(monkeypatch):
     settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
     service = ChatImageUnderstandingService(settings=settings)
