@@ -223,10 +223,10 @@ class LLMService:
             "messages": [{"role": "user", "content": "ping"}],
             "temperature": 0,
             "stream": False,
-            "max_tokens": 1,
+            "max_completion_tokens": 8,
         }
         url = provider.base_url.rstrip("/") + "/chat/completions"
-        timeout = httpx.Timeout(min(float(self.settings.llm_request_timeout_seconds), 3.0))
+        timeout = httpx.Timeout(float(self.settings.llm_request_timeout_seconds))
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, json=payload)
@@ -431,11 +431,7 @@ class LLMService:
     def _image_completion_providers(self, model_key: str | None) -> list[ProviderState]:
         providers: list[ProviderState] = []
 
-        for provider in self._providers_for_chat_model(model_key):
-            self._append_unique_provider(providers, provider)
         self._append_unique_provider(providers, self._local_vl_provider)
-        for provider in self._runtime_providers():
-            self._append_unique_provider(providers, provider)
         return providers
 
     @staticmethod

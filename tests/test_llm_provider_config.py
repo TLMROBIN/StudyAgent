@@ -192,7 +192,7 @@ def test_llm_service_can_stream_with_builtin_local_vl_model(monkeypatch):
     ]
 
 
-def test_llm_service_uses_selected_default_model_for_image_completion(monkeypatch):
+def test_llm_service_uses_vision_provider_for_image_completion(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "primary-secret"
     seen: list[str] = []
@@ -219,18 +219,16 @@ def test_llm_service_uses_selected_default_model_for_image_completion(monkeypatc
         )
 
     assert asyncio.run(extract_text()) == "图片题干"
-    assert seen == ["minimax"]
+    assert seen == ["qwen2.5-vl"]
 
 
-def test_llm_service_falls_back_to_local_vl_when_selected_model_cannot_see_image(monkeypatch):
+def test_llm_service_does_not_send_images_to_minimax_m2(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "primary-secret"
     seen: list[str] = []
 
     async def fake_complete(provider, messages):
         seen.append(provider.name)
-        if provider.name == "minimax":
-            return "目前没有收到任何图片可供识别。"
         return "题干：已知函数图像经过点 A"
 
     monkeypatch.setattr(service, "_complete_openai_compatible", fake_complete)
@@ -243,7 +241,7 @@ def test_llm_service_falls_back_to_local_vl_when_selected_model_cannot_see_image
         )
 
     assert asyncio.run(extract_text()) == "题干：已知函数图像经过点 A"
-    assert seen == ["minimax", "qwen2.5-vl"]
+    assert seen == ["qwen2.5-vl"]
 
 
 def test_llm_service_reports_chat_model_statuses(monkeypatch):
@@ -265,3 +263,45 @@ def test_llm_service_reports_chat_model_statuses(monkeypatch):
         ("minimax-m27", "available", ""),
         ("qwen2.5-vl", "unavailable", "连接失败"),
     ]
+
+
+def test_llm_probe_uses_m2_completion_tokens_and_full_timeout(monkeypatch):
+    service = LLMService()
+    provider = service.providers[0]
+    provider.api_key = "primary-secret"
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["payload"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.services.llm_service.httpx.AsyncClient", FakeAsyncClient)
+
+    async def check():
+        return await service._probe_openai_compatible(provider)
+
+    ok, message = asyncio.run(check())
+
+    assert ok is True
+    assert message == ""
+    payload = captured["payload"]
+    assert payload["max_completion_tokens"] == 8
+    assert "max_tokens" not in payload
+    assert captured["timeout"].connect == service.settings.llm_request_timeout_seconds
