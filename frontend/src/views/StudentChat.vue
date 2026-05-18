@@ -62,7 +62,7 @@ const difficultyOptions = [
   { value: 'challenge', label: '挑战' },
 ]
 const IMAGE_ONLY_PLACEHOLDER = '[图片提问]'
-const MODEL_STATUS_REFRESH_MS = 30000
+const MODEL_STATUS_REFRESH_MS = 300000
 const form = reactive({
   subject: '数学',
   message: '',
@@ -815,7 +815,7 @@ onBeforeUnmount(() => {
 
 onMounted(async () => {
   await loadChatModels()
-  await refreshChatModelStatuses()
+  void refreshChatModelStatuses()
   modelStatusTimer = window.setInterval(() => {
     void refreshChatModelStatuses()
   }, MODEL_STATUS_REFRESH_MS)

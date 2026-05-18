@@ -265,6 +265,23 @@ def test_llm_service_reports_chat_model_statuses(monkeypatch):
     ]
 
 
+def test_llm_service_model_statuses_do_not_probe_by_default(monkeypatch):
+    service = LLMService()
+
+    async def fail_probe(provider):
+        raise AssertionError("default model status checks must not call external providers")
+
+    monkeypatch.setattr(service, "_probe_openai_compatible", fail_probe)
+
+    async def collect_statuses():
+        return await service.chat_model_statuses()
+
+    statuses = asyncio.run(collect_statuses())
+
+    assert [item["key"] for item in statuses] == ["minimax-m27", "qwen2.5-vl"]
+    assert {item["status"] for item in statuses} <= {"available", "unavailable"}
+
+
 def test_llm_probe_uses_m2_completion_tokens_and_full_timeout(monkeypatch):
     service = LLMService()
     provider = service.providers[0]

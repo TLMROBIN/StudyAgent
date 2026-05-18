@@ -149,7 +149,7 @@ class LLMService:
             model=settings.llm_local_vl_model,
         )
         self._model_status_cache: dict[str, tuple[datetime, dict[str, str]]] = {}
-        self._model_status_ttl_seconds = 20
+        self._model_status_ttl_seconds = 300
 
     def chat_model_options(self) -> list[dict[str, str]]:
         return [
@@ -193,10 +193,31 @@ class LLMService:
                     statuses.append(status)
                     continue
 
-            status = await self._check_chat_model_status(key)
+            status = (
+                await self._check_chat_model_status(key)
+                if force_refresh
+                else self._configured_chat_model_status(key)
+            )
             self._model_status_cache[key] = (datetime.now(UTC), status)
             statuses.append(status)
         return statuses
+
+    def _configured_chat_model_status(self, model_key: str) -> dict[str, str]:
+        providers = self._providers_for_chat_model(model_key)
+        if not providers:
+            return {"key": model_key, "status": "unavailable", "message": "模型未配置"}
+
+        has_configured_provider = False
+        for provider in providers:
+            if not provider.base_url or not provider.api_key:
+                continue
+            has_configured_provider = True
+            if provider.available:
+                return {"key": model_key, "status": "available", "message": ""}
+
+        if has_configured_provider:
+            return {"key": model_key, "status": "unavailable", "message": "模型服务暂时熔断"}
+        return {"key": model_key, "status": "unavailable", "message": "模型未配置"}
 
     async def _check_chat_model_status(self, model_key: str) -> dict[str, str]:
         providers = self._providers_for_chat_model(model_key)
