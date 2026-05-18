@@ -292,6 +292,49 @@ def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch
         session.close()
 
 
+def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        if False:
+            yield ""
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="如图，已知函数图像经过点 A，求单调区间。",
+            prompt_summary="如图，已知函数图像经过点 A，求单调区间。",
+            ocr_raw_text="如图 已知函数图像经过点 A 求单调区间",
+            confidence_level="high",
+            source="ocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": ""},
+        files={"image": ("question.png", _make_test_image_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    final_text = events[-1][1]["content"]
+    assert [event for event, _ in events] == ["meta", "done"]
+    assert final_text != chat_router.filter_service.image_uncertainty_text
+    assert "先不要急着算结果" in final_text
+    assert "我是 AI" in final_text
+
+
 def test_chat_stream_rewrites_unsafe_output_before_emitting(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)

@@ -876,10 +876,10 @@ async def stream_chat(
                         first_token_observed = True
                     yield _sse_event("chunk", {"content": segment})
 
+            if should_send_done and not emitted_text.strip():
+                emitted_text = prompt.fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
             if has_image_turn:
                 emitted_text = filter_service.ensure_image_disclaimer(emitted_text)
-            if should_send_done and not emitted_text.strip():
-                emitted_text = EMPTY_CHAT_RESPONSE_FALLBACK
             if should_send_done:
                 yield _sse_event("done", {"content": emitted_text})
         finally:
