@@ -1,11 +1,12 @@
 import asyncio
 from io import BytesIO
+import time
 
 from PIL import Image
 
 from backend.config import Settings
 from backend.services import chat_image_understanding_service as image_service_module
-from backend.services.chat_image_understanding_service import ChatImageUnderstandingService
+from backend.services.chat_image_understanding_service import ChatImageUnderstandingService, ImageUnderstandingResult
 
 
 def _make_png_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
@@ -136,6 +137,28 @@ def test_paddleocr_backend_reports_missing_dependency(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "_paddleocr_class", lambda: None)
 
     assert service._try_paddleocr_sync(image_path=str(image_path)) is None
+
+
+def test_paddleocr_backend_times_out_hung_worker(monkeypatch, tmp_path):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr", CHAT_IMAGE_OCR_TIMEOUT_SECONDS=0)
+    service = ChatImageUnderstandingService(settings=settings)
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(_make_png_bytes())
+
+    def slow_ocr(*, image_path: str) -> ImageUnderstandingResult:
+        time.sleep(0.1)
+        return ImageUnderstandingResult(
+            filter_text="如图，空间存在匀强电场，求正确说法。",
+            prompt_summary="如图，空间存在匀强电场，求正确说法。",
+            ocr_raw_text="如图，空间存在匀强电场，求正确说法。",
+            confidence_level="high",
+            source="paddleocr",
+            must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(service, "_try_paddleocr_sync", slow_ocr)
+
+    assert asyncio.run(service._try_paddleocr_ocr(image_path=str(image_path))) is None
 
 
 def test_ocr_confidence_rejects_long_garbage_text():

@@ -4,7 +4,10 @@ import asyncio
 from dataclasses import dataclass
 from functools import cached_property
 from io import BytesIO
+import logging
+import multiprocessing as mp
 import os
+import queue
 import re
 from typing import Any
 
@@ -12,7 +15,14 @@ from backend.config import Settings, get_settings
 from backend.services.llm_service import llm_service
 from backend.services.mineru_service import MineruError, mineru_service
 
+logger = logging.getLogger(__name__)
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_PADDLEOCR_THREAD_ENV_DEFAULTS = {
+    "OMP_NUM_THREADS": "2",
+    "OPENBLAS_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2",
+    "PADDLE_NUM_THREADS": "2",
+}
 
 
 @dataclass
@@ -187,11 +197,20 @@ class ChatImageUnderstandingService:
         backend = self._ocr_backend()
         if backend not in {"hybrid", "paddleocr"} or not image_path:
             return None
-        return await asyncio.to_thread(self._try_paddleocr_sync, image_path=image_path)
+        timeout_seconds = max(0.0, float(self.settings.chat_image_ocr_timeout_seconds))
+        outer_timeout_seconds = timeout_seconds + 1 if timeout_seconds > 0 else 0
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._try_paddleocr_sync, image_path=image_path),
+                timeout=outer_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning("chat_image_paddleocr_timeout timeout_seconds=%s", timeout_seconds)
+            return None
 
     def _try_paddleocr_sync(self, *, image_path: str) -> ImageUnderstandingResult | None:
         try:
-            raw_text = self._run_paddleocr(image_path)
+            raw_text = self._run_paddleocr_safely(image_path)
         except Exception:
             return None
 
@@ -208,6 +227,47 @@ class ChatImageUnderstandingService:
                 source="paddleocr",
                 must_short_circuit=False,
             )
+        return None
+
+    def _run_paddleocr_safely(self, image_path: str) -> str | None:
+        if self._has_test_injected_paddleocr():
+            return self._run_paddleocr(image_path)
+        return self._run_paddleocr_in_subprocess(
+            image_path=image_path,
+            timeout_seconds=max(0.0, float(self.settings.chat_image_ocr_timeout_seconds)),
+        )
+
+    def _has_test_injected_paddleocr(self) -> bool:
+        return "_run_paddleocr" in self.__dict__ or "_paddleocr_class" in self.__dict__
+
+    def _run_paddleocr_in_subprocess(self, *, image_path: str, timeout_seconds: float) -> str | None:
+        if timeout_seconds <= 0:
+            return None
+
+        ctx = mp.get_context("spawn")
+        output_queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(target=_paddleocr_subprocess_worker, args=(image_path, output_queue))
+        process.start()
+        process.join(timeout_seconds)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+            logger.warning("chat_image_paddleocr_subprocess_timeout timeout_seconds=%s", timeout_seconds)
+            return None
+
+        try:
+            status, payload = output_queue.get_nowait()
+        except queue.Empty:
+            return None
+        finally:
+            output_queue.close()
+
+        if status == "ok":
+            return str(payload or "")
+        logger.warning("chat_image_paddleocr_subprocess_failed error=%s", str(payload)[:300])
         return None
 
     def _run_paddleocr(self, image_path: str) -> str:
@@ -238,6 +298,8 @@ class ChatImageUnderstandingService:
 
     @staticmethod
     def _paddleocr_class():
+        for name, value in _PADDLEOCR_THREAD_ENV_DEFAULTS.items():
+            os.environ.setdefault(name, value)
         os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         os.environ.setdefault("DISABLE_MODEL_SOURCE_CHECK", "True")
         try:
@@ -416,6 +478,16 @@ class ChatImageUnderstandingService:
 
         resampling = getattr(Image, "Resampling", Image).LANCZOS
         return image.resize((max(1, round(width * scale)), max(1, round(height * scale))), resampling)
+
+
+def _paddleocr_subprocess_worker(image_path: str, output_queue) -> None:
+    for name, value in _PADDLEOCR_THREAD_ENV_DEFAULTS.items():
+        os.environ.setdefault(name, value)
+    try:
+        service = ChatImageUnderstandingService(settings=Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr"))
+        output_queue.put(("ok", service._run_paddleocr(image_path)))
+    except BaseException as exc:
+        output_queue.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 chat_image_understanding_service = ChatImageUnderstandingService()
