@@ -1,0 +1,10 @@
+[Unit]
+Description=Check and recover StudyAgent GPU Docker runtime
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/文档/trae_projects/StudyAgent
+Environment=STUDYAGENT_PROJECT_DIR=%h/文档/trae_projects/StudyAgent
+Environment=GRAFANA_URL=http://127.0.0.1:3001
+ExecStart=%h/.local/bin/studyagent-gpu-watchdog.sh

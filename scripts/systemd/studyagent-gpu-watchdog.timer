@@ -1,0 +1,12 @@
+[Unit]
+Description=Run StudyAgent GPU Docker runtime watchdog
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+RandomizedDelaySec=20s
+Persistent=true
+Unit=studyagent-gpu-watchdog.service
+
+[Install]
+WantedBy=timers.target
