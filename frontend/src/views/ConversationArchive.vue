@@ -10,6 +10,7 @@ interface ArchiveMessage {
   content: string
   turn_index: number
   guidance_stage: string
+  llm_model_key?: string | null
   created_at: string
 }
 
@@ -150,6 +151,7 @@ onMounted(loadArchive)
             <div v-for="message in item.messages" :key="message.id" class="mono-block">
               <strong>{{ message.role }} #{{ message.turn_index }}</strong>
               <span> {{ formatTime(message.created_at) }}</span>
+              <span v-if="message.llm_model_key"> 模型 {{ message.llm_model_key }}</span>
               <p>{{ message.content }}</p>
             </div>
           </div>

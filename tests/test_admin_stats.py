@@ -616,6 +616,7 @@ def test_admin_can_view_student_cleared_conversation_archive():
                     content="先看定义域。",
                     turn_index=1,
                     guidance_stage=GuidanceStage.HINT,
+                    llm_model_key="minimax-m27",
                     created_at=datetime(2026, 5, 23, 9, 1, tzinfo=UTC),
                 ),
             ]
@@ -636,6 +637,8 @@ def test_admin_can_view_student_cleared_conversation_archive():
     assert payload[0]["deleted_by_student"] is True
     assert payload[0]["deleted_by_student_at"] is not None
     assert [message["content"] for message in payload[0]["messages"]] == ["函数单调性怎么判断", "先看定义域。"]
+    assert payload[0]["messages"][0]["llm_model_key"] is None
+    assert payload[0]["messages"][1]["llm_model_key"] == "minimax-m27"
 
 
 def test_admin_can_export_conversation_archive_csv():
@@ -659,7 +662,18 @@ def test_admin_can_export_conversation_archive_csv():
         session.add(conversation_row)
         session.commit()
         session.refresh(conversation_row)
-        session.add(Message(conversation_id=conversation_row.id, role=MessageRole.USER, content="牛顿第二定律怎么用", turn_index=1))
+        session.add_all(
+            [
+                Message(conversation_id=conversation_row.id, role=MessageRole.USER, content="牛顿第二定律怎么用", turn_index=1),
+                Message(
+                    conversation_id=conversation_row.id,
+                    role=MessageRole.ASSISTANT,
+                    content="先判断受力。",
+                    turn_index=1,
+                    llm_model_key="qwen2.5-vl",
+                ),
+            ]
+        )
         session.commit()
     finally:
         session.close()
@@ -671,8 +685,10 @@ def test_admin_can_export_conversation_archive_csv():
     assert response.headers["content-type"].startswith("text/csv")
     csv_text = response.content.decode("utf-8-sig")
     assert "conversation_id,student_id,student_name" in csv_text
+    assert "message_llm_model_key" in csv_text
     assert "李四" in csv_text
     assert "牛顿第二定律怎么用" in csv_text
+    assert "qwen2.5-vl" in csv_text
 
 
 def test_student_can_authenticate_with_generated_login_account(monkeypatch):

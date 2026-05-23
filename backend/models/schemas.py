@@ -115,6 +115,7 @@ class MessageRead(BaseModel):
     attachment: ChatAttachmentRead | None = None
     turn_index: int
     guidance_stage: GuidanceStage
+    llm_model_key: str | None = None
     created_at: datetime
 
 
@@ -137,6 +138,7 @@ class ConversationArchiveMessageRead(BaseModel):
     content: str
     turn_index: int
     guidance_stage: GuidanceStage
+    llm_model_key: str | None = None
     created_at: datetime
 
 

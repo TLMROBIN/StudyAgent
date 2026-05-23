@@ -247,11 +247,16 @@ def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
             )
         )
         events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        assistant_message = session.scalar(
+            select(Message).where(Message.role == MessageRole.ASSISTANT).order_by(Message.id.desc()).limit(1)
+        )
     finally:
         session.close()
 
     assert selected_models == ["qwen2.5-vl"]
     assert events[-1][1]["content"] == "先读图中条件。"
+    assert assistant_message is not None
+    assert assistant_message.llm_model_key == "qwen2.5-vl"
 
 
 def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch):

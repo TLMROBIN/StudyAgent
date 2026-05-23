@@ -101,6 +101,7 @@ class Message(TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text)
     turn_index: Mapped[int] = mapped_column(Integer, default=0)
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
+    llm_model_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     attachment: Mapped["ChatMessageAttachment | None"] = relationship(

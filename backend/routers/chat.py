@@ -684,6 +684,7 @@ async def stream_chat(
                 content=short_circuit_text,
                 turn_index=user_turn_index,
                 guidance_stage=conversation.guidance_stage,
+                llm_model_key=selected_model_key,
             )
             db.add(assistant_message)
             db.commit()
@@ -723,6 +724,7 @@ async def stream_chat(
                 content=refusal,
                 turn_index=user_turn_index,
                 guidance_stage=conversation.guidance_stage,
+                llm_model_key=selected_model_key,
             )
             db.add(assistant_message)
             db.commit()
@@ -801,6 +803,7 @@ async def stream_chat(
                     content=response_text,
                     turn_index=user_turn_index,
                     guidance_stage=prompt.stage,
+                    llm_model_key=selected_model_key,
                 )
                 db.add(assistant_message)
                 guidance_stage_total.labels(stage=prompt.stage.value).inc()
@@ -958,6 +961,7 @@ async def stream_chat(
                             content=emitted_text,
                             turn_index=user_turn_index,
                             guidance_stage=prompt.stage,
+                            llm_model_key=selected_model_key,
                         )
                         db.add(assistant_message)
                         guidance_stage_total.labels(stage=prompt.stage.value).inc()

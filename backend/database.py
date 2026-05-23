@@ -50,6 +50,11 @@ def apply_runtime_schema_updates() -> None:
         if "deleted_by_student_at" not in conversation_columns:
             statements.append("ALTER TABLE conversations ADD COLUMN deleted_by_student_at DATETIME")
 
+    if "messages" in table_names:
+        message_columns = {column["name"] for column in inspector.get_columns("messages")}
+        if "llm_model_key" not in message_columns:
+            statements.append("ALTER TABLE messages ADD COLUMN llm_model_key VARCHAR(64)")
+
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))

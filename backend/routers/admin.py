@@ -500,6 +500,7 @@ def _archive_message_read(message: Message) -> ConversationArchiveMessageRead:
         content=message.content,
         turn_index=message.turn_index,
         guidance_stage=message.guidance_stage,
+        llm_model_key=message.llm_model_key,
         created_at=message.created_at,
     )
 
@@ -583,6 +584,7 @@ def export_conversation_archive(
             "message_role",
             "turn_index",
             "message_guidance_stage",
+            "message_llm_model_key",
             "message_created_at",
             "message_content",
         ]
@@ -609,6 +611,7 @@ def export_conversation_archive(
                     message.role.value if message else "",
                     message.turn_index if message else "",
                     message.guidance_stage.value if message else "",
+                    message.llm_model_key if message and message.llm_model_key else "",
                     message.created_at.isoformat() if message else "",
                     message.content if message else "",
                 ]
