@@ -171,10 +171,21 @@ class ChatRequest(BaseModel):
     llm_model: str | None = Field(default="minimax-m27", max_length=64)
 
 
+class ChatModelQuotaRead(BaseModel):
+    daily_request_limit: int | None = None
+    remaining_requests: int | None = None
+    daily_token_limit: int | None = None
+    remaining_tokens: int | None = None
+    quota_exhausted: bool = False
+    message: str = ""
+
+
 class ChatModelOptionRead(BaseModel):
     key: str
     name: str
     description: str
+    billing_mode: Literal["request_count", "token_usage", "free_local"] = "request_count"
+    quota: ChatModelQuotaRead = Field(default_factory=ChatModelQuotaRead)
 
 
 class ChatModelStatusRead(BaseModel):
@@ -437,6 +448,127 @@ class LLMProviderRead(BaseModel):
     is_active: bool
     is_fallback: bool
     created_at: datetime
+
+
+class LLMProviderAccountCreate(BaseModel):
+    provider_name: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=64)
+    base_url: str = Field(min_length=1, max_length=255)
+    api_key: str = Field(min_length=1, max_length=512)
+    account_billing_type: Literal["token_plan", "pay_as_you_go", "local"]
+    is_enabled: bool = True
+
+
+class LLMProviderAccountUpdate(BaseModel):
+    provider_name: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=64)
+    base_url: str = Field(min_length=1, max_length=255)
+    api_key: str | None = Field(default=None, max_length=512)
+    account_billing_type: Literal["token_plan", "pay_as_you_go", "local"]
+    is_enabled: bool = True
+
+
+class LLMProviderAccountRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    provider_name: str
+    display_name: str
+    base_url: str
+    account_billing_type: Literal["token_plan", "pay_as_you_go", "local"]
+    is_enabled: bool
+    has_api_key: bool
+    created_at: datetime
+
+
+class LLMQuotaPolicyWrite(BaseModel):
+    billing_mode: Literal["request_count", "token_usage", "free_local"]
+    user_daily_request_limit: int | None = Field(default=None, ge=1)
+    user_daily_token_limit: int | None = Field(default=None, ge=1)
+    school_daily_request_limit: int | None = Field(default=None, ge=1)
+    school_daily_token_limit: int | None = Field(default=None, ge=1)
+    provider_rolling_5h_request_limit: int | None = Field(default=None, ge=1)
+    provider_weekly_request_limit: int | None = Field(default=None, ge=1)
+    max_completion_tokens: int | None = Field(default=None, ge=1)
+    count_cache_hit: bool = False
+    fail_closed_on_store_error: bool = True
+
+    @model_validator(mode="after")
+    def validate_limits(self) -> "LLMQuotaPolicyWrite":
+        if self.billing_mode == "request_count" and not self.user_daily_request_limit:
+            raise ValueError("request_count policy requires user_daily_request_limit")
+        if self.billing_mode == "token_usage":
+            if not self.user_daily_token_limit:
+                raise ValueError("token_usage policy requires user_daily_token_limit")
+            if not self.max_completion_tokens:
+                raise ValueError("token_usage policy requires max_completion_tokens")
+        return self
+
+
+class LLMQuotaPolicyRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    billing_mode: Literal["request_count", "token_usage", "free_local"]
+    user_daily_request_limit: int | None = None
+    user_daily_token_limit: int | None = None
+    school_daily_request_limit: int | None = None
+    school_daily_token_limit: int | None = None
+    provider_rolling_5h_request_limit: int | None = None
+    provider_weekly_request_limit: int | None = None
+    max_completion_tokens: int | None = None
+    count_cache_hit: bool
+    fail_closed_on_store_error: bool
+
+
+class LLMModelConfigCreate(BaseModel):
+    model_key: str = Field(pattern=r"^[a-z0-9_-]+$", min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=255)
+    provider_account_id: int
+    provider_model: str = Field(min_length=1, max_length=128)
+    capability_text: bool = True
+    capability_vision: bool = False
+    is_enabled: bool = True
+    is_primary: bool = False
+    is_fallback: bool = False
+    sort_order: int = 100
+    quota_policy: LLMQuotaPolicyWrite
+
+
+class LLMModelConfigUpdate(LLMModelConfigCreate):
+    pass
+
+
+class LLMModelConfigRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    model_key: str
+    display_name: str
+    description: str
+    provider_account_id: int
+    provider_model: str
+    capability_text: bool
+    capability_vision: bool
+    is_enabled: bool
+    is_primary: bool
+    is_fallback: bool
+    sort_order: int
+    quota_policy: LLMQuotaPolicyRead
+    created_at: datetime
+
+
+class LLMProviderModelSelectionUpdate(BaseModel):
+    primary_model_id: int
+    fallback_model_id: int | None = None
+
+
+class LLMUsageSummaryRead(BaseModel):
+    model_key: str
+    billing_mode: str
+    request_count: int = 0
+    total_tokens: int = 0
 
 
 class AuditLogRead(BaseModel):

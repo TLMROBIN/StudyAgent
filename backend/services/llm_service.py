@@ -6,7 +6,7 @@ from base64 import b64encode
 import json
 import logging
 import re
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 import httpx
 
@@ -124,6 +124,25 @@ class ProviderState:
         return self.open_until is None or self.open_until <= datetime.now(UTC)
 
 
+@dataclass
+class LLMUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    reasoning_tokens: int = 0
+    prompt_cache_hit_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
+
+
+@dataclass
+class LLMStreamEvent:
+    type: Literal["chunk", "usage"]
+    content: str = ""
+    usage: LLMUsage | None = None
+    provider_name: str = ""
+    provider_model: str = ""
+
+
 class LLMService:
     DEFAULT_CHAT_MODEL_KEY = "minimax-m27"
     LOCAL_VL_CHAT_MODEL_KEY = "qwen2.5-vl"
@@ -156,6 +175,9 @@ class LLMService:
         self._model_status_ttl_seconds = 300
 
     def chat_model_options(self) -> list[dict[str, str]]:
+        configured = self._database_chat_model_options()
+        if configured:
+            return configured
         return [
             {
                 "key": self.DEFAULT_CHAT_MODEL_KEY,
@@ -184,6 +206,9 @@ class LLMService:
         selected_key = self.normalize_chat_model_key(model_key)
         if selected_key == self.LOCAL_VL_CHAT_MODEL_KEY:
             return [self._local_vl_provider]
+        configured = self._database_providers_for_model(selected_key)
+        if configured:
+            return configured
         return self._runtime_providers()
 
     async def chat_model_statuses(self, *, force_refresh: bool = False) -> list[dict[str, str]]:
@@ -298,6 +323,68 @@ class LLMService:
         except Exception:
             return []
 
+    def _database_chat_model_options(self) -> list[dict[str, str]]:
+        try:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+
+            from backend.models.llm_model import LLMModelConfig
+
+            session = self._session_factory()
+            try:
+                rows = session.scalars(
+                    select(LLMModelConfig)
+                    .options(selectinload(LLMModelConfig.quota_policy))
+                    .where(LLMModelConfig.is_enabled.is_(True), LLMModelConfig.capability_text.is_(True))
+                    .order_by(LLMModelConfig.sort_order.asc(), LLMModelConfig.id.asc())
+                ).all()
+                return [
+                    {
+                        "key": item.model_key,
+                        "name": item.display_name,
+                        "description": item.description,
+                    }
+                    for item in rows
+                ]
+            finally:
+                session.close()
+        except Exception:
+            return []
+
+    def _database_providers_for_model(self, model_key: str) -> list[ProviderState]:
+        try:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+
+            from backend.models.llm_model import LLMModelConfig
+
+            session = self._session_factory()
+            try:
+                item = session.scalar(
+                    select(LLMModelConfig)
+                    .options(selectinload(LLMModelConfig.provider_account))
+                    .where(
+                        LLMModelConfig.model_key == model_key,
+                        LLMModelConfig.is_enabled.is_(True),
+                        LLMModelConfig.capability_text.is_(True),
+                    )
+                )
+                if not item or not item.provider_account or not item.provider_account.is_enabled:
+                    return []
+                account = item.provider_account
+                return [
+                    ProviderState(
+                        name=account.provider_name,
+                        base_url=account.base_url,
+                        api_key=account.api_key,
+                        model=item.provider_model,
+                    )
+                ]
+            finally:
+                session.close()
+        except Exception:
+            return []
+
     async def generate_response(self, messages: list[dict[str, str]], fallback_text: str) -> str:
         chunks: list[str] = []
         async for chunk in self.stream_response(messages, fallback_text):
@@ -311,6 +398,18 @@ class LLMService:
         *,
         model_key: str | None = None,
     ) -> AsyncIterator[str]:
+        async for event in self.stream_events(messages, fallback_text, model_key=model_key):
+            if event.type == "chunk":
+                yield event.content
+
+    async def stream_events(
+        self,
+        messages: list[dict[str, str]],
+        fallback_text: str,
+        *,
+        model_key: str | None = None,
+        max_completion_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
         selected_model_key = self.normalize_chat_model_key(model_key)
         fallback_reason = "no_available_provider"
         for provider in self._providers_for_chat_model(selected_model_key):
@@ -318,9 +417,24 @@ class LLMService:
                 continue
             try:
                 yielded = False
-                async for chunk in self._stream_openai_compatible(provider, messages):
-                    yielded = True
-                    yield chunk
+                stream_func = getattr(self._stream_openai_compatible, "__func__", None)
+                if stream_func is not LLMService._stream_openai_compatible:
+                    async for chunk in self._stream_openai_compatible(provider, messages):
+                        yielded = True
+                        yield LLMStreamEvent(
+                            type="chunk",
+                            content=chunk,
+                            provider_name=provider.name,
+                            provider_model=provider.model,
+                        )
+                else:
+                    async for event in self._stream_openai_compatible_events(
+                        provider,
+                        messages,
+                        max_completion_tokens=max_completion_tokens,
+                    ):
+                        yielded = True
+                        yield event
                 if yielded:
                     self._reset_provider(provider)
                     return
@@ -359,7 +473,7 @@ class LLMService:
         if fallback_text:
             llm_stream_fallback_total.labels(model_key=selected_model_key, reason=fallback_reason).inc()
             logger.warning("llm_stream_fallback reason=%s model_key=%s", fallback_reason, selected_model_key)
-            yield fallback_text
+            yield LLMStreamEvent(type="chunk", content=fallback_text)
 
     async def extract_image_text(
         self,
@@ -416,6 +530,17 @@ class LLMService:
             provider.open_until = datetime.now(UTC) + timedelta(seconds=self.settings.llm_circuit_breaker_seconds)
 
     async def _stream_openai_compatible(self, provider: ProviderState, messages: list[dict[str, str]]):
+        async for event in self._stream_openai_compatible_events(provider, messages):
+            if event.type == "chunk":
+                yield event.content
+
+    async def _stream_openai_compatible_events(
+        self,
+        provider: ProviderState,
+        messages: list[dict[str, str]],
+        *,
+        max_completion_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
         content_filter = ThinkingContentFilter()
         emitted_text = ""
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
@@ -424,7 +549,10 @@ class LLMService:
             "messages": messages,
             "temperature": 0.3,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
+        if max_completion_tokens:
+            payload["max_completion_tokens"] = max_completion_tokens
         url = provider.base_url.rstrip("/") + "/chat/completions"
         timeout = httpx.Timeout(self.settings.llm_request_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -437,6 +565,15 @@ class LLMService:
                     if data == "[DONE]":
                         break
                     payload = json.loads(data)
+                    usage = self._parse_usage(payload)
+                    if usage is not None:
+                        yield LLMStreamEvent(
+                            type="usage",
+                            usage=usage,
+                            provider_name=provider.name,
+                            provider_model=provider.model,
+                        )
+                        continue
                     choice = payload.get("choices", [{}])[0]
                     delta = _content_text(choice.get("delta", {}).get("content"))
                     message_content = _content_text(choice.get("message", {}).get("content"))
@@ -447,12 +584,46 @@ class LLMService:
                         visible_text = content_filter.feed(text)
                         if visible_text:
                             emitted_text += visible_text
-                            yield visible_text
+                            yield LLMStreamEvent(
+                                type="chunk",
+                                content=visible_text,
+                                provider_name=provider.name,
+                                provider_model=provider.model,
+                            )
 
         final_visible_text = content_filter.flush()
         if final_visible_text:
             emitted_text += final_visible_text
-            yield final_visible_text
+            yield LLMStreamEvent(
+                type="chunk",
+                content=final_visible_text,
+                provider_name=provider.name,
+                provider_model=provider.model,
+            )
+
+    @staticmethod
+    def _parse_usage(payload: dict) -> LLMUsage | None:
+        raw_usage = payload.get("usage")
+        if not isinstance(raw_usage, dict):
+            return None
+        completion_details = raw_usage.get("completion_tokens_details")
+        prompt_details = raw_usage.get("prompt_tokens_details")
+        return LLMUsage(
+            prompt_tokens=int(raw_usage.get("prompt_tokens") or 0),
+            completion_tokens=int(raw_usage.get("completion_tokens") or 0),
+            total_tokens=int(raw_usage.get("total_tokens") or 0),
+            reasoning_tokens=int(
+                raw_usage.get("reasoning_tokens")
+                or (completion_details.get("reasoning_tokens") if isinstance(completion_details, dict) else 0)
+                or 0
+            ),
+            prompt_cache_hit_tokens=int(
+                raw_usage.get("prompt_cache_hit_tokens")
+                or (prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else 0)
+                or 0
+            ),
+            prompt_cache_miss_tokens=int(raw_usage.get("prompt_cache_miss_tokens") or 0),
+        )
 
     async def _generate_image_completion(
         self,

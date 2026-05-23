@@ -9,6 +9,7 @@ import AuditLogs from '../views/AuditLogs.vue'
 import ConversationArchive from '../views/ConversationArchive.vue'
 import KnowledgeManage from '../views/KnowledgeManage.vue'
 import Login from '../views/Login.vue'
+import ModelManage from '../views/ModelManage.vue'
 import StudentChat from '../views/StudentChat.vue'
 import UserManage from '../views/UserManage.vue'
 
@@ -23,6 +24,7 @@ const router = createRouter({
     { path: '/admin/conversations', component: ConversationArchive, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/audit', component: AuditLogs, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/agent', component: AgentConfig, meta: { requiresAuth: true, roles: ['admin'] } },
+    { path: '/admin/models', component: ModelManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/users', component: UserManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/:pathMatch(.*)*', redirect: '/login' },
   ],

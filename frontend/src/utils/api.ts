@@ -74,12 +74,101 @@ export interface ChatModelOption {
   key: string
   name: string
   description: string
+  billing_mode?: 'request_count' | 'token_usage' | 'free_local'
+  quota?: ChatModelQuota
+}
+
+export interface ChatModelQuota {
+  daily_request_limit?: number | null
+  remaining_requests?: number | null
+  daily_token_limit?: number | null
+  remaining_tokens?: number | null
+  quota_exhausted: boolean
+  message: string
 }
 
 export interface ChatModelStatus {
   key: string
   status: 'available' | 'unavailable' | 'unknown'
   message: string
+}
+
+export interface LLMProviderAccount {
+  id: number
+  provider_name: string
+  display_name: string
+  base_url: string
+  account_billing_type: 'token_plan' | 'pay_as_you_go' | 'local'
+  is_enabled: boolean
+  has_api_key: boolean
+  created_at: string
+}
+
+export interface LLMProviderAccountPayload {
+  provider_name: string
+  display_name: string
+  base_url: string
+  api_key?: string
+  account_billing_type: 'token_plan' | 'pay_as_you_go' | 'local'
+  is_enabled?: boolean
+}
+
+export interface LLMQuotaPolicyPayload {
+  billing_mode: 'request_count' | 'token_usage' | 'free_local'
+  user_daily_request_limit?: number | null
+  user_daily_token_limit?: number | null
+  school_daily_request_limit?: number | null
+  school_daily_token_limit?: number | null
+  provider_rolling_5h_request_limit?: number | null
+  provider_weekly_request_limit?: number | null
+  max_completion_tokens?: number | null
+  count_cache_hit?: boolean
+  fail_closed_on_store_error?: boolean
+}
+
+export interface LLMQuotaPolicy extends LLMQuotaPolicyPayload {
+  id: number
+  count_cache_hit: boolean
+  fail_closed_on_store_error: boolean
+}
+
+export interface LLMModelConfigPayload {
+  model_key: string
+  display_name: string
+  description?: string
+  provider_account_id: number
+  provider_model: string
+  capability_text?: boolean
+  capability_vision?: boolean
+  is_enabled?: boolean
+  is_primary?: boolean
+  is_fallback?: boolean
+  sort_order?: number
+  quota_policy: LLMQuotaPolicyPayload
+}
+
+export interface LLMModelConfig {
+  id: number
+  model_key: string
+  display_name: string
+  description: string
+  provider_account_id: number
+  provider_model: string
+  capability_text: boolean
+  capability_vision: boolean
+  is_enabled: boolean
+  is_primary: boolean
+  is_fallback: boolean
+  sort_order: number
+  quota_policy: LLMQuotaPolicy
+  created_at: string
+}
+
+export interface LLMUsageSummary {
+  model_key: string
+  billing_mode: string
+  request_count: number
+  total_tokens: number
 }
 
 export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment
@@ -216,6 +305,41 @@ export async function fetchChatModelStatuses(): Promise<ChatModelStatus[]> {
   return data
 }
 
+export async function fetchLLMProviderAccounts(): Promise<LLMProviderAccount[]> {
+  const { data } = await api.get<LLMProviderAccount[]>('/llm-providers/accounts')
+  return data
+}
+
+export async function createLLMProviderAccount(payload: LLMProviderAccountPayload): Promise<LLMProviderAccount> {
+  const { data } = await api.post<LLMProviderAccount>('/llm-providers/accounts', payload)
+  return data
+}
+
+export async function updateLLMProviderAccount(id: number, payload: LLMProviderAccountPayload): Promise<LLMProviderAccount> {
+  const { data } = await api.put<LLMProviderAccount>(`/llm-providers/accounts/${id}`, payload)
+  return data
+}
+
+export async function fetchLLMModelConfigs(): Promise<LLMModelConfig[]> {
+  const { data } = await api.get<LLMModelConfig[]>('/llm-providers/models')
+  return data
+}
+
+export async function createLLMModelConfig(payload: LLMModelConfigPayload): Promise<LLMModelConfig> {
+  const { data } = await api.post<LLMModelConfig>('/llm-providers/models', payload)
+  return data
+}
+
+export async function updateLLMModelConfig(id: number, payload: LLMModelConfigPayload): Promise<LLMModelConfig> {
+  const { data } = await api.put<LLMModelConfig>(`/llm-providers/models/${id}`, payload)
+  return data
+}
+
+export async function fetchLLMUsageSummary(): Promise<LLMUsageSummary[]> {
+  const { data } = await api.get<LLMUsageSummary[]>('/llm-usage/summary')
+  return data
+}
+
 export function resolveApiUrl(path: string): string {
   if (!path) {
     return path
@@ -237,6 +361,15 @@ function extractResponseDetail(payload: string, status: number): string {
       const parsed = JSON.parse(payload) as { detail?: unknown }
       if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
         return parsed.detail
+      }
+      if (
+        parsed.detail
+        && typeof parsed.detail === 'object'
+        && 'message' in parsed.detail
+        && typeof parsed.detail.message === 'string'
+        && parsed.detail.message.trim()
+      ) {
+        return parsed.detail.message
       }
     } catch {
       const trimmedPayload = payload.trim()

@@ -11,7 +11,10 @@ from sqlalchemy.pool import StaticPool
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
+from backend.models.llm_account import AccountBillingType, LLMProviderAccount
+from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
 from backend.models.llm_provider import LLMProviderConfig
+from backend.models.llm_usage import LLMUsageEvent
 from backend.models.user import User, UserRole
 from backend.routers import llm_provider
 from backend.services.llm_service import LLMService
@@ -108,6 +111,159 @@ def test_admin_can_create_and_select_llm_providers_without_revealing_api_keys():
     ]
     assert all("api_key" not in item for item in providers)
     assert all(item["has_api_key"] for item in providers)
+
+
+def test_llm_quota_models_create_relationships_in_sqlite():
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        admin = _create_admin(session_factory)
+        account = LLMProviderAccount(
+            provider_name="minimax",
+            display_name="MiniMax Token Plan",
+            base_url="https://api.minimax.chat/v1",
+            api_key="secret",
+            account_billing_type=AccountBillingType.TOKEN_PLAN,
+            created_by=admin.id,
+        )
+        session.add(account)
+        session.flush()
+        model = LLMModelConfig(
+            model_key="minimax-m27",
+            display_name="MiniMax M2.7",
+            description="高速答疑模型",
+            provider_account_id=account.id,
+            provider_model="MiniMax-M2.7-highspeed",
+            is_primary=True,
+            created_by=admin.id,
+        )
+        session.add(model)
+        session.flush()
+        policy = LLMQuotaPolicy(
+            model_config_id=model.id,
+            billing_mode=QuotaBillingMode.REQUEST_COUNT,
+            user_daily_request_limit=20,
+            provider_rolling_5h_request_limit=500,
+        )
+        session.add(policy)
+        session.flush()
+        usage = LLMUsageEvent(
+            user_id=admin.id,
+            request_id="request-1",
+            model_config_id=model.id,
+            provider_account_id=account.id,
+            model_key=model.model_key,
+            provider_name=account.provider_name,
+            provider_model=model.provider_model,
+            billing_mode=policy.billing_mode.value,
+            request_count=1,
+            source="request_count",
+            reservation_key="quota:reservation:request-1",
+        )
+        session.add(usage)
+        session.commit()
+
+        stored_model = session.get(LLMModelConfig, model.id)
+        assert stored_model is not None
+        assert stored_model.provider_account.display_name == "MiniMax Token Plan"
+        assert stored_model.quota_policy.billing_mode == QuotaBillingMode.REQUEST_COUNT
+        assert stored_model.usage_events[0].request_id == "request-1"
+    finally:
+        session.close()
+
+
+def test_admin_can_create_provider_account_and_request_count_model():
+    session_factory = _build_session_factory()
+    client = _build_provider_test_client(session_factory, _create_admin(session_factory))
+
+    account_response = client.post(
+        "/api/llm-providers/accounts",
+        json={
+            "provider_name": "minimax",
+            "display_name": "MiniMax Token Plan",
+            "base_url": "https://api.minimax.chat/v1",
+            "api_key": "secret",
+            "account_billing_type": "token_plan",
+            "is_enabled": True,
+        },
+    )
+
+    assert account_response.status_code == 201
+    assert account_response.json()["has_api_key"] is True
+    assert "api_key" not in account_response.json()
+
+    model_response = client.post(
+        "/api/llm-providers/models",
+        json={
+            "model_key": "minimax-m27",
+            "display_name": "MiniMax M2.7",
+            "description": "高速答疑模型",
+            "provider_account_id": account_response.json()["id"],
+            "provider_model": "MiniMax-M2.7-highspeed",
+            "capability_text": True,
+            "capability_vision": False,
+            "is_enabled": True,
+            "is_primary": True,
+            "is_fallback": False,
+            "sort_order": 10,
+            "quota_policy": {
+                "billing_mode": "request_count",
+                "user_daily_request_limit": 20,
+                "provider_rolling_5h_request_limit": 500,
+                "count_cache_hit": False,
+            },
+        },
+    )
+
+    assert model_response.status_code == 201
+    body = model_response.json()
+    assert body["model_key"] == "minimax-m27"
+    assert body["quota_policy"]["billing_mode"] == "request_count"
+    assert body["quota_policy"]["user_daily_request_limit"] == 20
+
+
+def test_empty_provider_account_api_key_is_rejected_on_create_and_ignored_on_update():
+    session_factory = _build_session_factory()
+    client = _build_provider_test_client(session_factory, _create_admin(session_factory))
+
+    rejected = client.post(
+        "/api/llm-providers/accounts",
+        json={
+            "provider_name": "minimax",
+            "display_name": "MiniMax",
+            "base_url": "https://api.minimax.chat/v1",
+            "api_key": " ",
+            "account_billing_type": "token_plan",
+        },
+    )
+    assert rejected.status_code == 422
+
+    created = client.post(
+        "/api/llm-providers/accounts",
+        json={
+            "provider_name": "minimax",
+            "display_name": "MiniMax",
+            "base_url": "https://api.minimax.chat/v1",
+            "api_key": "secret",
+            "account_billing_type": "token_plan",
+        },
+    )
+    account_id = created.json()["id"]
+
+    updated = client.put(
+        f"/api/llm-providers/accounts/{account_id}",
+        json={
+            "provider_name": "minimax",
+            "display_name": "MiniMax Updated",
+            "base_url": "https://api.minimax.chat/v1",
+            "api_key": "",
+            "account_billing_type": "token_plan",
+            "is_enabled": True,
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["display_name"] == "MiniMax Updated"
 
 
 def test_llm_service_uses_selected_database_providers_before_environment(monkeypatch):

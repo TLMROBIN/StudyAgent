@@ -23,6 +23,8 @@ from pydantic import ValidationError
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
+from backend.models.llm_account import AccountBillingType, LLMProviderAccount
+from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
 from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
 from backend.routers import chat as chat_router
@@ -192,9 +194,65 @@ def test_student_can_list_builtin_chat_models():
     response = client.get("/api/chat/models")
 
     assert response.status_code == 200
+    assert response.json()[0]["key"] == "minimax-m27"
+    assert response.json()[0]["quota"]["quota_exhausted"] is False
+
+
+def test_student_model_list_includes_database_quota_snapshot():
+    session_factory = _build_session_factory()
+    student = _create_student(session_factory)
+    session = session_factory()
+    try:
+        account = LLMProviderAccount(
+            provider_name="minimax",
+            display_name="MiniMax Token Plan",
+            base_url="https://api.minimax.chat/v1",
+            api_key="secret",
+            account_billing_type=AccountBillingType.TOKEN_PLAN,
+        )
+        session.add(account)
+        session.flush()
+        model = LLMModelConfig(
+            model_key="minimax-m27",
+            display_name="MiniMax M2.7",
+            description="高速答疑模型",
+            provider_account_id=account.id,
+            provider_model="MiniMax-M2.7-highspeed",
+            is_primary=True,
+            sort_order=10,
+        )
+        session.add(model)
+        session.flush()
+        session.add(
+            LLMQuotaPolicy(
+                model_config_id=model.id,
+                billing_mode=QuotaBillingMode.REQUEST_COUNT,
+                user_daily_request_limit=20,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+    client = _build_chat_test_client(session_factory, student)
+
+    response = client.get("/api/chat/models")
+
+    assert response.status_code == 200
     assert response.json() == [
-        {"key": "minimax-m27", "name": "MiniMax-M2.7", "description": "highspeed"},
-        {"key": "qwen2.5-vl", "name": "qwen2.5-vl", "description": "图片理解推荐使用，但响应速度可能较慢。"},
+        {
+            "key": "minimax-m27",
+            "name": "MiniMax M2.7",
+            "description": "高速答疑模型",
+            "billing_mode": "request_count",
+            "quota": {
+                "daily_request_limit": 20,
+                "remaining_requests": 20,
+                "daily_token_limit": None,
+                "remaining_tokens": None,
+                "quota_exhausted": False,
+                "message": "今日剩余 20 次",
+            },
+        }
     ]
 
 

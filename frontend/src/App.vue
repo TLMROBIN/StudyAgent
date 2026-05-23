@@ -48,6 +48,7 @@ const navigationItems = computed<NavigationItem[]>(() => {
       { to: '/admin/conversations', label: '会话归档', shortLabel: '归档' },
       { to: '/admin/audit', label: '审计日志', shortLabel: '审计' },
       { to: '/admin/agent', label: '模型与配置', shortLabel: '配置' },
+      { to: '/admin/models', label: '模型管理', shortLabel: '模型' },
       { to: '/admin/users', label: '用户管理', shortLabel: '用户' },
     )
   }

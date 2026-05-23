@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import json
 import logging
 from threading import Lock
 from time import time
@@ -20,6 +21,38 @@ logger = logging.getLogger(__name__)
 class StoredValue:
     value: str
     expires_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class QuotaCounterKey:
+    key: str
+    limit: int
+
+
+@dataclass
+class QuotaCounterSnapshot:
+    key: str
+    limit: int
+    used: int
+    remaining: int
+
+
+@dataclass
+class QuotaReservationResult:
+    allowed: bool
+    reservation_key: str
+    amount: int
+    exceeded_key: str | None = None
+    snapshots: list[QuotaCounterSnapshot] | None = None
+
+
+@dataclass
+class QuotaReservationRecord:
+    keys: list[str]
+    amount: int
+    expires_at: datetime | None
+    reconciled: bool = False
+    released: bool = False
 
 
 class BaseStore(ABC):
@@ -50,6 +83,24 @@ class BaseStore(ABC):
     @abstractmethod
     def hit_sliding_window(self, key: str, limit: int, window_seconds: int) -> bool: ...
 
+    @abstractmethod
+    def reserve_quota(
+        self,
+        keys: list[QuotaCounterKey],
+        reservation_key: str,
+        amount: int,
+        ttl_seconds: int,
+    ) -> QuotaReservationResult: ...
+
+    @abstractmethod
+    def release_quota(self, reservation_key: str) -> None: ...
+
+    @abstractmethod
+    def reconcile_quota(self, reservation_key: str, actual_amount: int) -> QuotaReservationResult: ...
+
+    @abstractmethod
+    def quota_snapshot(self, keys: list[QuotaCounterKey]) -> list[QuotaCounterSnapshot]: ...
+
     def health_snapshot(self) -> dict[str, str | bool]:
         return {"backend": self.backend_name, "distributed": self.is_distributed}
 
@@ -62,6 +113,9 @@ class MemoryStore(BaseStore):
         self._values: dict[str, StoredValue] = {}
         self._sets: dict[str, set[str]] = {}
         self._hits: dict[str, deque[float]] = defaultdict(deque)
+        self._quota_counters: dict[str, int] = defaultdict(int)
+        self._quota_expiries: dict[str, datetime] = {}
+        self._quota_reservations: dict[str, QuotaReservationRecord] = {}
         self._lock = Lock()
 
     def _cleanup_if_expired(self, key: str) -> None:
@@ -114,6 +168,108 @@ class MemoryStore(BaseStore):
             bucket.append(now)
             return True
 
+    def _cleanup_quota_key(self, key: str) -> None:
+        expires_at = self._quota_expiries.get(key)
+        if expires_at and expires_at <= datetime.now(UTC):
+            self._quota_counters.pop(key, None)
+            self._quota_expiries.pop(key, None)
+
+    def _cleanup_reservation(self, reservation_key: str) -> None:
+        record = self._quota_reservations.get(reservation_key)
+        if record and record.expires_at and record.expires_at <= datetime.now(UTC):
+            self._quota_reservations.pop(reservation_key, None)
+
+    def reserve_quota(
+        self,
+        keys: list[QuotaCounterKey],
+        reservation_key: str,
+        amount: int,
+        ttl_seconds: int,
+    ) -> QuotaReservationResult:
+        expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+        with self._lock:
+            self._cleanup_reservation(reservation_key)
+            existing = self._quota_reservations.get(reservation_key)
+            if existing and not existing.released:
+                snapshots = self._quota_snapshot_unlocked(keys)
+                return QuotaReservationResult(True, reservation_key, existing.amount, snapshots=snapshots)
+
+            for item in keys:
+                self._cleanup_quota_key(item.key)
+                if self._quota_counters[item.key] + amount > item.limit:
+                    snapshots = [
+                        QuotaCounterSnapshot(
+                            key=key.key,
+                            limit=key.limit,
+                            used=self._quota_counters[key.key],
+                            remaining=max(0, key.limit - self._quota_counters[key.key]),
+                        )
+                        for key in keys
+                    ]
+                    return QuotaReservationResult(
+                        False,
+                        reservation_key,
+                        amount,
+                        exceeded_key=item.key,
+                        snapshots=snapshots,
+                    )
+
+            for item in keys:
+                self._quota_counters[item.key] += amount
+                self._quota_expiries[item.key] = expires_at
+            self._quota_reservations[reservation_key] = QuotaReservationRecord(
+                keys=[item.key for item in keys],
+                amount=amount,
+                expires_at=expires_at,
+            )
+            return QuotaReservationResult(True, reservation_key, amount, snapshots=self._quota_snapshot_unlocked(keys))
+
+    def release_quota(self, reservation_key: str) -> None:
+        with self._lock:
+            record = self._quota_reservations.get(reservation_key)
+            if not record or record.released or record.reconciled:
+                return
+            for key in record.keys:
+                self._cleanup_quota_key(key)
+                self._quota_counters[key] = max(0, self._quota_counters[key] - record.amount)
+            record.released = True
+
+    def reconcile_quota(self, reservation_key: str, actual_amount: int) -> QuotaReservationResult:
+        with self._lock:
+            record = self._quota_reservations.get(reservation_key)
+            if not record or record.released:
+                return QuotaReservationResult(False, reservation_key, actual_amount, exceeded_key=reservation_key)
+            if record.reconciled:
+                keys = [QuotaCounterKey(key=key, limit=max(self._quota_counters.get(key, 0), actual_amount)) for key in record.keys]
+                return QuotaReservationResult(True, reservation_key, record.amount, snapshots=self._quota_snapshot_unlocked(keys))
+            delta = actual_amount - record.amount
+            for key in record.keys:
+                self._cleanup_quota_key(key)
+                self._quota_counters[key] = max(0, self._quota_counters[key] + delta)
+            record.amount = actual_amount
+            record.reconciled = True
+            keys = [QuotaCounterKey(key=key, limit=max(self._quota_counters.get(key, 0), actual_amount)) for key in record.keys]
+            return QuotaReservationResult(True, reservation_key, actual_amount, snapshots=self._quota_snapshot_unlocked(keys))
+
+    def _quota_snapshot_unlocked(self, keys: list[QuotaCounterKey]) -> list[QuotaCounterSnapshot]:
+        snapshots: list[QuotaCounterSnapshot] = []
+        for item in keys:
+            self._cleanup_quota_key(item.key)
+            used = self._quota_counters.get(item.key, 0)
+            snapshots.append(
+                QuotaCounterSnapshot(
+                    key=item.key,
+                    limit=item.limit,
+                    used=used,
+                    remaining=max(0, item.limit - used),
+                )
+            )
+        return snapshots
+
+    def quota_snapshot(self, keys: list[QuotaCounterKey]) -> list[QuotaCounterSnapshot]:
+        with self._lock:
+            return self._quota_snapshot_unlocked(keys)
+
 
 class RedisStore(BaseStore):
     backend_name = "redis"
@@ -134,6 +290,34 @@ class RedisStore(BaseStore):
     redis.call('EXPIRE', key, math.max(1, math.ceil(window_ms / 1000)))
     return 1
     """
+    _RESERVE_QUOTA_SCRIPT = """
+    local reservation_key = KEYS[1]
+    local amount = tonumber(ARGV[1])
+    local ttl = tonumber(ARGV[2])
+    local existing = redis.call('GET', reservation_key)
+    if existing then
+      return {1, '', existing}
+    end
+    local key_count = tonumber(ARGV[3])
+    for i = 1, key_count do
+      local counter_key = KEYS[i + 1]
+      local limit = tonumber(ARGV[3 + i])
+      local current = tonumber(redis.call('GET', counter_key) or '0')
+      if current + amount > limit then
+        return {0, counter_key, ''}
+      end
+    end
+    local keys = {}
+    for i = 1, key_count do
+      local counter_key = KEYS[i + 1]
+      redis.call('INCRBY', counter_key, amount)
+      redis.call('EXPIRE', counter_key, ttl)
+      keys[i] = counter_key
+    end
+    local payload = cjson.encode({keys=keys, amount=amount, reconciled=false, released=false})
+    redis.call('SET', reservation_key, payload, 'EX', ttl)
+    return {1, '', payload}
+    """
 
     def __init__(self, redis_url: str, prefix: str, connect_timeout_seconds: float = 1.0) -> None:
         self.prefix = prefix
@@ -144,6 +328,7 @@ class RedisStore(BaseStore):
             socket_timeout=connect_timeout_seconds,
         )
         self._rate_limit_script = self.client.register_script(self._RATE_LIMIT_SCRIPT)
+        self._reserve_quota_script = self.client.register_script(self._RESERVE_QUOTA_SCRIPT)
 
     def ping(self) -> None:
         self.client.ping()
@@ -181,6 +366,70 @@ class RedisStore(BaseStore):
             args=[now_ms, int(window_seconds * 1000), limit, member],
         )
         return bool(int(result))
+
+    def reserve_quota(
+        self,
+        keys: list[QuotaCounterKey],
+        reservation_key: str,
+        amount: int,
+        ttl_seconds: int,
+    ) -> QuotaReservationResult:
+        redis_keys = [self._key(reservation_key), *[self._key(item.key) for item in keys]]
+        args = [amount, ttl_seconds, len(keys), *[item.limit for item in keys]]
+        result = self._reserve_quota_script(keys=redis_keys, args=args)
+        allowed = bool(int(result[0]))
+        exceeded_key = str(result[1]) if result[1] else None
+        snapshots = self.quota_snapshot(keys)
+        return QuotaReservationResult(allowed, reservation_key, amount, exceeded_key=exceeded_key, snapshots=snapshots)
+
+    def _reservation_payload(self, reservation_key: str) -> dict | None:
+        raw = self.client.get(self._key(reservation_key))
+        if not raw:
+            return None
+        return json.loads(str(raw))
+
+    def _write_reservation_payload(self, reservation_key: str, payload: dict) -> None:
+        ttl = self.client.ttl(self._key(reservation_key))
+        self.client.set(self._key(reservation_key), json.dumps(payload), ex=ttl if ttl and ttl > 0 else None)
+
+    def release_quota(self, reservation_key: str) -> None:
+        payload = self._reservation_payload(reservation_key)
+        if not payload or payload.get("released") or payload.get("reconciled"):
+            return
+        amount = int(payload.get("amount") or 0)
+        pipe = self.client.pipeline()
+        for key in payload.get("keys") or []:
+            pipe.decrby(key, amount)
+        payload["released"] = True
+        self._write_reservation_payload(reservation_key, payload)
+        pipe.execute()
+
+    def reconcile_quota(self, reservation_key: str, actual_amount: int) -> QuotaReservationResult:
+        payload = self._reservation_payload(reservation_key)
+        if not payload or payload.get("released"):
+            return QuotaReservationResult(False, reservation_key, actual_amount, exceeded_key=reservation_key)
+        if payload.get("reconciled"):
+            return QuotaReservationResult(True, reservation_key, int(payload.get("amount") or 0))
+        reserved_amount = int(payload.get("amount") or 0)
+        delta = actual_amount - reserved_amount
+        pipe = self.client.pipeline()
+        for key in payload.get("keys") or []:
+            pipe.incrby(key, delta)
+        payload["amount"] = actual_amount
+        payload["reconciled"] = True
+        self._write_reservation_payload(reservation_key, payload)
+        pipe.execute()
+        return QuotaReservationResult(True, reservation_key, actual_amount)
+
+    def quota_snapshot(self, keys: list[QuotaCounterKey]) -> list[QuotaCounterSnapshot]:
+        if not keys:
+            return []
+        values = self.client.mget([self._key(item.key) for item in keys])
+        snapshots: list[QuotaCounterSnapshot] = []
+        for item, raw in zip(keys, values, strict=True):
+            used = int(raw or 0)
+            snapshots.append(QuotaCounterSnapshot(item.key, item.limit, used, max(0, item.limit - used)))
+        return snapshots
 
     def health_snapshot(self) -> dict[str, str | bool]:
         return {

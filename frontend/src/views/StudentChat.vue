@@ -111,8 +111,12 @@ const visibleRecommendations = computed(() => (
 ))
 
 const selectedModelStatus = computed(() => chatModelStatuses.value[form.llmModel]?.status || 'unknown')
+const selectedModel = computed(() => chatModels.value.find((item) => item.key === form.llmModel) || null)
+const selectedModelQuotaExhausted = computed(() => Boolean(selectedModel.value?.quota?.quota_exhausted))
 const canSend = computed(() => (
-  Boolean(form.message.trim() || pendingImageFile.value) && selectedModelStatus.value !== 'unavailable'
+  Boolean(form.message.trim() || pendingImageFile.value)
+  && selectedModelStatus.value !== 'unavailable'
+  && !selectedModelQuotaExhausted.value
 ))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
 const guidanceStageLabel = computed(() => stageLabel(guidanceStage.value))
@@ -175,6 +179,10 @@ function chatModelStatus(modelKey: string): ChatModelStatus {
 
 function chatModelStatusLabel(modelKey: string): string {
   const status = chatModelStatus(modelKey)
+  const model = chatModels.value.find((item) => item.key === modelKey)
+  if (model?.quota?.quota_exhausted) {
+    return model.quota.message || '额度已用完'
+  }
   if (status.status === 'available') {
     return '可用'
   }
@@ -185,7 +193,28 @@ function chatModelStatusLabel(modelKey: string): string {
 }
 
 function isChatModelUnavailable(modelKey: string): boolean {
-  return chatModelStatus(modelKey).status === 'unavailable'
+  const model = chatModels.value.find((item) => item.key === modelKey)
+  return chatModelStatus(modelKey).status === 'unavailable' || Boolean(model?.quota?.quota_exhausted)
+}
+
+function chatModelQuotaLabel(model: ChatModelOption): string {
+  const quota = model.quota
+  if (!quota) {
+    return ''
+  }
+  if (quota.message) {
+    return quota.message
+  }
+  if (model.billing_mode === 'request_count' && typeof quota.remaining_requests === 'number') {
+    return `今日剩余 ${quota.remaining_requests} / ${quota.daily_request_limit ?? '-'} 次`
+  }
+  if (model.billing_mode === 'token_usage' && typeof quota.remaining_tokens === 'number') {
+    return `今日剩余 ${quota.remaining_tokens.toLocaleString()} / ${quota.daily_token_limit ?? '-'} tokens`
+  }
+  if (model.billing_mode === 'free_local') {
+    return '本地模型'
+  }
+  return ''
 }
 
 function selectChatModel(modelKey: string) {
@@ -938,6 +967,9 @@ onMounted(async () => {
               <span class="chat-model-status">{{ chatModelStatusLabel(model.key) }}</span>
             </span>
             <span class="chat-model-option__description">{{ model.description }}</span>
+            <span v-if="chatModelQuotaLabel(model)" class="chat-model-option__quota">
+              {{ chatModelQuotaLabel(model) }}
+            </span>
           </button>
         </div>
         <el-input

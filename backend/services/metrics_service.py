@@ -23,6 +23,21 @@ llm_stream_fallback_total = Counter(
     "LLM streaming requests served by fallback text",
     ["model_key", "reason"],
 )
+llm_quota_denied_total = Counter(
+    "llm_quota_denied_total",
+    "LLM quota reservations denied",
+    ["model_key", "billing_mode", "reason"],
+)
+llm_quota_reserved_total = Counter(
+    "llm_quota_reserved_total",
+    "LLM quota reservations accepted",
+    ["model_key", "billing_mode"],
+)
+llm_usage_recorded_total = Counter(
+    "llm_usage_recorded_total",
+    "LLM usage events persisted",
+    ["model_key", "billing_mode", "source"],
+)
 sse_active_connections = Gauge("sse_active_connections", "Active SSE connections")
 llm_queue_depth = Gauge("llm_queue_depth", "Current chat waiting queue depth")
 filter_blocked_total = Counter("filter_blocked_total", "Blocked non-subject requests")

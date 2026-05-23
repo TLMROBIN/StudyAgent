@@ -722,6 +722,18 @@ textarea {
   line-height: 1.4;
 }
 
+.chat-model-option__quota {
+  display: block;
+  margin-top: 6px;
+  color: rgb(15, 118, 110);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chat-model-option--unavailable .chat-model-option__quota {
+  color: rgb(190, 18, 60);
+}
+
 .chat-model-status {
   flex: 0 1 auto;
   max-width: 52%;
@@ -747,6 +759,23 @@ textarea {
 
 .user-form-grid {
   grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.model-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.model-admin-form {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.model-admin-form h3 {
+  margin: 0;
+  font-size: 16px;
 }
 
 .knowledge-meta-grid {

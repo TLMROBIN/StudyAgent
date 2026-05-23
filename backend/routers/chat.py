@@ -26,8 +26,10 @@ from backend.models.conversation import (
     MessageRole,
     normalize_conversation_seed,
 )
+from backend.models.llm_model import LLMModelConfig, QuotaBillingMode
 from backend.models.schemas import (
     ChatModelOptionRead,
+    ChatModelQuotaRead,
     ChatModelStatusRead,
     ChatRequest,
     ConversationRead,
@@ -40,7 +42,8 @@ from backend.services.audit_service import audit_service
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import filter_service
-from backend.services.llm_service import llm_service
+from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
+from backend.services.llm_service import LLMService, LLMStreamEvent, LLMUsage, llm_service
 from backend.services.metrics_service import (
     chat_first_token_seconds,
     chat_full_response_seconds,
@@ -83,6 +86,27 @@ def _stream_llm_response(messages: list[dict[str, str]], fallback_text: str, *, 
         if "model_key" not in str(exc):
             raise
         return llm_service.stream_response(messages, fallback_text)
+
+
+async def _stream_llm_events(
+    messages: list[dict[str, str]],
+    fallback_text: str,
+    *,
+    model_key: str,
+    max_completion_tokens: int | None = None,
+):
+    stream_response_func = getattr(llm_service.stream_response, "__func__", None)
+    if stream_response_func is not LLMService.stream_response:
+        async for chunk in _stream_llm_response(messages, fallback_text, model_key=model_key):
+            yield LLMStreamEvent(type="chunk", content=chunk)
+        return
+    async for event in llm_service.stream_events(
+        messages,
+        fallback_text,
+        model_key=model_key,
+        max_completion_tokens=max_completion_tokens,
+    ):
+        yield event
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> str:
@@ -381,9 +405,35 @@ def _build_image_grounded_fallback(
     return f"我识别到这张{subject}题图里主要有：{summary}\n\n{fallback_text}"
 
 
+def _chat_model_read_from_config(db: DbSession, current_user: User, model: LLMModelConfig) -> ChatModelOptionRead:
+    policy = model.quota_policy
+    snapshot = llm_quota_service.quota_snapshot_for_user(db=db, user=current_user, model_config=model)
+    return ChatModelOptionRead(
+        key=model.model_key,
+        name=model.display_name,
+        description=model.description,
+        billing_mode=(policy.billing_mode.value if policy else QuotaBillingMode.FREE_LOCAL.value),
+        quota=ChatModelQuotaRead(**snapshot.__dict__),
+    )
+
+
 @router.get("/models", response_model=list[ChatModelOptionRead])
-def list_chat_models(current_user: CurrentUser) -> list[ChatModelOptionRead]:
-    return [ChatModelOptionRead(**item) for item in llm_service.chat_model_options()]
+def list_chat_models(db: DbSession, current_user: CurrentUser) -> list[ChatModelOptionRead]:
+    configured = db.scalars(
+        select(LLMModelConfig)
+        .options(selectinload(LLMModelConfig.quota_policy))
+        .where(LLMModelConfig.is_enabled.is_(True), LLMModelConfig.capability_text.is_(True))
+        .order_by(LLMModelConfig.sort_order.asc(), LLMModelConfig.id.asc())
+    ).all()
+    if configured:
+        return [_chat_model_read_from_config(db, current_user, item) for item in configured]
+    return [
+        ChatModelOptionRead(
+            **item,
+            quota=ChatModelQuotaRead(quota_exhausted=False, message="默认模型"),
+        )
+        for item in llm_service.chat_model_options()
+    ]
 
 
 @router.get("/models/status", response_model=list[ChatModelStatusRead])
@@ -777,6 +827,11 @@ async def stream_chat(
         understanding=image_understanding if has_image_turn else None,
     )
     cache_lookup = QuestionCacheLookup(cache_key=None, answer=None)
+    selected_model_config = db.scalar(
+        select(LLMModelConfig)
+        .options(selectinload(LLMModelConfig.quota_policy), selectinload(LLMModelConfig.provider_account))
+        .where(LLMModelConfig.model_key == selected_model_key, LLMModelConfig.is_enabled.is_(True))
+    )
     if question_cache_service.is_cacheable(
         history_pairs=history_pairs,
         question=retrieval_query,
@@ -830,6 +885,31 @@ async def stream_chat(
                 media_type="text/event-stream",
             )
 
+    quota_reservation: QuotaReservation | None = None
+    quota_usage: LLMUsage | None = None
+    if selected_model_config is not None:
+        quota_result = llm_quota_service.check_and_reserve(
+            db=db,
+            user=current_user,
+            model_config=selected_model_config,
+            request_id=payload.request_id,
+            prompt_messages=prompt.messages,
+        )
+        if isinstance(quota_result, QuotaDenied):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+                if quota_result.code == "llm_quota_unavailable"
+                else status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": quota_result.code,
+                    "message": quota_result.message,
+                    "model_key": quota_result.model_key,
+                    "billing_mode": quota_result.billing_mode,
+                    "reset_hint": quota_result.reset_hint,
+                },
+            )
+        quota_reservation = quota_result
+
     try:
         llm_queue_depth.set(queue_service.waiting)
         ticket_context = queue_service.reserve()
@@ -840,6 +920,7 @@ async def stream_chat(
         llm_queue_depth.set(queue_service.waiting)
 
     async def event_stream():
+        nonlocal quota_usage
         emitted_text = ""
         pending_buffer = ""
         llm_stream = None
@@ -847,6 +928,8 @@ async def stream_chat(
         first_token_observed = False
         should_send_done = True
         stop_streaming = False
+        provider_stream_started = False
+        usage_recorded = False
         sse_active_connections.inc()
         try:
             yield _sse_event(
@@ -859,7 +942,16 @@ async def stream_chat(
                     "request_id": getattr(request.state, "request_id", None),
                 },
             )
-            llm_stream = _stream_llm_response(prompt.messages, fallback_text, model_key=selected_model_key)
+            llm_stream = _stream_llm_events(
+                prompt.messages,
+                fallback_text,
+                model_key=selected_model_key,
+                max_completion_tokens=(
+                    selected_model_config.quota_policy.max_completion_tokens
+                    if selected_model_config and selected_model_config.quota_policy
+                    else None
+                ),
+            )
 
             while True:
                 if await request.is_disconnected():
@@ -869,13 +961,19 @@ async def stream_chat(
                     break
 
                 try:
-                    provider_chunk = await asyncio.wait_for(anext(llm_stream), timeout=STREAM_HEARTBEAT_SECONDS)
+                    provider_event = await asyncio.wait_for(anext(llm_stream), timeout=STREAM_HEARTBEAT_SECONDS)
                 except TimeoutError:
                     yield _sse_event("heartbeat", {"conversation_id": conversation.id})
                     continue
                 except StopAsyncIteration:
                     break
 
+                if provider_event.type == "usage":
+                    quota_usage = provider_event.usage
+                    continue
+
+                provider_chunk = provider_event.content
+                provider_stream_started = provider_stream_started or bool(provider_chunk)
                 pending_buffer += provider_chunk
                 segments, pending_buffer = _split_stream_buffer(pending_buffer)
                 for segment in segments:
@@ -947,6 +1045,7 @@ async def stream_chat(
             llm_queue_depth.set(queue_service.waiting)
 
             try:
+                assistant_message_id: int | None = None
                 conversation.subject = subject
                 conversation.guidance_stage = prompt.stage
                 db.add(conversation)
@@ -954,6 +1053,7 @@ async def stream_chat(
                     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
                     if existing_assistant:
                         emitted_text = existing_assistant.content
+                        assistant_message_id = existing_assistant.id
                     else:
                         assistant_message = Message(
                             conversation_id=conversation.id,
@@ -964,8 +1064,47 @@ async def stream_chat(
                             llm_model_key=selected_model_key,
                         )
                         db.add(assistant_message)
+                        db.flush()
+                        assistant_message_id = assistant_message.id
                         guidance_stage_total.labels(stage=prompt.stage.value).inc()
                 db.commit()
+                if quota_reservation is not None and provider_stream_started and not usage_recorded:
+                    usage_recorded = True
+                    if quota_usage is not None:
+                        llm_quota_service.reconcile(
+                            db=db,
+                            reservation=quota_reservation,
+                            prompt_tokens=quota_usage.prompt_tokens,
+                            completion_tokens=quota_usage.completion_tokens,
+                            total_tokens=quota_usage.total_tokens,
+                            reasoning_tokens=quota_usage.reasoning_tokens,
+                            prompt_cache_hit_tokens=quota_usage.prompt_cache_hit_tokens,
+                            prompt_cache_miss_tokens=quota_usage.prompt_cache_miss_tokens,
+                            source="provider_usage",
+                            estimated=False,
+                            user_id=current_user.id,
+                            conversation_id=conversation.id,
+                            message_id=assistant_message_id,
+                            request_id=payload.request_id,
+                        )
+                    else:
+                        llm_quota_service.reconcile(
+                            db=db,
+                            reservation=quota_reservation,
+                            total_tokens=quota_reservation.reserved_amount
+                            if quota_reservation.billing_mode == QuotaBillingMode.TOKEN_USAGE
+                            else 0,
+                            source="local_estimate"
+                            if quota_reservation.billing_mode == QuotaBillingMode.TOKEN_USAGE
+                            else "request_count",
+                            estimated=quota_reservation.billing_mode == QuotaBillingMode.TOKEN_USAGE,
+                            user_id=current_user.id,
+                            conversation_id=conversation.id,
+                            message_id=assistant_message_id,
+                            request_id=payload.request_id,
+                        )
+                elif quota_reservation is not None and not provider_stream_started:
+                    llm_quota_service.release(quota_reservation)
                 if should_send_done and emitted_text:
                     if cache_lookup.cache_key and not has_image_turn:
                         question_cache_service.store_answer(cache_lookup.cache_key, emitted_text)
