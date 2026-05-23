@@ -220,8 +220,11 @@ async function deleteUser(user: UserRow) {
     await api.delete(`/admin/users/${user.id}`)
     ElMessage.success('用户已删除')
     await loadUsers()
-  } catch {
-    // 用户取消删除
+  } catch (error) {
+    const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
+    if (detail) {
+      ElMessage.error(detail)
+    }
   }
 }
 

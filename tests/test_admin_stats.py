@@ -3,11 +3,15 @@ import io
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.database import Base
+from backend.database import get_db
+from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
 from backend.models.schemas import StudentPortrait
@@ -24,6 +28,25 @@ def build_session():
     SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)
     return SessionLocal
+
+
+def build_admin_client(session_factory, current_user: User) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin_router.router)
+
+    def override_db():
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def override_current_user():
+        return current_user
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = override_current_user
+    return TestClient(app)
 
 
 class FakeUploadFile:
@@ -465,7 +488,7 @@ def test_delete_user_removes_teacher(monkeypatch):
         session.close()
 
 
-def test_delete_user_removes_student_with_conversations(monkeypatch):
+def test_delete_user_rejects_student_with_archived_conversations(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()
     try:
@@ -500,10 +523,16 @@ def test_delete_user_removes_student_with_conversations(monkeypatch):
         session.commit()
 
         request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-        admin_router.delete_user(student.id, session, admin_user, request)
+        try:
+            admin_router.delete_user(student.id, session, admin_user, request)
+        except Exception as exc:
+            assert getattr(exc, "status_code", None) == 400
+            assert "archived conversations" in str(getattr(exc, "detail", ""))
+        else:
+            raise AssertionError("Expected student deletion to be rejected when conversations exist")
 
-        assert session.get(User, student.id) is None
-        assert session.get(Conversation, conversation_row.id) is None
+        assert session.get(User, student.id) is not None
+        assert session.get(Conversation, conversation_row.id) is not None
     finally:
         session.close()
 
@@ -542,6 +571,108 @@ def test_reset_password_uses_generated_default(monkeypatch):
         assert teacher.password_hash == f"hash:{build_default_password('赵老师')}"
     finally:
         session.close()
+
+
+def test_admin_can_view_student_cleared_conversation_archive():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(username="admin", full_name="管理员", role=UserRole.ADMIN, password_hash="hash")
+        student = User(
+            username="zhangsan1",
+            full_name="张三",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=1,
+            classroom=Classroom(grade=1, name="1班"),
+        )
+        session.add_all([admin_user, student])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(student)
+        cleared_at = datetime(2026, 5, 23, 9, 30, tzinfo=UTC)
+        conversation_row = Conversation(
+            student_id=student.id,
+            subject="数学",
+            guidance_stage=GuidanceStage.HINT,
+            deleted_by_student_at=cleared_at,
+        )
+        session.add(conversation_row)
+        session.commit()
+        session.refresh(conversation_row)
+        session.add_all(
+            [
+                Message(
+                    conversation_id=conversation_row.id,
+                    role=MessageRole.USER,
+                    content="函数单调性怎么判断",
+                    turn_index=1,
+                    guidance_stage=GuidanceStage.INITIAL,
+                    created_at=datetime(2026, 5, 23, 9, 0, tzinfo=UTC),
+                ),
+                Message(
+                    conversation_id=conversation_row.id,
+                    role=MessageRole.ASSISTANT,
+                    content="先看定义域。",
+                    turn_index=1,
+                    guidance_stage=GuidanceStage.HINT,
+                    created_at=datetime(2026, 5, 23, 9, 1, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    client = build_admin_client(SessionLocal, admin_user)
+    response = client.get("/api/admin/conversation-archive")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["student_name"] == "张三"
+    assert payload[0]["student_username"] == "zhangsan1"
+    assert payload[0]["classroom_label"] == "高一1班"
+    assert payload[0]["subject"] == "数学"
+    assert payload[0]["deleted_by_student"] is True
+    assert payload[0]["deleted_by_student_at"] is not None
+    assert [message["content"] for message in payload[0]["messages"]] == ["函数单调性怎么判断", "先看定义域。"]
+
+
+def test_admin_can_export_conversation_archive_csv():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(username="admin", full_name="管理员", role=UserRole.ADMIN, password_hash="hash")
+        student = User(
+            username="lisi1",
+            full_name="李四",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=2,
+            classroom=Classroom(grade=2, name="3班"),
+        )
+        session.add_all([admin_user, student])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(student)
+        conversation_row = Conversation(student_id=student.id, subject="物理")
+        session.add(conversation_row)
+        session.commit()
+        session.refresh(conversation_row)
+        session.add(Message(conversation_id=conversation_row.id, role=MessageRole.USER, content="牛顿第二定律怎么用", turn_index=1))
+        session.commit()
+    finally:
+        session.close()
+
+    client = build_admin_client(SessionLocal, admin_user)
+    response = client.get("/api/admin/conversation-archive/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    csv_text = response.content.decode("utf-8-sig")
+    assert "conversation_id,student_id,student_name" in csv_text
+    assert "李四" in csv_text
+    assert "牛顿第二定律怎么用" in csv_text
 
 
 def test_student_can_authenticate_with_generated_login_account(monkeypatch):

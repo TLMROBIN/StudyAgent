@@ -131,6 +131,36 @@ class ConversationRead(BaseModel):
     messages: list[MessageRead] = []
 
 
+class ConversationArchiveMessageRead(BaseModel):
+    id: int
+    role: MessageRole
+    content: str
+    turn_index: int
+    guidance_stage: GuidanceStage
+    created_at: datetime
+
+
+class ConversationArchiveRead(BaseModel):
+    id: int
+    student_id: int
+    student_name: str
+    student_username: str
+    student_grade: int | None = None
+    grade_label: str | None = None
+    classroom_name: str | None = None
+    classroom_label: str | None = None
+    subject: str
+    topic: str
+    guidance_stage: GuidanceStage
+    resolved: bool
+    duration_seconds: int
+    deleted_by_student: bool
+    deleted_by_student_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    messages: list[ConversationArchiveMessageRead] = []
+
+
 class ChatRequest(BaseModel):
     subject: str
     message: str = ""

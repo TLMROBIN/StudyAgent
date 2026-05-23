@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 import re
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text, event
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -74,6 +75,7 @@ class Conversation(TimestampMixin, Base):
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    deleted_by_student_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     student: Mapped["User"] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(

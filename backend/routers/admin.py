@@ -3,16 +3,19 @@ from __future__ import annotations
 import csv
 import io
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.dependencies import CurrentAdmin, DbSession
 from backend.grade_utils import format_grade_label
 from backend.models.audit_log import AuditLog
+from backend.models.conversation import Conversation, Message
 from backend.models.schemas import (
     AuditLogRead,
     ClassroomOptionRead,
+    ConversationArchiveMessageRead,
+    ConversationArchiveRead,
     PasswordResetRequest,
     UserCreate,
     UserImportIssue,
@@ -288,6 +291,13 @@ def delete_user(user_id: int, db: DbSession, current_user: CurrentAdmin, request
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete current admin account")
     if user.role == UserRole.ADMIN:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admin account cannot be deleted here")
+    if user.role == UserRole.STUDENT:
+        has_archived_conversations = db.scalar(select(Conversation.id).where(Conversation.student_id == user.id).limit(1))
+        if has_archived_conversations is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Student with archived conversations cannot be deleted; deactivate the account instead",
+            )
 
     username = user.username
     db.delete(user)
@@ -455,6 +465,159 @@ async def import_students_legacy(
 ) -> UserImportResult:
     content = await file.read()
     return _import_users(file.filename or "", content, db, current_user, request)
+
+
+def _conversation_archive_query(
+    *,
+    student_id: int | None = None,
+    subject: str | None = None,
+    deleted_by_student: bool | None = None,
+):
+    query = (
+        select(Conversation)
+        .options(
+            selectinload(Conversation.student).selectinload(User.classroom),
+            selectinload(Conversation.messages),
+        )
+        .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+    )
+    if student_id is not None:
+        query = query.where(Conversation.student_id == student_id)
+    normalized_subject = (subject or "").strip()
+    if normalized_subject:
+        query = query.where(Conversation.subject == normalized_subject)
+    if deleted_by_student is True:
+        query = query.where(Conversation.deleted_by_student_at.is_not(None))
+    elif deleted_by_student is False:
+        query = query.where(Conversation.deleted_by_student_at.is_(None))
+    return query
+
+
+def _archive_message_read(message: Message) -> ConversationArchiveMessageRead:
+    return ConversationArchiveMessageRead(
+        id=message.id,
+        role=message.role,
+        content=message.content,
+        turn_index=message.turn_index,
+        guidance_stage=message.guidance_stage,
+        created_at=message.created_at,
+    )
+
+
+def _archive_read(conversation: Conversation) -> ConversationArchiveRead:
+    student = conversation.student
+    return ConversationArchiveRead(
+        id=conversation.id,
+        student_id=conversation.student_id,
+        student_name=student.full_name if student else "",
+        student_username=student.username if student else "",
+        student_grade=student.grade if student else None,
+        grade_label=student.grade_label if student else None,
+        classroom_name=student.classroom_name if student else None,
+        classroom_label=student.classroom_label if student else None,
+        subject=conversation.subject,
+        topic=conversation.topic,
+        guidance_stage=conversation.guidance_stage,
+        resolved=conversation.resolved,
+        duration_seconds=conversation.duration_seconds,
+        deleted_by_student=conversation.deleted_by_student_at is not None,
+        deleted_by_student_at=conversation.deleted_by_student_at,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+        messages=[_archive_message_read(message) for message in conversation.messages],
+    )
+
+
+@router.get("/conversation-archive", response_model=list[ConversationArchiveRead])
+def list_conversation_archive(
+    db: DbSession,
+    current_user: CurrentAdmin,
+    student_id: int | None = None,
+    subject: str | None = None,
+    deleted_by_student: bool | None = None,
+    limit: int = 200,
+) -> list[ConversationArchiveRead]:
+    bounded_limit = max(1, min(limit, 1000))
+    rows = db.scalars(
+        _conversation_archive_query(
+            student_id=student_id,
+            subject=subject,
+            deleted_by_student=deleted_by_student,
+        ).limit(bounded_limit)
+    ).all()
+    return [_archive_read(row) for row in rows]
+
+
+@router.get("/conversation-archive/export")
+def export_conversation_archive(
+    db: DbSession,
+    current_user: CurrentAdmin,
+    student_id: int | None = None,
+    subject: str | None = None,
+    deleted_by_student: bool | None = None,
+) -> Response:
+    rows = db.scalars(
+        _conversation_archive_query(
+            student_id=student_id,
+            subject=subject,
+            deleted_by_student=deleted_by_student,
+        )
+    ).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "conversation_id",
+            "student_id",
+            "student_name",
+            "student_username",
+            "grade_label",
+            "classroom_label",
+            "subject",
+            "topic",
+            "conversation_created_at",
+            "conversation_updated_at",
+            "deleted_by_student",
+            "deleted_by_student_at",
+            "message_id",
+            "message_role",
+            "turn_index",
+            "message_guidance_stage",
+            "message_created_at",
+            "message_content",
+        ]
+    )
+    for conversation in rows:
+        archive = _archive_read(conversation)
+        messages = archive.messages or [None]
+        for message in messages:
+            writer.writerow(
+                [
+                    archive.id,
+                    archive.student_id,
+                    archive.student_name,
+                    archive.student_username,
+                    archive.grade_label or "",
+                    archive.classroom_label or "",
+                    archive.subject,
+                    archive.topic,
+                    archive.created_at.isoformat(),
+                    archive.updated_at.isoformat(),
+                    "true" if archive.deleted_by_student else "false",
+                    archive.deleted_by_student_at.isoformat() if archive.deleted_by_student_at else "",
+                    message.id if message else "",
+                    message.role.value if message else "",
+                    message.turn_index if message else "",
+                    message.guidance_stage.value if message else "",
+                    message.created_at.isoformat() if message else "",
+                    message.content if message else "",
+                ]
+            )
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="conversation-archive.csv"'},
+    )
 
 
 @router.get("/audit-logs", response_model=list[AuditLogRead])

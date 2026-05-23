@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 import mimetypes
@@ -35,6 +36,7 @@ from backend.models.schemas import (
     ResolveConversationRequest,
 )
 from backend.models.user import User, UserRole
+from backend.services.audit_service import audit_service
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import filter_service
@@ -245,6 +247,7 @@ def _resolve_recommendation_query(
         .where(
             Conversation.id == payload.conversation_id,
             Conversation.student_id == current_user.id,
+            Conversation.deleted_by_student_at.is_(None),
         )
     )
     if not conversation:
@@ -289,7 +292,11 @@ def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -
         conversation = db.scalar(
             select(Conversation)
             .options(_message_load_option())
-            .where(Conversation.id == payload.conversation_id, Conversation.student_id == student_id)
+            .where(
+                Conversation.id == payload.conversation_id,
+                Conversation.student_id == student_id,
+                Conversation.deleted_by_student_at.is_(None),
+            )
         )
         if not conversation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
@@ -389,7 +396,7 @@ def list_conversations(db: DbSession, current_user: CurrentUser) -> list[Convers
     conversations = db.scalars(
         select(Conversation)
         .options(_message_load_option())
-        .where(Conversation.student_id == current_user.id)
+        .where(Conversation.student_id == current_user.id, Conversation.deleted_by_student_at.is_(None))
         .order_by(Conversation.updated_at.desc())
     ).all()
     return [ConversationRead.model_validate(item) for item in conversations]
@@ -400,7 +407,11 @@ def get_conversation(conversation_id: int, db: DbSession, current_user: CurrentU
     conversation = db.scalar(
         select(Conversation)
         .options(_message_load_option())
-        .where(Conversation.id == conversation_id, Conversation.student_id == current_user.id)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.student_id == current_user.id,
+            Conversation.deleted_by_student_at.is_(None),
+        )
     )
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
@@ -427,7 +438,11 @@ def resolve_conversation(
     current_user: CurrentUser,
 ) -> ConversationRead:
     conversation = db.scalar(
-        select(Conversation).where(Conversation.id == conversation_id, Conversation.student_id == current_user.id)
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.student_id == current_user.id,
+            Conversation.deleted_by_student_at.is_(None),
+        )
     )
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
@@ -439,14 +454,29 @@ def resolve_conversation(
 
 
 @router.delete("/{conversation_id}")
-def delete_conversation(conversation_id: int, db: DbSession, current_user: CurrentUser) -> dict[str, str]:
+def delete_conversation(conversation_id: int, db: DbSession, current_user: CurrentUser, request: Request) -> dict[str, str]:
     conversation = db.scalar(
-        select(Conversation).where(Conversation.id == conversation_id, Conversation.student_id == current_user.id)
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.student_id == current_user.id,
+            Conversation.deleted_by_student_at.is_(None),
+        )
     )
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    db.delete(conversation)
+    conversation.deleted_by_student_at = datetime.now(UTC)
+    db.add(conversation)
     db.commit()
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="student_clear_conversation",
+        target_type="conversation",
+        target_id=str(conversation_id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"student_id": current_user.id, "subject": conversation.subject},
+    )
     return {"status": "deleted"}
 
 
@@ -522,6 +552,7 @@ async def stream_chat(
             .where(
                 Conversation.id == replay_state.conversation_id,
                 Conversation.student_id == current_user.id,
+                Conversation.deleted_by_student_at.is_(None),
             )
         )
         if not conversation:

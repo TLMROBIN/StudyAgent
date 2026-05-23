@@ -6,6 +6,7 @@ import { forceLoginRedirect } from '../utils/navigation'
 import AdminDashboard from '../views/AdminDashboard.vue'
 import AgentConfig from '../views/AgentConfig.vue'
 import AuditLogs from '../views/AuditLogs.vue'
+import ConversationArchive from '../views/ConversationArchive.vue'
 import KnowledgeManage from '../views/KnowledgeManage.vue'
 import Login from '../views/Login.vue'
 import StudentChat from '../views/StudentChat.vue'
@@ -19,6 +20,7 @@ const router = createRouter({
     { path: '/student', component: StudentChat, meta: { requiresAuth: true, roles: ['student'] } },
     { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/knowledge', component: KnowledgeManage, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
+    { path: '/admin/conversations', component: ConversationArchive, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/audit', component: AuditLogs, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/agent', component: AgentConfig, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/users', component: UserManage, meta: { requiresAuth: true, roles: ['admin'] } },

@@ -20,6 +20,7 @@ from backend.dependencies import get_current_user
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from pydantic import ValidationError
 
+from backend.models.audit_log import AuditLog
 from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
@@ -814,6 +815,22 @@ def test_student_can_delete_own_conversation(monkeypatch):
     assert delete_response.status_code == 200
     assert delete_response.json() == {"status": "deleted"}
     assert client.get("/api/chat/history").json() == []
+
+    session = session_factory()
+    try:
+        retained_conversation = session.get(Conversation, conversation_id)
+        assert retained_conversation is not None
+        assert retained_conversation.deleted_by_student_at is not None
+        retained_messages = session.scalars(
+            select(Message).where(Message.conversation_id == conversation_id).order_by(Message.id.asc())
+        ).all()
+        assert [message.role for message in retained_messages] == [MessageRole.USER, MessageRole.ASSISTANT]
+        audit_entry = session.scalar(select(AuditLog).where(AuditLog.action == "student_clear_conversation"))
+        assert audit_entry is not None
+        assert audit_entry.target_type == "conversation"
+        assert audit_entry.target_id == str(conversation_id)
+    finally:
+        session.close()
 
 
 def test_student_cannot_delete_another_students_conversation():
