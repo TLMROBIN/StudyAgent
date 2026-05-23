@@ -308,6 +308,75 @@ def test_llm_service_uses_selected_database_providers_before_environment(monkeyp
     assert seen == [("Selected", "https://selected.example/v1", "selected-model")]
 
 
+def test_llm_service_tries_database_fallback_model_when_selected_model_fails(monkeypatch):
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        primary_account = LLMProviderAccount(
+            provider_name="minimax",
+            display_name="MiniMax",
+            base_url="https://primary.example/v1",
+            api_key="primary-secret",
+            account_billing_type=AccountBillingType.TOKEN_PLAN,
+        )
+        fallback_account = LLMProviderAccount(
+            provider_name="qwen",
+            display_name="Qwen",
+            base_url="https://fallback.example/v1",
+            api_key="fallback-secret",
+            account_billing_type=AccountBillingType.PAY_AS_YOU_GO,
+        )
+        session.add_all([primary_account, fallback_account])
+        session.flush()
+        primary_model = LLMModelConfig(
+            model_key="minimax-m27",
+            display_name="MiniMax M2.7",
+            provider_account_id=primary_account.id,
+            provider_model="MiniMax-M2.7-highspeed",
+            is_primary=True,
+            sort_order=10,
+        )
+        fallback_model = LLMModelConfig(
+            model_key="qwen-plus",
+            display_name="Qwen Plus",
+            provider_account_id=fallback_account.id,
+            provider_model="qwen-plus",
+            is_fallback=True,
+            sort_order=20,
+        )
+        session.add_all([primary_model, fallback_model])
+        session.commit()
+    finally:
+        session.close()
+
+    service = LLMService()
+    monkeypatch.setattr(service, "_session_factory", session_factory)
+    seen: list[tuple[str, str]] = []
+
+    async def fake_stream(provider, messages) -> AsyncIterator[str]:
+        seen.append((provider.name, provider.model))
+        if provider.name == "minimax":
+            raise RuntimeError("primary failed")
+        yield "备用模型响应"
+
+    monkeypatch.setattr(service, "_stream_openai_compatible", fake_stream)
+
+    async def collect_chunks() -> list[str]:
+        return [
+            chunk
+            async for chunk in service.stream_response(
+                [{"role": "user", "content": "函数题怎么想"}],
+                "兜底",
+                model_key="minimax-m27",
+            )
+        ]
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert chunks == ["备用模型响应"]
+    assert seen == [("minimax", "MiniMax-M2.7-highspeed"), ("qwen", "qwen-plus")]
+
+
 def test_llm_service_exposes_builtin_student_chat_models():
     service = LLMService()
 

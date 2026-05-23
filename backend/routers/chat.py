@@ -915,6 +915,8 @@ async def stream_chat(
         ticket_context = queue_service.reserve()
         ticket = await ticket_context.__aenter__()
     except QueueFullError as exc:
+        if quota_reservation is not None:
+            llm_quota_service.release(quota_reservation)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前排队人数较多，请稍后重试") from exc
     finally:
         llm_queue_depth.set(queue_service.waiting)
@@ -1049,7 +1051,7 @@ async def stream_chat(
                 conversation.subject = subject
                 conversation.guidance_stage = prompt.stage
                 db.add(conversation)
-                if should_send_done and emitted_text:
+                if emitted_text:
                     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
                     if existing_assistant:
                         emitted_text = existing_assistant.content
@@ -1105,8 +1107,8 @@ async def stream_chat(
                         )
                 elif quota_reservation is not None and not provider_stream_started:
                     llm_quota_service.release(quota_reservation)
-                if should_send_done and emitted_text:
-                    if cache_lookup.cache_key and not has_image_turn:
+                if emitted_text:
+                    if should_send_done and cache_lookup.cache_key and not has_image_turn:
                         question_cache_service.store_answer(cache_lookup.cache_key, emitted_text)
                     if payload.request_id:
                         request_replay_service.mark_completed(

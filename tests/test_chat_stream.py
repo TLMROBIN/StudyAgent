@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 from PIL import Image
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -25,6 +26,7 @@ from backend.models.conversation import ChatMessageAttachment, Conversation, Gui
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
+from backend.models.llm_usage import LLMUsageEvent
 from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
 from backend.routers import chat as chat_router
@@ -94,6 +96,16 @@ class FakeRequest:
         return False
 
 
+class DisconnectAfterFirstChunkRequest:
+    def __init__(self) -> None:
+        self.state = SimpleNamespace(request_id="disconnect-request")
+        self._checks = 0
+
+    async def is_disconnected(self) -> bool:
+        self._checks += 1
+        return self._checks > 1
+
+
 def _create_user(session_factory, *, role: UserRole, grade: int | None = None) -> User:
     session = session_factory()
     try:
@@ -138,6 +150,41 @@ def _build_chat_test_client(session_factory, current_user: User):
     app.dependency_overrides[get_current_user] = override_current_user
     app.dependency_overrides[get_db] = override_db
     return TestClient(app)
+
+
+def _create_request_count_model(session_factory, *, model_key: str = "minimax-m27", limit: int = 1) -> None:
+    session = session_factory()
+    try:
+        account = LLMProviderAccount(
+            provider_name="minimax",
+            display_name="MiniMax Token Plan",
+            base_url="https://api.minimax.chat/v1",
+            api_key="secret",
+            account_billing_type=AccountBillingType.TOKEN_PLAN,
+        )
+        session.add(account)
+        session.flush()
+        model = LLMModelConfig(
+            model_key=model_key,
+            display_name="MiniMax M2.7",
+            description="高速答疑模型",
+            provider_account_id=account.id,
+            provider_model="MiniMax-M2.7-highspeed",
+            is_primary=True,
+            sort_order=10,
+        )
+        session.add(model)
+        session.flush()
+        session.add(
+            LLMQuotaPolicy(
+                model_config_id=model.id,
+                billing_mode=QuotaBillingMode.REQUEST_COUNT,
+                user_daily_request_limit=limit,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 async def _read_streaming_response(response) -> str:
@@ -254,6 +301,52 @@ def test_student_model_list_includes_database_quota_snapshot():
             },
         }
     ]
+
+
+def test_chat_stream_releases_quota_when_queue_is_full(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    _create_request_count_model(session_factory, limit=1)
+    quota_store = MemoryStore()
+
+    class RejectingQueue:
+        waiting = 0
+
+        def reserve(self):
+            raise chat_router.QueueFullError("queue_full")
+
+    monkeypatch.setattr(chat_router.llm_quota_service, "store", quota_store)
+    monkeypatch.setattr(chat_router, "queue_service", RejectingQueue())
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        model = session.scalar(select(LLMModelConfig).where(LLMModelConfig.model_key == "minimax-m27"))
+        assert model is not None
+
+        with pytest.raises(chat_router.HTTPException):
+            asyncio.run(
+                chat_router.stream_chat(
+                    ChatRequest(subject="数学", message="函数题怎么下手", request_id="queue-full-req"),
+                    session,
+                    current_user,
+                    FakeRequest(),
+                )
+            )
+
+        snapshot = chat_router.llm_quota_service.quota_snapshot_for_user(
+            db=session,
+            user=current_user,
+            model_config=model,
+        )
+        assert snapshot.remaining_requests == 1
+    finally:
+        session.close()
 
 
 def test_student_can_list_chat_model_statuses(monkeypatch):
@@ -588,6 +681,62 @@ def test_chat_stream_replays_completed_request_id(monkeypatch):
         assert [event for event, _ in second_events] == ["meta", "done"]
         assert len(stored_messages) == 2
         assert stored_messages[1].content == "先判断已知条件。"
+    finally:
+        session.close()
+
+
+def test_chat_stream_replays_disconnected_request_without_second_llm_call(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    _create_request_count_model(session_factory, limit=2)
+    llm_call_count = {"value": 0}
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        llm_call_count["value"] += 1
+        yield "先看定义域。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "store_backend", MemoryStore())
+    monkeypatch.setattr(chat_router.request_replay_service, "store_backend", MemoryStore())
+    monkeypatch.setattr(chat_router.llm_quota_service, "store", MemoryStore())
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        first_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="函数题怎么下手", request_id="req-disconnect"),
+                session,
+                current_user,
+                DisconnectAfterFirstChunkRequest(),
+            )
+        )
+        first_events = _parse_sse(asyncio.run(_read_streaming_response(first_response)))
+
+        second_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="函数题怎么下手", request_id="req-disconnect"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        second_events = _parse_sse(asyncio.run(_read_streaming_response(second_response)))
+        stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
+        usage_events = session.scalars(select(LLMUsageEvent)).all()
+
+        assert llm_call_count["value"] == 1
+        assert [event for event, _ in first_events] == ["meta", "chunk"]
+        assert [event for event, _ in second_events] == ["meta", "done"]
+        assert second_events[-1][1]["content"] == "先看定义域。"
+        assert len(stored_messages) == 2
+        assert stored_messages[1].content == "先看定义域。"
+        assert len(usage_events) == 1
     finally:
         session.close()
 

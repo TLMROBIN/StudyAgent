@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
@@ -140,6 +141,12 @@ class LLMQuotaService:
         message_id: int | None = None,
         request_id: str | None = None,
     ) -> LLMUsageEvent:
+        existing_event = db.scalar(
+            select(LLMUsageEvent).where(LLMUsageEvent.reservation_key == reservation.reservation_key)
+        )
+        if existing_event is not None:
+            return existing_event
+
         if reservation.billing_mode == QuotaBillingMode.TOKEN_USAGE:
             actual_total = max(0, total_tokens or prompt_tokens + completion_tokens or reservation.reserved_amount)
             self.store.reconcile_quota(reservation.reservation_key, actual_total)

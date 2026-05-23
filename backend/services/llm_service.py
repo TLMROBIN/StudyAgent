@@ -360,7 +360,7 @@ class LLMService:
 
             session = self._session_factory()
             try:
-                item = session.scalar(
+                selected = session.scalar(
                     select(LLMModelConfig)
                     .options(selectinload(LLMModelConfig.provider_account))
                     .where(
@@ -369,17 +369,33 @@ class LLMService:
                         LLMModelConfig.capability_text.is_(True),
                     )
                 )
-                if not item or not item.provider_account or not item.provider_account.is_enabled:
+                if not selected or not selected.provider_account or not selected.provider_account.is_enabled:
                     return []
-                account = item.provider_account
-                return [
-                    ProviderState(
-                        name=account.provider_name,
-                        base_url=account.base_url,
-                        api_key=account.api_key,
-                        model=item.provider_model,
+                fallback_rows = session.scalars(
+                    select(LLMModelConfig)
+                    .options(selectinload(LLMModelConfig.provider_account))
+                    .where(
+                        LLMModelConfig.id != selected.id,
+                        LLMModelConfig.is_enabled.is_(True),
+                        LLMModelConfig.capability_text.is_(True),
+                        LLMModelConfig.is_fallback.is_(True),
                     )
-                ]
+                    .order_by(LLMModelConfig.sort_order.asc(), LLMModelConfig.id.asc())
+                ).all()
+                providers: list[ProviderState] = []
+                for item in [selected, *fallback_rows]:
+                    account = item.provider_account
+                    if not account or not account.is_enabled:
+                        continue
+                    providers.append(
+                        ProviderState(
+                            name=account.provider_name,
+                            base_url=account.base_url,
+                            api_key=account.api_key,
+                            model=item.provider_model,
+                        )
+                    )
+                return providers
             finally:
                 session.close()
         except Exception:

@@ -6,6 +6,7 @@ from backend.database import Base
 from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
+from backend.models.llm_usage import LLMUsageEvent
 from backend.models.user import User, UserRole
 from backend.services.llm_quota_service import LLMQuotaService, QuotaDenied
 from backend.services.store_service import MemoryStore, QuotaCounterKey
@@ -207,5 +208,42 @@ def test_llm_quota_service_reuses_same_request_id_reservation():
         assert first.reservation_key == second.reservation_key
         snapshot = service.quota_snapshot_for_user(db=session, user=student, model_config=model)
         assert snapshot.remaining_requests == 1
+    finally:
+        session.close()
+
+
+def test_llm_quota_service_reconcile_is_idempotent_for_same_reservation_key():
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        student = _create_student(session)
+        model, _policy = _create_model(session, billing_mode=QuotaBillingMode.REQUEST_COUNT)
+        service = LLMQuotaService(store=MemoryStore())
+
+        reservation = service.check_and_reserve(
+            db=session,
+            user=student,
+            model_config=model,
+            request_id="same-usage-request",
+            prompt_messages=[],
+        )
+
+        assert reservation.allowed is True
+        first_event = service.reconcile(
+            db=session,
+            reservation=reservation,
+            source="request_count",
+            estimated=False,
+        )
+        second_event = service.reconcile(
+            db=session,
+            reservation=reservation,
+            source="request_count",
+            estimated=False,
+        )
+
+        events = session.query(LLMUsageEvent).all()
+        assert first_event.id == second_event.id
+        assert len(events) == 1
     finally:
         session.close()
