@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
@@ -21,6 +21,7 @@ const models = ref<LLMModelConfig[]>([])
 const usage = ref<LLMUsageSummary[]>([])
 const loading = ref(false)
 const editingModelId = ref<number | null>(null)
+const modelConfigForm = ref<HTMLElement | null>(null)
 
 const accountForm = reactive({
   provider_name: 'minimax',
@@ -90,7 +91,7 @@ function resetModelForm() {
   modelForm.is_enabled = true
 }
 
-function editModel(item: LLMModelConfig) {
+async function editModel(item: LLMModelConfig) {
   editingModelId.value = item.id
   modelForm.model_key = item.model_key
   modelForm.display_name = item.display_name
@@ -107,6 +108,9 @@ function editModel(item: LLMModelConfig) {
   modelForm.is_primary = item.is_primary
   modelForm.is_fallback = item.is_fallback
   modelForm.is_enabled = item.is_enabled
+  await nextTick()
+  modelConfigForm.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  ElMessage.info(`正在编辑 ${item.display_name}`)
 }
 
 function buildModelPayload(): LLMModelConfigPayload {
@@ -215,7 +219,7 @@ onMounted(() => {
           <button class="primary-button" type="submit">创建账户</button>
         </form>
 
-        <form class="model-admin-form" @submit.prevent="submitModel">
+        <form ref="modelConfigForm" class="model-admin-form" @submit.prevent="submitModel">
           <div class="model-form-title">
             <h3>{{ editingModelId ? '编辑模型配置' : '模型配置' }}</h3>
             <button v-if="editingModelId" class="ghost-button" type="button" @click="resetModelForm">取消编辑</button>
