@@ -140,7 +140,8 @@ async function submitAccount() {
     ElMessage.error('请填写 API Key')
     return
   }
-  await createLLMProviderAccount({ ...accountForm })
+  const createdAccount = await createLLMProviderAccount({ ...accountForm })
+  modelForm.provider_account_id = createdAccount.id
   ElMessage.success('供应商账户已创建')
   accountForm.api_key = ''
   await loadData()
