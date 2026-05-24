@@ -484,6 +484,8 @@ textarea {
 
 .chat-stream {
   display: grid;
+  align-content: start;
+  align-items: start;
   gap: 12px;
   min-height: 360px;
   max-height: 60vh;
@@ -491,6 +493,7 @@ textarea {
 }
 
 .bubble {
+  width: fit-content;
   max-width: 78%;
   padding: 16px 18px;
   border-radius: 22px;
@@ -498,12 +501,14 @@ textarea {
 }
 
 .bubble.user {
+  justify-self: end;
   margin-left: auto;
   background: linear-gradient(135deg, #0f766e, #0f9c90);
   color: #fff;
 }
 
 .bubble.assistant {
+  justify-self: start;
   background: #fffaf0;
   border: 1px solid var(--line);
 }
