@@ -809,6 +809,7 @@ async function sendMessage() {
       queueScrollToBottom()
     }
     await loadConversations()
+    await loadChatModels()
     resetRecommendations()
   } catch (error) {
     const last = messages.value[messages.value.length - 1]
