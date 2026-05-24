@@ -1,11 +1,12 @@
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from backend.dependencies import CurrentAdmin, DbSession
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
 from backend.models.llm_provider import LLMProviderConfig
+from backend.models.llm_usage import LLMUsageEvent
 from backend.models.schemas import (
     LLMModelConfigCreate,
     LLMModelConfigRead,
@@ -257,6 +258,33 @@ def update_model_config(
         detail={"old": old_detail, "new": {"model_key": item.model_key, "billing_mode": policy.billing_mode.value}},
     )
     return _read_model(item)
+
+
+@router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_model_config(
+    model_id: int,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> None:
+    item = db.get(LLMModelConfig, model_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model config not found")
+
+    detail = {"model_key": item.model_key, "display_name": item.display_name}
+    db.execute(delete(LLMUsageEvent).where(LLMUsageEvent.model_config_id == item.id))
+    db.delete(item)
+    db.commit()
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="delete_llm_model_config",
+        target_type="llm_model_config",
+        target_id=str(model_id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail=detail,
+    )
 
 
 @router.post("/", response_model=LLMProviderRead, status_code=status.HTTP_201_CREATED)

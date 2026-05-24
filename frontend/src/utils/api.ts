@@ -335,6 +335,10 @@ export async function updateLLMModelConfig(id: number, payload: LLMModelConfigPa
   return data
 }
 
+export async function deleteLLMModelConfig(id: number): Promise<void> {
+  await api.delete(`/llm-providers/models/${id}`)
+}
+
 export async function fetchLLMUsageSummary(): Promise<LLMUsageSummary[]> {
   const { data } = await api.get<LLMUsageSummary[]>('/llm-usage/summary')
   return data

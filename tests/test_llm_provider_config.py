@@ -222,6 +222,68 @@ def test_admin_can_create_provider_account_and_request_count_model():
     assert body["quota_policy"]["user_daily_request_limit"] == 20
 
 
+def test_admin_can_delete_model_config_with_usage_events():
+    session_factory = _build_session_factory()
+    admin = _create_admin(session_factory)
+    client = _build_provider_test_client(session_factory, admin)
+
+    account_response = client.post(
+        "/api/llm-providers/accounts",
+        json={
+            "provider_name": "minimax",
+            "display_name": "MiniMax Token Plan",
+            "base_url": "https://api.minimax.chat/v1",
+            "api_key": "secret",
+            "account_billing_type": "token_plan",
+            "is_enabled": True,
+        },
+    )
+    model_response = client.post(
+        "/api/llm-providers/models",
+        json={
+            "model_key": "minimax-m27",
+            "display_name": "MiniMax M2.7",
+            "description": "高速答疑模型",
+            "provider_account_id": account_response.json()["id"],
+            "provider_model": "MiniMax-M2.7-highspeed",
+            "is_enabled": True,
+            "is_primary": True,
+            "is_fallback": False,
+            "sort_order": 10,
+            "quota_policy": {
+                "billing_mode": "request_count",
+                "user_daily_request_limit": 20,
+                "count_cache_hit": False,
+            },
+        },
+    )
+    model_id = model_response.json()["id"]
+    account_id = account_response.json()["id"]
+    session = session_factory()
+    try:
+        usage = LLMUsageEvent(
+            user_id=admin.id,
+            request_id="request-before-delete",
+            model_config_id=model_id,
+            provider_account_id=account_id,
+            model_key="minimax-m27",
+            provider_name="minimax",
+            provider_model="MiniMax-M2.7-highspeed",
+            billing_mode="request_count",
+            request_count=1,
+            source="request_count",
+        )
+        session.add(usage)
+        session.commit()
+    finally:
+        session.close()
+
+    delete_response = client.delete(f"/api/llm-providers/models/{model_id}")
+
+    assert delete_response.status_code == 204
+    assert client.get("/api/llm-providers/models").json() == []
+
+
 def test_empty_provider_account_api_key_is_rejected_on_create_and_ignored_on_update():
     session_factory = _build_session_factory()
     client = _build_provider_test_client(session_factory, _create_admin(session_factory))

@@ -1,22 +1,26 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   createLLMModelConfig,
   createLLMProviderAccount,
+  deleteLLMModelConfig,
   fetchLLMModelConfigs,
   fetchLLMProviderAccounts,
   fetchLLMUsageSummary,
   type LLMModelConfig,
+  type LLMModelConfigPayload,
   type LLMProviderAccount,
   type LLMUsageSummary,
+  updateLLMModelConfig,
 } from '../utils/api'
 
 const accounts = ref<LLMProviderAccount[]>([])
 const models = ref<LLMModelConfig[]>([])
 const usage = ref<LLMUsageSummary[]>([])
 const loading = ref(false)
+const editingModelId = ref<number | null>(null)
 
 const accountForm = reactive({
   provider_name: 'minimax',
@@ -46,6 +50,7 @@ const modelForm = reactive({
 })
 
 const canCreateModel = computed(() => accounts.value.length > 0 && modelForm.provider_account_id > 0)
+const modelSubmitText = computed(() => (editingModelId.value ? '保存模型' : '创建模型'))
 
 async function loadData() {
   loading.value = true
@@ -66,23 +71,46 @@ async function loadData() {
   }
 }
 
-async function submitAccount() {
-  if (!accountForm.api_key.trim()) {
-    ElMessage.error('请填写 API Key')
-    return
-  }
-  await createLLMProviderAccount({ ...accountForm })
-  ElMessage.success('供应商账户已创建')
-  accountForm.api_key = ''
-  await loadData()
+function resetModelForm() {
+  editingModelId.value = null
+  modelForm.model_key = 'minimax-m27'
+  modelForm.display_name = 'MiniMax M2.7'
+  modelForm.description = '高速答疑模型'
+  modelForm.provider_account_id = accounts.value[0]?.id ?? 0
+  modelForm.provider_model = 'MiniMax-M2.7-highspeed'
+  modelForm.billing_mode = 'request_count'
+  modelForm.user_daily_request_limit = 20
+  modelForm.user_daily_token_limit = 50000
+  modelForm.max_completion_tokens = 1024
+  modelForm.provider_rolling_5h_request_limit = null
+  modelForm.provider_weekly_request_limit = null
+  modelForm.count_cache_hit = false
+  modelForm.is_primary = true
+  modelForm.is_fallback = false
+  modelForm.is_enabled = true
 }
 
-async function submitModel() {
-  if (!canCreateModel.value) {
-    ElMessage.error('请先创建供应商账户')
-    return
-  }
-  await createLLMModelConfig({
+function editModel(item: LLMModelConfig) {
+  editingModelId.value = item.id
+  modelForm.model_key = item.model_key
+  modelForm.display_name = item.display_name
+  modelForm.description = item.description
+  modelForm.provider_account_id = item.provider_account_id
+  modelForm.provider_model = item.provider_model
+  modelForm.billing_mode = item.quota_policy.billing_mode
+  modelForm.user_daily_request_limit = item.quota_policy.user_daily_request_limit ?? 20
+  modelForm.user_daily_token_limit = item.quota_policy.user_daily_token_limit ?? 50000
+  modelForm.max_completion_tokens = item.quota_policy.max_completion_tokens ?? 1024
+  modelForm.provider_rolling_5h_request_limit = item.quota_policy.provider_rolling_5h_request_limit
+  modelForm.provider_weekly_request_limit = item.quota_policy.provider_weekly_request_limit
+  modelForm.count_cache_hit = item.quota_policy.count_cache_hit
+  modelForm.is_primary = item.is_primary
+  modelForm.is_fallback = item.is_fallback
+  modelForm.is_enabled = item.is_enabled
+}
+
+function buildModelPayload(): LLMModelConfigPayload {
+  return {
     model_key: modelForm.model_key,
     display_name: modelForm.display_name,
     description: modelForm.description,
@@ -104,8 +132,53 @@ async function submitModel() {
       count_cache_hit: modelForm.count_cache_hit,
       fail_closed_on_store_error: true,
     },
-  })
-  ElMessage.success('模型配置已创建')
+  }
+}
+
+async function submitAccount() {
+  if (!accountForm.api_key.trim()) {
+    ElMessage.error('请填写 API Key')
+    return
+  }
+  await createLLMProviderAccount({ ...accountForm })
+  ElMessage.success('供应商账户已创建')
+  accountForm.api_key = ''
+  await loadData()
+}
+
+async function submitModel() {
+  if (!canCreateModel.value) {
+    ElMessage.error('请先创建供应商账户')
+    return
+  }
+  const payload = buildModelPayload()
+  if (editingModelId.value) {
+    await updateLLMModelConfig(editingModelId.value, payload)
+    ElMessage.success('模型配置已更新')
+  } else {
+    await createLLMModelConfig(payload)
+    ElMessage.success('模型配置已创建')
+  }
+  resetModelForm()
+  await loadData()
+}
+
+async function deleteModel(item: LLMModelConfig) {
+  try {
+    await ElMessageBox.confirm(`确认删除模型 ${item.display_name}（${item.model_key}）？`, '删除模型配置', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+
+  await deleteLLMModelConfig(item.id)
+  if (editingModelId.value === item.id) {
+    resetModelForm()
+  }
+  ElMessage.success('模型配置已删除')
   await loadData()
 }
 
@@ -115,12 +188,12 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="page-grid">
+  <section class="dashboard-stack">
     <div class="panel">
       <div class="panel-header">
         <div>
           <p class="eyebrow">LLM Control</p>
-          <h2>模型管理</h2>
+          <h2>模型设置</h2>
         </div>
         <button class="ghost-button" :disabled="loading" @click="loadData">刷新</button>
       </div>
@@ -142,7 +215,10 @@ onMounted(() => {
         </form>
 
         <form class="model-admin-form" @submit.prevent="submitModel">
-          <h3>模型配置</h3>
+          <div class="model-form-title">
+            <h3>{{ editingModelId ? '编辑模型配置' : '模型配置' }}</h3>
+            <button v-if="editingModelId" class="ghost-button" type="button" @click="resetModelForm">取消编辑</button>
+          </div>
           <el-select v-model="modelForm.provider_account_id" placeholder="供应商账户">
             <el-option v-for="account in accounts" :key="account.id" :label="account.display_name" :value="account.id" />
           </el-select>
@@ -168,7 +244,7 @@ onMounted(() => {
           <el-switch v-model="modelForm.is_primary" active-text="主模型" />
           <el-switch v-model="modelForm.is_fallback" active-text="备用模型" />
           <el-switch v-model="modelForm.is_enabled" active-text="启用" />
-          <button class="primary-button" type="submit" :disabled="!canCreateModel">创建模型</button>
+          <button class="primary-button" type="submit" :disabled="!canCreateModel">{{ modelSubmitText }}</button>
         </form>
       </div>
     </div>
@@ -184,6 +260,23 @@ onMounted(() => {
         <el-table-column prop="quota_policy.billing_mode" label="计费模式" width="120" />
         <el-table-column prop="quota_policy.user_daily_request_limit" label="每日次数" width="120" />
         <el-table-column prop="quota_policy.user_daily_token_limit" label="每日 tokens" width="130" />
+        <el-table-column label="状态" width="160">
+          <template #default="{ row }">
+            <div class="detail-chip-group">
+              <span v-if="row.is_primary" class="detail-chip detail-chip--success">主模型</span>
+              <span v-if="row.is_fallback" class="detail-chip">备用</span>
+              <span v-if="!row.is_enabled" class="detail-chip">停用</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" fixed="right" width="150">
+          <template #default="{ row }">
+            <div class="table-action-group">
+              <button class="ghost-button" type="button" @click="editModel(row)">编辑</button>
+              <button class="ghost-button danger-text" type="button" @click="deleteModel(row)">删除</button>
+            </div>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
