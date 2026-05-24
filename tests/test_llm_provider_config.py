@@ -4,6 +4,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -631,3 +632,41 @@ def test_llm_probe_uses_m2_completion_tokens_and_full_timeout(monkeypatch):
     assert payload["max_completion_tokens"] == 8
     assert "max_tokens" not in payload
     assert captured["timeout"].connect == service.settings.llm_request_timeout_seconds
+
+
+def test_llm_probe_reports_upstream_quota_separately_from_user_quota(monkeypatch):
+    service = LLMService()
+    provider = service.providers[0]
+    provider.api_key = "primary-secret"
+
+    class FakeResponse:
+        status_code = 402
+
+        def raise_for_status(self):
+            request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+            response = httpx.Response(self.status_code, request=request)
+            raise httpx.HTTPStatusError("payment required", request=request, response=response)
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.services.llm_service.httpx.AsyncClient", FakeAsyncClient)
+
+    async def check():
+        return await service._probe_openai_compatible(provider)
+
+    ok, message = asyncio.run(check())
+
+    assert ok is False
+    assert "上游模型额度不足或请求被上游限流" in message
+    assert "你今天" not in message

@@ -139,6 +139,8 @@ def test_llm_quota_service_reserves_request_count_and_rejects_when_exhausted():
         assert second.allowed is True
         assert isinstance(denied, QuotaDenied)
         assert denied.reason == "user_daily_limit"
+        assert "你今天使用该模型的次数已用完" in denied.message
+        assert "上游" not in denied.message
     finally:
         session.close()
 

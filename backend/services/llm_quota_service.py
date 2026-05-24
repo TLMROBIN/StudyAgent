@@ -104,7 +104,7 @@ class LLMQuotaService:
                 billing_mode=billing_mode.value,
                 reason=reason,
             ).inc()
-            return self._deny(model_config, policy, reason, "该模型今日额度已用完，请明天再试或切换其他模型。")
+            return self._deny(model_config, policy, reason, self._denial_message(reason))
 
         llm_quota_reserved_total.labels(model_key=model_config.model_key, billing_mode=billing_mode.value).inc()
         return QuotaReservation(
@@ -332,6 +332,16 @@ class LLMQuotaService:
         if ":week:" in exceeded_key:
             return "provider_weekly_limit"
         return "quota_limit"
+
+    @staticmethod
+    def _denial_message(reason: str) -> str:
+        if reason == "user_daily_limit":
+            return "你今天使用该模型的次数已用完，请明天再试或切换其他模型。"
+        if reason == "school_daily_limit":
+            return "该模型今日全校额度已用完，请联系管理员调整额度或切换其他模型。"
+        if reason in {"provider_rolling_5h_limit", "provider_weekly_limit"}:
+            return "该模型已达到校内设置的供应商使用上限，请稍后再试或切换其他模型。"
+        return "该模型额度已用完，请稍后再试或切换其他模型。"
 
     @staticmethod
     def _today() -> str:

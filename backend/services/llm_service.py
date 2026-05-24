@@ -287,7 +287,7 @@ class LLMService:
             if status_code in {401, 403}:
                 return False, "认证失败"
             if status_code in {402, 429}:
-                return False, "额度不足或请求受限"
+                return False, "上游模型额度不足或请求被上游限流，请联系管理员检查供应商账户额度，或切换其他模型。"
             if status_code >= 500:
                 return False, "模型服务异常"
             return False, f"模型服务返回 {status_code}"
