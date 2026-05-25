@@ -19,6 +19,11 @@ import {
   type QuestionRecommendation,
 } from '../utils/api'
 import { forceLoginRedirect } from '../utils/navigation'
+import {
+  createCroppedImageFile,
+  previewRectToNaturalRect,
+  type CropRect,
+} from '../utils/imageCrop'
 import { collectInlineAssetIds, renderRichText, type InlineRichTextAsset } from '../utils/richText'
 
 interface ConversationSummary {
@@ -93,8 +98,16 @@ const recommendationKeyword = ref('')
 const chatStreamRef = ref<HTMLElement | null>(null)
 const cameraInputRef = ref<HTMLInputElement | null>(null)
 const galleryInputRef = ref<HTMLInputElement | null>(null)
+const cropImageRef = ref<HTMLImageElement | null>(null)
+const cropStageRef = ref<HTMLElement | null>(null)
 const pendingImageFile = ref<File | null>(null)
 const pendingImagePreviewUrl = ref('')
+const cropDialogVisible = ref(false)
+const cropSourceFile = ref<File | null>(null)
+const cropSourceUrl = ref('')
+const cropSelection = reactive<CropRect>({ x: 0, y: 0, width: 1, height: 1 })
+const cropDragging = ref(false)
+const cropApplying = ref(false)
 const previousSubject = ref(form.subject)
 const chatModels = ref<ChatModelOption[]>(DEFAULT_CHAT_MODELS)
 const chatModelStatuses = ref<Record<string, ChatModelStatus>>({})
@@ -102,6 +115,13 @@ const modelStatusLoading = ref(false)
 let streamAbortController: AbortController | null = null
 let modelStatusTimer: ReturnType<typeof window.setInterval> | null = null
 let stopRequested = false
+let cropPointerStart: {
+  pointerId: number
+  mode: 'draw' | 'move' | 'resize'
+  x: number
+  y: number
+  initial: CropRect
+} | null = null
 const localAttachmentUrls = new Set<string>()
 const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 const authStore = useAuthStore()
@@ -427,6 +447,16 @@ function resetPendingImage(options: { preservePreview?: boolean } = {}) {
   }
 }
 
+function resetCropDialog() {
+  revokeLocalAttachmentUrl(cropSourceUrl.value)
+  cropDialogVisible.value = false
+  cropSourceFile.value = null
+  cropSourceUrl.value = ''
+  cropDragging.value = false
+  cropApplying.value = false
+  cropPointerStart = null
+}
+
 function updatePendingImage(file: File) {
   resetPendingImage()
   pendingImageFile.value = file
@@ -456,11 +486,202 @@ function handleImageSelection(event: Event) {
     ElMessage.error('只支持上传 1 张图片')
     return
   }
-  updatePendingImage(file)
+  openCropDialog(file)
 }
 
 function removePendingImage() {
   resetPendingImage()
+}
+
+function openCropDialog(file: File) {
+  resetCropDialog()
+  cropSourceFile.value = file
+  cropSourceUrl.value = URL.createObjectURL(file)
+  cropDialogVisible.value = true
+}
+
+function initializeCropSelection() {
+  const image = cropImageRef.value
+  if (!image) {
+    return
+  }
+  const width = image.clientWidth
+  const height = image.clientHeight
+  cropSelection.width = Math.max(1, Math.round(width * 0.82))
+  cropSelection.height = Math.max(1, Math.round(height * 0.82))
+  cropSelection.x = Math.round((width - cropSelection.width) / 2)
+  cropSelection.y = Math.round((height - cropSelection.height) / 2)
+}
+
+function cropSelectionStyle() {
+  return {
+    left: `${cropSelection.x}px`,
+    top: `${cropSelection.y}px`,
+    width: `${cropSelection.width}px`,
+    height: `${cropSelection.height}px`,
+  }
+}
+
+function cropPointerPosition(event: PointerEvent) {
+  const image = cropImageRef.value
+  if (!image) {
+    return { x: 0, y: 0 }
+  }
+  const bounds = image.getBoundingClientRect()
+  return {
+    x: Math.max(0, Math.min(event.clientX - bounds.left, bounds.width)),
+    y: Math.max(0, Math.min(event.clientY - bounds.top, bounds.height)),
+  }
+}
+
+function clampPreviewCrop(rect: CropRect): CropRect {
+  const image = cropImageRef.value
+  if (!image) {
+    return rect
+  }
+  const x = Math.max(0, Math.min(rect.x, image.clientWidth - 1))
+  const y = Math.max(0, Math.min(rect.y, image.clientHeight - 1))
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.min(rect.width, image.clientWidth - x)),
+    height: Math.max(1, Math.min(rect.height, image.clientHeight - y)),
+  }
+}
+
+function setCropSelection(rect: CropRect) {
+  const next = clampPreviewCrop(rect)
+  cropSelection.x = Math.round(next.x)
+  cropSelection.y = Math.round(next.y)
+  cropSelection.width = Math.round(next.width)
+  cropSelection.height = Math.round(next.height)
+}
+
+function startCropDraw(event: PointerEvent) {
+  if (cropApplying.value) {
+    return
+  }
+  const point = cropPointerPosition(event)
+  cropPointerStart = {
+    pointerId: event.pointerId,
+    mode: 'draw',
+    x: point.x,
+    y: point.y,
+    initial: { ...cropSelection },
+  }
+  cropDragging.value = true
+  setCropSelection({ x: point.x, y: point.y, width: 1, height: 1 })
+  cropStageRef.value?.setPointerCapture(event.pointerId)
+}
+
+function startCropMove(event: PointerEvent) {
+  event.stopPropagation()
+  const point = cropPointerPosition(event)
+  cropPointerStart = {
+    pointerId: event.pointerId,
+    mode: 'move',
+    x: point.x,
+    y: point.y,
+    initial: { ...cropSelection },
+  }
+  cropDragging.value = true
+  cropStageRef.value?.setPointerCapture(event.pointerId)
+}
+
+function startCropResize(event: PointerEvent) {
+  event.stopPropagation()
+  const point = cropPointerPosition(event)
+  cropPointerStart = {
+    pointerId: event.pointerId,
+    mode: 'resize',
+    x: point.x,
+    y: point.y,
+    initial: { ...cropSelection },
+  }
+  cropDragging.value = true
+  cropStageRef.value?.setPointerCapture(event.pointerId)
+}
+
+function updateCropSelection(event: PointerEvent) {
+  if (!cropPointerStart) {
+    return
+  }
+  const point = cropPointerPosition(event)
+  const start = cropPointerStart
+  if (start.mode === 'draw') {
+    const x = Math.min(start.x, point.x)
+    const y = Math.min(start.y, point.y)
+    setCropSelection({
+      x,
+      y,
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    })
+    return
+  }
+  if (start.mode === 'move') {
+    const image = cropImageRef.value
+    const maxX = image ? Math.max(0, image.clientWidth - start.initial.width) : start.initial.x
+    const maxY = image ? Math.max(0, image.clientHeight - start.initial.height) : start.initial.y
+    setCropSelection({
+      x: Math.max(0, Math.min(start.initial.x + point.x - start.x, maxX)),
+      y: Math.max(0, Math.min(start.initial.y + point.y - start.y, maxY)),
+      width: start.initial.width,
+      height: start.initial.height,
+    })
+    return
+  }
+  setCropSelection({
+    x: start.initial.x,
+    y: start.initial.y,
+    width: start.initial.width + point.x - start.x,
+    height: start.initial.height + point.y - start.y,
+  })
+}
+
+function endCropInteraction(event: PointerEvent) {
+  if (!cropPointerStart) {
+    return
+  }
+  cropStageRef.value?.releasePointerCapture(cropPointerStart.pointerId)
+  cropPointerStart = null
+  cropDragging.value = false
+  if (cropSelection.width < 12 || cropSelection.height < 12) {
+    initializeCropSelection()
+  }
+  event.stopPropagation()
+}
+
+function useOriginalCropSource() {
+  if (!cropSourceFile.value) {
+    return
+  }
+  updatePendingImage(cropSourceFile.value)
+  resetCropDialog()
+}
+
+async function applyImageCrop() {
+  const file = cropSourceFile.value
+  const image = cropImageRef.value
+  if (!file || !image) {
+    return
+  }
+  cropApplying.value = true
+  try {
+    const naturalRect = previewRectToNaturalRect(
+      { ...cropSelection },
+      { width: image.clientWidth, height: image.clientHeight },
+      { width: image.naturalWidth, height: image.naturalHeight },
+    )
+    const croppedFile = await createCroppedImageFile(file, image, naturalRect)
+    updatePendingImage(croppedFile)
+    resetCropDialog()
+    ElMessage.success('已裁剪图片，将上传选中区域')
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(error instanceof Error ? error.message : '图片裁剪失败，请重试')
+    cropApplying.value = false
+  }
 }
 
 function messageAttachmentSrc(attachment?: ChatMessageAttachment | null): string {
@@ -839,6 +1060,7 @@ onBeforeUnmount(() => {
     modelStatusTimer = null
   }
   stopStreaming(false)
+  resetCropDialog()
   resetPendingImage()
   clearLocalAttachmentUrls()
 })
@@ -1155,6 +1377,56 @@ onMounted(async () => {
         </div>
       </section>
     </section>
+
+    <el-dialog
+      v-model="cropDialogVisible"
+      class="image-crop-dialog"
+      title="裁剪上传区域"
+      width="min(92vw, 760px)"
+      :close-on-click-modal="false"
+      @closed="resetCropDialog"
+    >
+      <div class="image-cropper">
+        <div
+          ref="cropStageRef"
+          class="image-cropper__stage"
+          :class="{ 'image-cropper__stage--dragging': cropDragging }"
+          @pointerdown="startCropDraw"
+          @pointermove="updateCropSelection"
+          @pointerup="endCropInteraction"
+          @pointercancel="endCropInteraction"
+        >
+          <img
+            v-if="cropSourceUrl"
+            ref="cropImageRef"
+            :src="cropSourceUrl"
+            alt="待裁剪图片"
+            draggable="false"
+            @load="initializeCropSelection"
+          />
+          <div
+            v-if="cropSourceUrl"
+            class="image-cropper__selection"
+            :style="cropSelectionStyle()"
+            @pointerdown="startCropMove"
+          >
+            <span class="image-cropper__handle" @pointerdown="startCropResize"></span>
+          </div>
+        </div>
+        <p class="panel-subcopy">
+          拖动图片重新框选题目区域；拖动选框可移动，拖动右下角可调整大小。
+        </p>
+      </div>
+      <template #footer>
+        <div class="row-actions">
+          <button class="ghost-button" :disabled="cropApplying" @click="resetCropDialog">取消</button>
+          <button class="ghost-button" :disabled="cropApplying" @click="useOriginalCropSource">上传原图</button>
+          <button class="primary-button" :disabled="cropApplying" @click="applyImageCrop">
+            {{ cropApplying ? '裁剪中...' : '使用裁剪区域' }}
+          </button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="passwordDialogVisible"
