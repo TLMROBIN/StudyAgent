@@ -55,6 +55,11 @@ def apply_runtime_schema_updates() -> None:
         if "llm_model_key" not in message_columns:
             statements.append("ALTER TABLE messages ADD COLUMN llm_model_key VARCHAR(64)")
 
+    if "notifications" in table_names:
+        notification_columns = {column["name"] for column in inspector.get_columns("notifications")}
+        if "archived_at" not in notification_columns:
+            statements.append("ALTER TABLE notifications ADD COLUMN archived_at DATETIME")
+
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))

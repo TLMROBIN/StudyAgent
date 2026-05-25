@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
@@ -11,11 +12,14 @@ from backend.dependencies import CurrentAdmin, DbSession
 from backend.grade_utils import format_grade_label
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import Conversation, Message
+from backend.models.notification import Notification
 from backend.models.schemas import (
     AuditLogRead,
     ClassroomOptionRead,
     ConversationArchiveMessageRead,
     ConversationArchiveRead,
+    NotificationRead,
+    NotificationWrite,
     PasswordResetRequest,
     UserCreate,
     UserImportIssue,
@@ -80,6 +84,100 @@ def _get_or_create_classroom(db: DbSession, grade: int | None, classroom_name: s
     db.commit()
     db.refresh(classroom)
     return classroom
+
+
+def _notification_or_404(db: DbSession, notification_id: int) -> Notification:
+    item = db.get(Notification, notification_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
+    return item
+
+
+@router.get("/notifications", response_model=list[NotificationRead])
+def list_notifications(db: DbSession, current_user: CurrentAdmin) -> list[NotificationRead]:
+    items = db.scalars(select(Notification).order_by(Notification.created_at.desc(), Notification.id.desc())).all()
+    return [NotificationRead.model_validate(item) for item in items]
+
+
+@router.post("/notifications", response_model=NotificationRead, status_code=status.HTTP_201_CREATED)
+def create_notification(
+    payload: NotificationWrite,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> NotificationRead:
+    item = Notification(
+        title=payload.title.strip(),
+        content=payload.content.strip(),
+        created_by=current_user.id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="create_notification",
+        target_type="notification",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"title": item.title},
+    )
+    return NotificationRead.model_validate(item)
+
+
+@router.put("/notifications/{notification_id}", response_model=NotificationRead)
+def update_notification(
+    notification_id: int,
+    payload: NotificationWrite,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> NotificationRead:
+    item = _notification_or_404(db, notification_id)
+    item.title = payload.title.strip()
+    item.content = payload.content.strip()
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="update_notification",
+        target_type="notification",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"title": item.title},
+    )
+    return NotificationRead.model_validate(item)
+
+
+@router.post("/notifications/{notification_id}/archive", response_model=NotificationRead)
+def archive_notification(
+    notification_id: int,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> NotificationRead:
+    item = _notification_or_404(db, notification_id)
+    if item.archived_at is None:
+        item.archived_at = datetime.now(UTC)
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="archive_notification",
+        target_type="notification",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"title": item.title},
+    )
+    return NotificationRead.model_validate(item)
 
 
 def _ensure_generated_username_available(db: DbSession, username: str, *, exclude_user_id: int | None = None) -> None:

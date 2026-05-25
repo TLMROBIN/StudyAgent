@@ -11,11 +11,13 @@ import {
   type ChatConversationRead,
   type ChatMessageAttachment,
   type ChatMessageRead,
+  fetchActiveNotifications,
   fetchChatModelStatuses,
   fetchChatModels,
   fetchQuestionRecommendations,
   streamChat,
   type KnowledgeAsset,
+  type NotificationItem,
   type QuestionRecommendation,
 } from '../utils/api'
 import { forceLoginRedirect } from '../utils/navigation'
@@ -80,6 +82,7 @@ const passwordForm = reactive({
 })
 const conversations = ref<ConversationSummary[]>([])
 const messages = ref<ChatMessageRead[]>([])
+const notifications = ref<NotificationItem[]>([])
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
 const passwordDialogVisible = ref(false)
@@ -140,6 +143,12 @@ const canSend = computed(() => (
 ))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
 const guidanceStageLabel = computed(() => stageLabel(guidanceStage.value))
+const notificationText = computed(() => {
+  if (!notifications.value.length) {
+    return '暂无通知'
+  }
+  return notifications.value.map((item) => `${item.title}：${item.content}`).join('   /   ')
+})
 const canRequestRecommendations = computed(() => {
   if (recommendationMode.value === 'keyword') {
     return recommendationKeyword.value.trim().length >= 2
@@ -163,6 +172,15 @@ function queueScrollToBottom() {
 async function loadConversations() {
   const { data } = await api.get<ConversationSummary[]>('/chat/history')
   conversations.value = data
+}
+
+async function loadNotifications() {
+  try {
+    notifications.value = await fetchActiveNotifications()
+  } catch (error) {
+    console.error(error)
+    notifications.value = []
+  }
 }
 
 async function loadChatModels() {
@@ -1066,6 +1084,7 @@ onBeforeUnmount(() => {
 })
 
 onMounted(async () => {
+  void loadNotifications()
   await loadChatModels()
   void refreshChatModelStatuses()
   modelStatusTimer = window.setInterval(() => {
@@ -1115,6 +1134,17 @@ onMounted(async () => {
     </aside>
 
     <section class="panel chat-panel">
+      <div class="student-notice-bar" aria-label="学校通知">
+        <span class="student-notice-bar__label">通知</span>
+        <span
+          :class="[
+            'student-notice-bar__track',
+            { 'student-notice-bar__track--empty': !notifications.length },
+          ]"
+        >
+          <span class="student-notice-bar__text">{{ notificationText }}</span>
+        </span>
+      </div>
       <div class="panel-header">
         <div>
           <p class="eyebrow">Socratic Chat</p>

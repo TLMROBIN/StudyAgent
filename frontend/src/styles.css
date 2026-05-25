@@ -312,10 +312,47 @@ textarea {
   min-width: 240px;
 }
 
+.input,
+.textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--ink);
+  outline: none;
+}
+
+.textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.input:focus,
+.textarea:focus {
+  border-color: rgba(15, 118, 110, 0.55);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
+}
+
+.notification-admin-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.notification-list {
+  min-height: 128px;
+}
+
+.notification-row {
+  align-items: flex-start;
 }
 
 .metric-tile {
@@ -479,7 +516,55 @@ textarea {
 
 .chat-panel {
   min-height: calc(100vh - 56px);
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto auto;
+}
+
+.student-notice-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.student-notice-bar__label {
+  flex: 0 0 auto;
+  color: var(--brand);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.student-notice-bar__track {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.student-notice-bar__text {
+  display: inline-block;
+  padding-left: 100%;
+  color: var(--ink);
+  line-height: 1.4;
+  animation: notice-marquee 18s linear infinite;
+}
+
+.student-notice-bar__track--empty .student-notice-bar__text {
+  padding-left: 0;
+  color: var(--muted);
+  animation: none;
+}
+
+@keyframes notice-marquee {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-100%);
+  }
 }
 
 .chat-stream {
@@ -665,6 +750,7 @@ textarea {
 
 .chat-controls,
 .login-form,
+.notification-form,
 .user-form-grid,
 .knowledge-meta-grid {
   display: grid;
@@ -1055,6 +1141,11 @@ textarea {
   font-size: 13px;
 }
 
+.detail-chip--muted {
+  background: rgba(71, 85, 105, 0.1);
+  color: var(--muted);
+}
+
 .panel-subcopy {
   margin: 0;
   color: var(--muted);
@@ -1377,6 +1468,7 @@ textarea {
   .app-root,
   .page-grid,
   .metric-grid,
+  .notification-admin-grid,
   .user-form-grid,
   .knowledge-meta-grid,
   .batch-edit-grid {

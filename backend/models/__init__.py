@@ -6,6 +6,7 @@ from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
 from backend.models.llm_provider import LLMProviderConfig
 from backend.models.llm_usage import LLMUsageEvent
+from backend.models.notification import Notification
 from backend.models.user import Classroom, User, UserRole, teacher_classes
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "LLMUsageEvent",
     "Message",
     "MessageRole",
+    "Notification",
     "QuotaBillingMode",
     "User",
     "UserRole",

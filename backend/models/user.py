@@ -65,6 +65,7 @@ class User(TimestampMixin, Base):
     created_llm_provider_configs: Mapped[list["LLMProviderConfig"]] = relationship(back_populates="creator")
     created_llm_provider_accounts: Mapped[list["LLMProviderAccount"]] = relationship(back_populates="creator")
     created_llm_model_configs: Mapped[list["LLMModelConfig"]] = relationship(back_populates="creator")
+    created_notifications: Mapped[list["Notification"]] = relationship(back_populates="creator")
 
     @property
     def is_graduated(self) -> bool:
@@ -97,3 +98,4 @@ if TYPE_CHECKING:
     from backend.models.llm_account import LLMProviderAccount
     from backend.models.llm_model import LLMModelConfig
     from backend.models.llm_provider import LLMProviderConfig
+    from backend.models.notification import Notification

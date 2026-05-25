@@ -418,6 +418,23 @@ class AgentConfigRead(BaseModel):
     created_at: datetime
 
 
+class NotificationWrite(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=500)
+
+
+class NotificationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    content: str
+    is_archived: bool
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None = None
+
+
 class LLMProviderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     base_url: str = Field(min_length=1, max_length=255)

@@ -3,7 +3,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import MetricTile from '../components/MetricTile.vue'
-import { api } from '../utils/api'
+import {
+  api,
+  archiveAdminNotification,
+  createAdminNotification,
+  fetchAdminNotifications,
+  type NotificationItem,
+  updateAdminNotification,
+} from '../utils/api'
 
 interface OverviewData {
   total_questions: number
@@ -55,8 +62,16 @@ const overview = ref<OverviewData>({
 })
 const classStats = ref<ClassroomStat[]>([])
 const portraits = ref<StudentPortrait[]>([])
+const notifications = ref<NotificationItem[]>([])
 const loading = ref(false)
 const trendLoading = ref(false)
+const notificationLoading = ref(false)
+const notificationSaving = ref(false)
+const editingNotificationId = ref<number | null>(null)
+const notificationForm = ref({
+  title: '',
+  content: '',
+})
 const trendGranularity = ref<'day' | 'week' | 'month'>('day')
 const selectedSubjects = ref<string[]>([])
 const today = new Date()
@@ -148,6 +163,80 @@ function formatTime(value?: string | null) {
   })
 }
 
+function resetNotificationForm() {
+  editingNotificationId.value = null
+  notificationForm.value = {
+    title: '',
+    content: '',
+  }
+}
+
+function editNotification(item: NotificationItem) {
+  editingNotificationId.value = item.id
+  notificationForm.value = {
+    title: item.title,
+    content: item.content,
+  }
+}
+
+async function loadNotifications() {
+  notificationLoading.value = true
+  try {
+    notifications.value = await fetchAdminNotifications()
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('通知加载失败')
+  } finally {
+    notificationLoading.value = false
+  }
+}
+
+async function submitNotification() {
+  const title = notificationForm.value.title.trim()
+  const content = notificationForm.value.content.trim()
+  if (!title || !content) {
+    ElMessage.info('请填写通知标题和内容')
+    return
+  }
+  notificationSaving.value = true
+  try {
+    if (editingNotificationId.value) {
+      await updateAdminNotification(editingNotificationId.value, { title, content })
+      ElMessage.success('通知已更新')
+    } else {
+      await createAdminNotification({ title, content })
+      ElMessage.success('通知已发布')
+    }
+    resetNotificationForm()
+    await loadNotifications()
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('通知保存失败')
+  } finally {
+    notificationSaving.value = false
+  }
+}
+
+async function archiveNotification(item: NotificationItem) {
+  if (item.is_archived) {
+    return
+  }
+  notificationSaving.value = true
+  try {
+    await archiveAdminNotification(item.id)
+    if (editingNotificationId.value === item.id) {
+      resetNotificationForm()
+    }
+    await loadNotifications()
+    ElMessage.success('通知已归档')
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('通知归档失败')
+  } finally {
+    notificationSaving.value = false
+  }
+}
+
 async function loadDashboard() {
   loading.value = true
   try {
@@ -213,6 +302,7 @@ watch([trendGranularity, selectedSubjects, trendDateRange], loadTrend, { deep: t
 onMounted(() => {
   void loadDashboard()
   void loadTrend()
+  void loadNotifications()
 })
 </script>
 
@@ -228,6 +318,66 @@ onMounted(() => {
         <button class="primary-button" @click="exportStats">导出统计</button>
       </div>
     </div>
+    <section class="panel notification-admin-panel">
+      <div class="panel-header panel-header--wrap">
+        <div>
+          <p class="eyebrow">School Notice</p>
+          <h2>通知管理</h2>
+        </div>
+        <button v-if="editingNotificationId" class="ghost-button" :disabled="notificationSaving" @click="resetNotificationForm">
+          取消编辑
+        </button>
+      </div>
+      <div class="notification-admin-grid">
+        <form class="notification-form" @submit.prevent="submitNotification">
+          <input
+            v-model="notificationForm.title"
+            class="input"
+            maxlength="80"
+            placeholder="通知标题"
+            :disabled="notificationSaving"
+          />
+          <textarea
+            v-model="notificationForm.content"
+            class="textarea"
+            maxlength="500"
+            rows="3"
+            placeholder="通知内容"
+            :disabled="notificationSaving"
+          ></textarea>
+          <div class="row-actions">
+            <button class="primary-button" :disabled="notificationSaving" type="submit">
+              {{ editingNotificationId ? '保存修改' : '发布通知' }}
+            </button>
+          </div>
+        </form>
+        <div v-loading="notificationLoading" class="table-like notification-list">
+          <article v-for="item in notifications" :key="item.id" class="table-row table-row-wrap notification-row">
+            <div class="table-main table-main--grow">
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.content }}</span>
+            </div>
+            <div class="detail-chip-group">
+              <span :class="['detail-chip', { 'detail-chip--muted': item.is_archived }]">
+                {{ item.is_archived ? '已归档' : '显示中' }}
+              </span>
+              <span class="detail-chip">发布 {{ formatTime(item.created_at) }}</span>
+            </div>
+            <div class="row-actions">
+              <button class="ghost-button" :disabled="notificationSaving" @click="editNotification(item)">编辑</button>
+              <button
+                class="ghost-button ghost-button--danger"
+                :disabled="notificationSaving || item.is_archived"
+                @click="archiveNotification(item)"
+              >
+                归档
+              </button>
+            </div>
+          </article>
+          <p v-if="!notifications.length" class="panel-subcopy">暂无通知。</p>
+        </div>
+      </div>
+    </section>
     <div class="metric-grid">
       <MetricTile label="累计提问" :value="overview.total_questions" hint="学生所有会话累计" />
       <MetricTile label="已解决率" :value="`${(overview.resolved_rate * 100).toFixed(1)}%`" hint="学生主动标记完成" />

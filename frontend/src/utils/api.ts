@@ -203,6 +203,21 @@ export interface QuestionRecommendation {
   explanation_text?: string | null
 }
 
+export interface NotificationItem {
+  id: number
+  title: string
+  content: string
+  is_archived: boolean
+  created_at: string
+  updated_at: string
+  archived_at?: string | null
+}
+
+export interface NotificationPayload {
+  title: string
+  content: string
+}
+
 const rawBase = import.meta.env.VITE_API_BASE_URL || '/api'
 export const apiBase = rawBase.endsWith('/') ? rawBase.slice(0, -1) : rawBase
 
@@ -302,6 +317,31 @@ export async function fetchChatModels(): Promise<ChatModelOption[]> {
 
 export async function fetchChatModelStatuses(): Promise<ChatModelStatus[]> {
   const { data } = await api.get<ChatModelStatus[]>('/chat/models/status')
+  return data
+}
+
+export async function fetchActiveNotifications(): Promise<NotificationItem[]> {
+  const { data } = await api.get<NotificationItem[]>('/notifications/active')
+  return data
+}
+
+export async function fetchAdminNotifications(): Promise<NotificationItem[]> {
+  const { data } = await api.get<NotificationItem[]>('/admin/notifications')
+  return data
+}
+
+export async function createAdminNotification(payload: NotificationPayload): Promise<NotificationItem> {
+  const { data } = await api.post<NotificationItem>('/admin/notifications', payload)
+  return data
+}
+
+export async function updateAdminNotification(id: number, payload: NotificationPayload): Promise<NotificationItem> {
+  const { data } = await api.put<NotificationItem>(`/admin/notifications/${id}`, payload)
+  return data
+}
+
+export async function archiveAdminNotification(id: number): Promise<NotificationItem> {
+  const { data } = await api.post<NotificationItem>(`/admin/notifications/${id}/archive`)
   return data
 }
 
