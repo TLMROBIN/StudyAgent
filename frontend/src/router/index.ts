@@ -3,15 +3,16 @@ import { createRouter, createWebHistory } from 'vue-router'
 import pinia from '../pinia'
 import { useAuthStore } from '../stores/auth'
 import { forceLoginRedirect } from '../utils/navigation'
-import AdminDashboard from '../views/AdminDashboard.vue'
-import AgentConfig from '../views/AgentConfig.vue'
-import AuditLogs from '../views/AuditLogs.vue'
-import ConversationArchive from '../views/ConversationArchive.vue'
-import KnowledgeManage from '../views/KnowledgeManage.vue'
-import Login from '../views/Login.vue'
-import ModelManage from '../views/ModelManage.vue'
-import StudentChat from '../views/StudentChat.vue'
-import UserManage from '../views/UserManage.vue'
+
+const AdminDashboard = () => import('../views/AdminDashboard.vue')
+const AgentConfig = () => import('../views/AgentConfig.vue')
+const AuditLogs = () => import('../views/AuditLogs.vue')
+const ConversationArchive = () => import('../views/ConversationArchive.vue')
+const KnowledgeManage = () => import('../views/KnowledgeManage.vue')
+const Login = () => import('../views/Login.vue')
+const ModelManage = () => import('../views/ModelManage.vue')
+const StudentChat = () => import('../views/StudentChat.vue')
+const UserManage = () => import('../views/UserManage.vue')
 
 const router = createRouter({
   history: createWebHistory(),
