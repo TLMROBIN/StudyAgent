@@ -378,8 +378,7 @@ textarea {
 }
 
 .conversation-list,
-.table-like,
-.subject-bars {
+.table-like {
   display: grid;
   gap: 12px;
 }
@@ -1097,23 +1096,46 @@ textarea {
   line-height: 1.8;
 }
 
-.subject-row {
-  display: grid;
-  grid-template-columns: 80px 1fr auto;
-  align-items: center;
-  gap: 12px;
+.subject-pie {
+  min-height: 300px;
 }
 
-.subject-bar-track {
-  height: 10px;
-  border-radius: 999px;
-  background: rgba(24, 33, 47, 0.08);
+.subject-pie-svg {
+  display: block;
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+  margin: 0 auto;
+  overflow: visible;
 }
 
-.subject-bar-fill {
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, var(--brand), var(--brand-2));
+.subject-pie-slice {
+  stroke: #fffaf2;
+  stroke-width: 3;
+}
+
+.subject-pie-core {
+  fill: #fffaf2;
+  stroke: rgba(24, 33, 47, 0.08);
+}
+
+.subject-pie-total {
+  fill: var(--ink);
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.subject-pie-total-label,
+.subject-pie-label text {
+  fill: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.subject-pie-label line {
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0.72;
 }
 
 .version-card {

@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import MetricTile from '../components/MetricTile.vue'
+import { buildSubjectPieModel } from '../utils/subjectPieChart'
 import {
   api,
   archiveAdminNotification,
@@ -87,6 +88,7 @@ const trend = ref<UsageTrend>({
   series: [],
 })
 const trendColors = ['#0f766e', '#db6b2c', '#2563eb', '#7c3aed', '#be123c', '#15803d', '#b45309', '#0891b2', '#4b5563']
+const subjectPieColors = ['#0f766e', '#db6b2c', '#2563eb', '#be123c', '#7c3aed', '#15803d', '#b45309', '#0891b2']
 const granularityOptions = [
   { label: '每日', value: 'day' },
   { label: '每周', value: 'week' },
@@ -145,6 +147,8 @@ const chartModel = computed(() => {
     }),
   }
 })
+
+const subjectPieModel = computed(() => buildSubjectPieModel(overview.value.by_subject, { colors: subjectPieColors }))
 
 function formatPercent(value: number) {
   return `${(value * 100).toFixed(1)}%`
@@ -390,14 +394,46 @@ onMounted(() => {
           <h2>学科分布</h2>
         </div>
       </div>
-      <div class="subject-bars">
-        <article v-for="item in overview.by_subject" :key="item.subject" class="subject-row">
-          <span>{{ item.subject }}</span>
-          <div class="subject-bar-track">
-            <div class="subject-bar-fill" :style="{ width: `${Math.max(item.count * 12, 8)}px` }"></div>
-          </div>
-          <strong>{{ item.count }}</strong>
-        </article>
+      <div class="subject-pie">
+        <svg
+          v-if="subjectPieModel.slices.length"
+          class="subject-pie-svg"
+          :viewBox="`0 0 ${subjectPieModel.width} ${subjectPieModel.height}`"
+          role="img"
+          aria-label="提问学科百分比饼图"
+        >
+          <g>
+            <path
+              v-for="slice in subjectPieModel.slices"
+              :key="slice.subject"
+              class="subject-pie-slice"
+              :d="slice.path"
+              :fill="slice.color"
+            >
+              <title>{{ slice.label }}</title>
+            </path>
+          </g>
+          <circle
+            class="subject-pie-core"
+            :cx="subjectPieModel.centerX"
+            :cy="subjectPieModel.centerY"
+            :r="subjectPieModel.radius * 0.48"
+          />
+          <text class="subject-pie-total" :x="subjectPieModel.centerX" :y="subjectPieModel.centerY - 4" text-anchor="middle">
+            {{ subjectPieModel.total }}
+          </text>
+          <text class="subject-pie-total-label" :x="subjectPieModel.centerX" :y="subjectPieModel.centerY + 18" text-anchor="middle">
+            次提问
+          </text>
+          <g v-for="slice in subjectPieModel.slices" :key="`${slice.subject}-label`" class="subject-pie-label">
+            <line :x1="slice.lineStartX" :y1="slice.lineStartY" :x2="slice.lineEndX" :y2="slice.lineEndY" :stroke="slice.color" />
+            <circle :cx="slice.lineStartX" :cy="slice.lineStartY" r="3" :fill="slice.color" />
+            <text :x="slice.labelX" :y="slice.labelY" :text-anchor="slice.textAnchor">
+              {{ slice.label }}
+            </text>
+          </g>
+        </svg>
+        <p v-else class="panel-subcopy">暂无学科分布数据。</p>
       </div>
     </section>
     <section class="panel">
