@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import httpx
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -202,7 +203,8 @@ def test_admin_can_create_provider_account_and_request_count_model():
             "provider_account_id": account_response.json()["id"],
             "provider_model": "MiniMax-M2.7-highspeed",
             "capability_text": True,
-            "capability_vision": False,
+            "capability_vision": True,
+            "vision_understanding_priority": True,
             "is_enabled": True,
             "is_primary": True,
             "is_fallback": False,
@@ -219,6 +221,8 @@ def test_admin_can_create_provider_account_and_request_count_model():
     assert model_response.status_code == 201
     body = model_response.json()
     assert body["model_key"] == "minimax-m27"
+    assert body["capability_vision"] is True
+    assert body["vision_understanding_priority"] is True
     assert body["quota_policy"]["billing_mode"] == "request_count"
     assert body["quota_policy"]["user_daily_request_limit"] == 20
 
@@ -440,6 +444,44 @@ def test_llm_service_tries_database_fallback_model_when_selected_model_fails(mon
     assert seen == [("minimax", "MiniMax-M2.7-highspeed"), ("qwen", "qwen-plus")]
 
 
+def test_llm_service_uses_selected_vision_model_for_image_understanding(monkeypatch):
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        account = LLMProviderAccount(
+            provider_name="vision",
+            display_name="Vision Provider",
+            base_url="https://vision.example/v1",
+            api_key="vision-secret",
+            account_billing_type=AccountBillingType.PAY_AS_YOU_GO,
+        )
+        session.add(account)
+        session.flush()
+        model = LLMModelConfig(
+            model_key="vision-model",
+            display_name="Vision Model",
+            provider_account_id=account.id,
+            provider_model="vision-upstream",
+            capability_vision=True,
+            vision_understanding_priority=True,
+            sort_order=10,
+        )
+        session.add(model)
+        session.commit()
+    finally:
+        session.close()
+
+    service = LLMService()
+    monkeypatch.setattr(service, "_session_factory", session_factory)
+
+    providers = service._image_completion_providers("vision-model")
+
+    assert service.prefers_vision_understanding("vision-model") is True
+    assert [(provider.name, provider.base_url, provider.model) for provider in providers] == [
+        ("vision", "https://vision.example/v1", "vision-upstream")
+    ]
+
+
 def test_llm_service_exposes_builtin_student_chat_models():
     service = LLMService()
 
@@ -449,36 +491,14 @@ def test_llm_service_exposes_builtin_student_chat_models():
         (item["key"], item["name"], item["description"]) for item in options
     ] == [
         ("minimax-m27", "MiniMax-M2.7", "highspeed"),
-        ("qwen2.5-vl", "qwen2.5-vl", "图片理解推荐使用，但响应速度可能较慢。"),
     ]
 
 
-def test_llm_service_can_stream_with_builtin_local_vl_model(monkeypatch):
+def test_llm_service_rejects_stopped_builtin_local_vl_model():
     service = LLMService()
-    seen: list[tuple[str, str, str, str]] = []
 
-    async def fake_stream(provider, messages) -> AsyncIterator[str]:
-        seen.append((provider.name, provider.base_url or "", provider.api_key or "", provider.model))
-        yield "本地模型响应"
-
-    monkeypatch.setattr(service, "_stream_openai_compatible", fake_stream)
-
-    async def collect_chunks() -> list[str]:
-        return [
-            chunk
-            async for chunk in service.stream_response(
-                [{"role": "user", "content": "看图题怎么入手"}],
-                "兜底",
-                model_key="qwen2.5-vl",
-            )
-        ]
-
-    chunks = asyncio.run(collect_chunks())
-
-    assert chunks == ["本地模型响应"]
-    assert seen == [
-        ("qwen2.5-vl", "http://10.50.159.63:8001/v1", "EMPTY", "qwen2.5-vl-72b-instruct")
-    ]
+    with pytest.raises(ValueError, match="Unsupported chat model"):
+        service.normalize_chat_model_key("qwen2.5-vl")
 
 
 def test_llm_service_logs_empty_stream_fallback(monkeypatch, caplog):
@@ -502,7 +522,7 @@ def test_llm_service_logs_empty_stream_fallback(monkeypatch, caplog):
     assert "MiniMax-M2.7-highspeed" in caplog.text
 
 
-def test_llm_service_uses_vision_provider_for_image_completion(monkeypatch):
+def test_llm_service_requires_configured_vision_model_for_image_completion(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "primary-secret"
     seen: list[str] = []
@@ -528,8 +548,8 @@ def test_llm_service_uses_vision_provider_for_image_completion(monkeypatch):
             subject="数学",
         )
 
-    assert asyncio.run(extract_text()) == "图片题干"
-    assert seen == ["qwen2.5-vl"]
+    assert asyncio.run(extract_text()) == ""
+    assert seen == []
 
 
 def test_llm_service_does_not_send_images_to_minimax_m2(monkeypatch):
@@ -550,16 +570,14 @@ def test_llm_service_does_not_send_images_to_minimax_m2(monkeypatch):
             subject="数学",
         )
 
-    assert asyncio.run(extract_text()) == "题干：已知函数图像经过点 A"
-    assert seen == ["qwen2.5-vl"]
+    assert asyncio.run(extract_text()) == ""
+    assert seen == []
 
 
 def test_llm_service_reports_chat_model_statuses(monkeypatch):
     service = LLMService()
 
     async def fake_probe(provider):
-        if provider.name == "qwen2.5-vl":
-            return False, "连接失败"
         return True, ""
 
     monkeypatch.setattr(service, "_probe_openai_compatible", fake_probe)
@@ -571,7 +589,6 @@ def test_llm_service_reports_chat_model_statuses(monkeypatch):
 
     assert [(item["key"], item["status"], item["message"]) for item in statuses] == [
         ("minimax-m27", "available", ""),
-        ("qwen2.5-vl", "unavailable", "连接失败"),
     ]
 
 
@@ -588,7 +605,7 @@ def test_llm_service_model_statuses_do_not_probe_by_default(monkeypatch):
 
     statuses = asyncio.run(collect_statuses())
 
-    assert [item["key"] for item in statuses] == ["minimax-m27", "qwen2.5-vl"]
+    assert [item["key"] for item in statuses] == ["minimax-m27"]
     assert {item["status"] for item in statuses} <= {"available", "unavailable"}
 
 

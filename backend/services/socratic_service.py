@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEHOLDER
-from backend.services.filter_service import filter_service
 
 
 @dataclass
@@ -73,10 +72,13 @@ class SocraticService:
                 "不要代写题目最终答案；如果问题其实是具体习题，转为引导式提问。"
             )
         if image_related:
-            system_sections.append(
-                "本轮依赖图片理解作答。你的每一轮回复都必须明确说明：你是 AI，可能会看错图片或理解得不完全准确，需要和学生一起讨论探索。"
-            )
-            system_sections.append("如果图片信息不充分或不可靠，必须直说看不准，并先引导学生补充更清晰图片或文字。")
+            if image_confidence == "low":
+                system_sections.append(
+                    "本轮图片理解置信度较低。回复时先说明图片看得不太清、理解可能有误，"
+                    "再说出你当前对图片的理解，并请学生纠正或补充。"
+                )
+            else:
+                system_sections.append("本轮依赖图片理解作答。如果图片信息不充分，必须直说看不准，并先引导学生补充更清晰图片或文字。")
         if student_grade is not None:
             system_sections.append(f"当前学生年级：{format_grade_label(student_grade) or f'{student_grade}年级'}")
         if image_summary:
@@ -138,22 +140,25 @@ class SocraticService:
         question_type = self.infer_question_type(question)
         return self.build_fallback_text(question, subject, stage, question_type, image_related=image_related)
 
-    def image_low_confidence_text(self, subject: str) -> str:
-        text = (
-            f"这张{subject}题目的图片我暂时没有看清关键条件。"
-            "你可以先试着重拍一张更清晰的图片，或者补充一句你最想问的地方。"
-            "等信息更完整后，我们再一起一步步梳理解题思路。"
+    def image_low_confidence_text(self, subject: str, image_summary: str | None = None) -> str:
+        summary = " ".join((image_summary or "").split())
+        if summary:
+            return (
+                "这张图片我看得不太清，理解可能有误。"
+                f"我目前的理解是：{summary}。"
+                "请你帮我纠正一下，或者补充更清晰的题干，我们再一起梳理下一步。"
+            )
+        return (
+            f"这张{subject}题目的图片关键条件识别失败。"
+            "请尝试重新上传一张更清晰、光线充足、题干完整的图片，或者直接把题干文字发给我。"
         )
-        return self._wrap_image_text(text, image_related=True)
 
     @staticmethod
     def placeholder_question(subject: str) -> str:
         return f"{subject}{IMAGE_ONLY_MESSAGE_PLACEHOLDER}"
 
     def _wrap_image_text(self, text: str, *, image_related: bool) -> str:
-        if not image_related:
-            return text
-        return filter_service.ensure_image_disclaimer(text)
+        return text
 
 
 socratic_service = SocraticService()

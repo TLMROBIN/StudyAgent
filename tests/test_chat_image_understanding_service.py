@@ -77,6 +77,105 @@ def test_understand_uses_paddleocr_backend_before_llm(monkeypatch, tmp_path):
     assert "匀强电场" in result.prompt_summary
 
 
+def test_hybrid_chat_image_understanding_skips_mineru(monkeypatch, tmp_path):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="hybrid")
+    service = ChatImageUnderstandingService(settings=settings)
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(_make_png_bytes())
+
+    async def fake_paddleocr(*, image_path: str):
+        return None
+
+    async def fake_mineru(**kwargs):
+        raise AssertionError("chat image understanding should not invoke MinerU")
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        return "已知函数 f(x)=x^2 的图像经过原点，求函数在不同区间上的单调性。"
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        raise AssertionError("high-confidence LLM OCR should not need summary fallback")
+
+    monkeypatch.setattr(service, "_try_paddleocr_ocr", fake_paddleocr)
+    monkeypatch.setattr(service, "_try_mineru_ocr", fake_mineru, raising=False)
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="数学",
+            user_text="",
+            image_path=str(image_path),
+        )
+    )
+
+    assert result.source == "ocr"
+    assert result.confidence_level == "high"
+
+
+def test_vision_priority_summarizes_image_before_ocr_supplement(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="hybrid")
+    service = ChatImageUnderstandingService(settings=settings)
+    calls: list[str] = []
+
+    monkeypatch.setattr(image_service_module.llm_service, "prefers_vision_understanding", lambda model_key: True)
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        calls.append("ocr")
+        return "A 点坐标 (1, 2)"
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        calls.append("summary")
+        assert kwargs["ocr_text"] == ""
+        return "图中有函数图像，并标出 A 点。"
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="数学",
+            user_text="",
+            model_key="vision-model",
+        )
+    )
+
+    assert calls == ["summary", "ocr"]
+    assert result.source == "multimodal"
+    assert "函数图像" in result.prompt_summary
+    assert "A 点坐标" in result.prompt_summary
+
+
+def test_low_confidence_partial_understanding_keeps_summary_for_user_correction(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="llm")
+    service = ChatImageUnderstandingService(settings=settings)
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        return "模糊"
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        return "像是电路图"
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="物理",
+            user_text="",
+        )
+    )
+
+    assert result.confidence_level == "low"
+    assert result.must_short_circuit is True
+    assert result.prompt_summary == "像是电路图"
+
+
 def test_paddleocr_backend_flattens_common_result_shapes(monkeypatch, tmp_path):
     settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
     service = ChatImageUnderstandingService(settings=settings)

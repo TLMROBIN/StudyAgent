@@ -38,28 +38,15 @@ DIRECT_ANSWER_PATTERNS = [
     ]
 ]
 
-IMAGE_DISCLAIMER_AI_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"\bAI\b",
-        r"人工智能",
-    ]
-]
 IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [
         r"可能不准确",
         r"不一定准确",
-        r"可能会看错",
+        r"看得不太清",
+        r"理解可能有误",
+        r"识别失败",
         r"可能理解得不完全准确",
-    ]
-]
-IMAGE_DISCLAIMER_COLLABORATION_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"一起讨论",
-        r"一起探索",
-        r"一起梳理",
     ]
 ]
 
@@ -79,7 +66,7 @@ class OutputValidation:
 
 class FilterService:
     refusal_text = "抱歉，我只能解答高中学科相关问题，请重新提问。"
-    image_uncertainty_text = "提醒一下：我是 AI，可能会看错图片或理解得不完全准确，我们一起讨论探索。"
+    image_uncertainty_text = "这张图片我看得不太清，理解可能有误。请你帮我核对一下。"
 
     def check_question(self, question: str, declared_subject: str | None = None) -> FilterDecision:
         normalized = question.strip()
@@ -111,12 +98,8 @@ class FilterService:
 
     def validate_image_answer(self, answer: str) -> OutputValidation:
         issues = list(self.validate_answer(answer).issues)
-        if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_AI_PATTERNS):
-            issues.append("missing_image_ai_disclaimer")
         if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS):
             issues.append("missing_image_uncertainty_disclaimer")
-        if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_COLLABORATION_PATTERNS):
-            issues.append("missing_image_collaboration_disclaimer")
         return OutputValidation(allowed=not issues, issues=issues)
 
     def ensure_image_disclaimer(self, answer: str) -> str:

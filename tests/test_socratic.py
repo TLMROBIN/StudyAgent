@@ -30,7 +30,7 @@ def test_build_prompt_adds_latex_instruction_for_stem_subjects():
     assert "$$...$$" in system_text
 
 
-def test_build_prompt_requires_image_turn_disclaimer():
+def test_build_prompt_does_not_force_disclaimer_for_high_confidence_image_turn():
     prompt = socratic_service.build_prompt(
         question="请看这张图",
         subject="物理",
@@ -43,9 +43,8 @@ def test_build_prompt_requires_image_turn_disclaimer():
     )
     system_text = prompt.messages[0]["content"]
 
-    assert "你是 AI" in system_text
-    assert "看错图片" in system_text
-    assert "一起讨论探索" in system_text
+    assert "每一轮回复都必须明确说明" not in system_text
+    assert "看错图片" not in system_text
 
 
 def test_build_prompt_requires_grounding_on_image_summary():
@@ -94,9 +93,17 @@ def test_exercise_question_stays_guided_even_with_answer_language():
     assert "基础知识解释模式" not in system_text
 
 
-def test_image_low_confidence_text_contains_required_disclaimer():
+def test_image_low_confidence_text_asks_user_to_correct_partial_understanding():
+    text = socratic_service.image_low_confidence_text("数学", image_summary="像是一道函数图像题。")
+
+    assert "看得不太清" in text
+    assert "理解可能有误" in text
+    assert "像是一道函数图像题" in text
+    assert "纠正" in text
+
+
+def test_image_extremely_low_confidence_text_reports_recognition_failure():
     text = socratic_service.image_low_confidence_text("数学")
 
-    assert "我是 AI" in text
-    assert "可能会看错图片" in text
-    assert "一起讨论探索" in text
+    assert "识别失败" in text
+    assert "重新上传" in text

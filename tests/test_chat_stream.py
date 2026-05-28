@@ -373,12 +373,14 @@ def test_student_can_list_chat_model_statuses(monkeypatch):
 def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
+    _create_request_count_model(session_factory, model_key="vision-model", limit=5)
     selected_models: list[str | None] = []
 
     async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
         selected_models.append(model_key)
         yield "先读图中条件。"
 
+    monkeypatch.setattr(chat_router.llm_service, "_session_factory", session_factory)
     monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
     monkeypatch.setattr(
         chat_router.rag_service,
@@ -391,7 +393,7 @@ def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
     try:
         response = asyncio.run(
             chat_router.stream_chat(
-                ChatRequest(subject="物理", message="这张图怎么分析", llm_model="qwen2.5-vl"),
+                ChatRequest(subject="物理", message="这张图怎么分析", llm_model="vision-model"),
                 session,
                 current_user,
                 FakeRequest(),
@@ -404,10 +406,10 @@ def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
     finally:
         session.close()
 
-    assert selected_models == ["qwen2.5-vl"]
+    assert selected_models == ["vision-model"]
     assert events[-1][1]["content"] == "先读图中条件。"
     assert assistant_message is not None
-    assert assistant_message.llm_model_key == "qwen2.5-vl"
+    assert assistant_message.llm_model_key == "vision-model"
 
 
 def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch):
@@ -491,7 +493,7 @@ def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
     assert "我识别到这张数学题图里主要有" in final_text
     assert "函数图像经过点 A" in final_text
     assert "先不要急着算结果" in final_text
-    assert "我是 AI" in final_text
+    assert "我是 AI" not in final_text
 
 
 def test_chat_stream_rewrites_unsafe_output_before_emitting(monkeypatch):
@@ -777,8 +779,8 @@ def test_chat_stream_supports_image_only_messages_and_persists_attachment(monkey
     assert response.status_code == 200
     events = _parse_sse(response.text)
     assert [event for event, _ in events] == ["meta", "chunk", "done"]
-    assert "我是 AI" in events[-1][1]["content"]
-    assert "一起讨论探索" in events[-1][1]["content"]
+    assert "看错图片" not in events[-1][1]["content"]
+    assert "我是 AI" not in events[-1][1]["content"]
 
     session = session_factory()
     try:
@@ -793,7 +795,7 @@ def test_chat_stream_supports_image_only_messages_and_persists_attachment(monkey
         session.close()
 
 
-def test_chat_stream_records_mineru_ocr_status_for_image_turn(monkeypatch):
+def test_chat_stream_records_multimodal_status_for_image_turn(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
 
@@ -808,7 +810,7 @@ def test_chat_stream_records_mineru_ocr_status_for_image_turn(monkeypatch):
             prompt_summary="已知函数 f(x)=x^2，求单调区间",
             ocr_raw_text="已知函数 f(x)=x^2，求单调区间",
             confidence_level="high",
-            source="mineru_ocr",
+            source="multimodal",
             must_short_circuit=False,
         )
 
@@ -833,7 +835,7 @@ def test_chat_stream_records_mineru_ocr_status_for_image_turn(monkeypatch):
     try:
         attachment = session.scalar(select(ChatMessageAttachment))
         assert attachment is not None
-        assert attachment.ocr_status == "mineru_ocr"
+        assert attachment.ocr_status == "multimodal_fallback"
     finally:
         session.close()
 
@@ -953,8 +955,8 @@ def test_chat_stream_short_circuits_low_confidence_images(monkeypatch):
     assert response.status_code == 200
     events = _parse_sse(response.text)
     assert [event for event, _ in events] == ["meta", "done"]
-    assert "可能会看错图片" in events[-1][1]["content"]
-    assert "重拍" in events[-1][1]["content"]
+    assert "识别失败" in events[-1][1]["content"]
+    assert "重新上传" in events[-1][1]["content"]
     assert llm_called["value"] == 0
 
 

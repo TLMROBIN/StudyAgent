@@ -179,6 +179,7 @@ def create_model_config(
         provider_model=payload.provider_model.strip(),
         capability_text=payload.capability_text,
         capability_vision=payload.capability_vision,
+        vision_understanding_priority=payload.vision_understanding_priority,
         is_enabled=payload.is_enabled,
         is_primary=payload.is_primary,
         is_fallback=payload.is_fallback,
@@ -228,6 +229,7 @@ def update_model_config(
     old_detail = {
         "model_key": item.model_key,
         "enabled": item.is_enabled,
+        "vision_understanding_priority": item.vision_understanding_priority,
         "billing_mode": item.quota_policy.billing_mode.value if item.quota_policy else None,
     }
     item.model_key = payload.model_key
@@ -237,6 +239,7 @@ def update_model_config(
     item.provider_model = payload.provider_model.strip()
     item.capability_text = payload.capability_text
     item.capability_vision = payload.capability_vision
+    item.vision_understanding_priority = payload.vision_understanding_priority
     item.is_enabled = payload.is_enabled
     item.is_primary = payload.is_primary
     item.is_fallback = payload.is_fallback

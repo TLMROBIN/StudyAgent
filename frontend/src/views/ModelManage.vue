@@ -45,6 +45,8 @@ const modelForm = reactive({
   provider_rolling_5h_request_limit: null as number | null,
   provider_weekly_request_limit: null as number | null,
   count_cache_hit: false,
+  capability_vision: false,
+  vision_understanding_priority: false,
   is_primary: true,
   is_fallback: false,
   is_enabled: true,
@@ -86,6 +88,8 @@ function resetModelForm() {
   modelForm.provider_rolling_5h_request_limit = null
   modelForm.provider_weekly_request_limit = null
   modelForm.count_cache_hit = false
+  modelForm.capability_vision = false
+  modelForm.vision_understanding_priority = false
   modelForm.is_primary = true
   modelForm.is_fallback = false
   modelForm.is_enabled = true
@@ -105,6 +109,8 @@ async function editModel(item: LLMModelConfig) {
   modelForm.provider_rolling_5h_request_limit = item.quota_policy.provider_rolling_5h_request_limit
   modelForm.provider_weekly_request_limit = item.quota_policy.provider_weekly_request_limit
   modelForm.count_cache_hit = item.quota_policy.count_cache_hit
+  modelForm.capability_vision = item.capability_vision
+  modelForm.vision_understanding_priority = item.vision_understanding_priority
   modelForm.is_primary = item.is_primary
   modelForm.is_fallback = item.is_fallback
   modelForm.is_enabled = item.is_enabled
@@ -121,7 +127,8 @@ function buildModelPayload(): LLMModelConfigPayload {
     provider_account_id: modelForm.provider_account_id,
     provider_model: modelForm.provider_model,
     capability_text: true,
-    capability_vision: false,
+    capability_vision: modelForm.capability_vision,
+    vision_understanding_priority: modelForm.capability_vision && modelForm.vision_understanding_priority,
     is_enabled: modelForm.is_enabled,
     is_primary: modelForm.is_primary,
     is_fallback: modelForm.is_fallback,
@@ -246,6 +253,12 @@ onMounted(() => {
             <el-input-number v-model="modelForm.max_completion_tokens" :min="1" controls-position="right" />
           </template>
           <el-switch v-model="modelForm.count_cache_hit" active-text="缓存命中计入用户额度" />
+          <el-switch v-model="modelForm.capability_vision" active-text="支持图片理解" />
+          <el-switch
+            v-model="modelForm.vision_understanding_priority"
+            :disabled="!modelForm.capability_vision"
+            active-text="拍照答疑优先用视觉理解"
+          />
           <el-switch v-model="modelForm.is_primary" active-text="主模型" />
           <el-switch v-model="modelForm.is_fallback" active-text="备用模型" />
           <el-switch v-model="modelForm.is_enabled" active-text="启用" />
@@ -270,6 +283,8 @@ onMounted(() => {
             <div class="detail-chip-group">
               <span v-if="row.is_primary" class="detail-chip detail-chip--success">主模型</span>
               <span v-if="row.is_fallback" class="detail-chip">备用</span>
+              <span v-if="row.capability_vision" class="detail-chip">视觉</span>
+              <span v-if="row.vision_understanding_priority" class="detail-chip detail-chip--success">视觉优先</span>
               <span v-if="!row.is_enabled" class="detail-chip">停用</span>
             </div>
           </template>

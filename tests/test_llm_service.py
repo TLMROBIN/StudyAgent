@@ -194,3 +194,13 @@ def test_stream_events_emit_chunks_and_final_usage(monkeypatch):
     assert events[-1].usage.reasoning_tokens == 3
     assert captured_payloads[0]["stream_options"] == {"include_usage": True}
     assert captured_payloads[0]["max_completion_tokens"] == 256
+
+
+def test_builtin_chat_models_do_not_include_stopped_local_vl_model(monkeypatch):
+    service = LLMService()
+    monkeypatch.setattr(service, "_database_chat_model_options", lambda: [])
+
+    options = service.chat_model_options()
+
+    assert [item["key"] for item in options] == ["minimax-m27"]
+    assert all("qwen2.5-vl" not in item["key"] for item in options)

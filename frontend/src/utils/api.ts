@@ -140,6 +140,7 @@ export interface LLMModelConfigPayload {
   provider_model: string
   capability_text?: boolean
   capability_vision?: boolean
+  vision_understanding_priority?: boolean
   is_enabled?: boolean
   is_primary?: boolean
   is_fallback?: boolean
@@ -156,6 +157,7 @@ export interface LLMModelConfig {
   provider_model: string
   capability_text: boolean
   capability_vision: boolean
+  vision_understanding_priority: boolean
   is_enabled: boolean
   is_primary: boolean
   is_fallback: boolean

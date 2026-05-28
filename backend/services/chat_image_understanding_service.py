@@ -13,7 +13,6 @@ from typing import Any
 
 from backend.config import Settings, get_settings
 from backend.services.llm_service import llm_service
-from backend.services.mineru_service import MineruError, mineru_service
 
 logger = logging.getLogger(__name__)
 _WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -60,6 +59,24 @@ class ChatImageUnderstandingService:
         image_path: str | None = None,
         attachment_id: int | None = None,
     ) -> ImageUnderstandingResult:
+        llm_image_bytes: bytes | None = None
+        llm_mime_type: str | None = None
+        if llm_service.prefers_vision_understanding(model_key):
+            llm_image_bytes, llm_mime_type = self._prepare_llm_image_payload(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+            )
+            vision_result = await self._understand_vision_first(
+                image_bytes=llm_image_bytes,
+                mime_type=llm_mime_type,
+                subject=subject,
+                user_text=user_text,
+                model_key=model_key,
+                image_path=image_path,
+            )
+            if vision_result is not None:
+                return vision_result
+
         paddleocr_result = await self._try_paddleocr_ocr(image_path=image_path)
         if paddleocr_result is not None:
             return paddleocr_result
@@ -73,26 +90,11 @@ class ChatImageUnderstandingService:
                 must_short_circuit=True,
             )
 
-        mineru_result = await self._try_mineru_ocr(
-            image_path=image_path,
-            attachment_id=attachment_id,
-        )
-        if mineru_result is not None:
-            return mineru_result
-        if self._ocr_backend() == "mineru":
-            return ImageUnderstandingResult(
-                filter_text="",
-                prompt_summary="",
-                ocr_raw_text="",
-                confidence_level="low",
-                source="failed",
-                must_short_circuit=True,
+        if llm_image_bytes is None or llm_mime_type is None:
+            llm_image_bytes, llm_mime_type = self._prepare_llm_image_payload(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
             )
-
-        llm_image_bytes, llm_mime_type = self._prepare_llm_image_payload(
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-        )
         ocr_raw_text = await llm_service.extract_image_text(
             image_bytes=llm_image_bytes,
             mime_type=llm_mime_type,
@@ -144,6 +146,17 @@ class ChatImageUnderstandingService:
                 must_short_circuit=False,
             )
 
+        partial_summary = multimodal_summary or normalized_ocr
+        if partial_summary:
+            return ImageUnderstandingResult(
+                filter_text=normalized_ocr or partial_summary,
+                prompt_summary=partial_summary,
+                ocr_raw_text=ocr_raw_text,
+                confidence_level="low",
+                source="multimodal" if multimodal_summary else "ocr",
+                must_short_circuit=True,
+            )
+
         return ImageUnderstandingResult(
             filter_text="",
             prompt_summary="",
@@ -153,45 +166,97 @@ class ChatImageUnderstandingService:
             must_short_circuit=True,
         )
 
-    async def _try_mineru_ocr(
+    async def _understand_vision_first(
         self,
         *,
+        image_bytes: bytes,
+        mime_type: str,
+        subject: str,
+        user_text: str,
+        model_key: str | None,
         image_path: str | None,
-        attachment_id: int | None,
     ) -> ImageUnderstandingResult | None:
-        backend = self._ocr_backend()
-        if backend not in {"hybrid", "mineru"} or not image_path:
-            return None
-
-        task_id = -(abs(attachment_id or 1))
-        document_id = -(abs(attachment_id or 1))
-        try:
-            parsed = await asyncio.to_thread(
-                mineru_service.ocr_image_via_pdf,
-                image_path,
-                task_id=task_id,
-                document_id=document_id,
-                timeout_seconds=self.settings.chat_image_ocr_timeout_seconds,
+        multimodal_summary = self.normalize_text(
+            await llm_service.summarize_academic_image(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                subject=subject,
+                user_text=user_text,
+                ocr_text="",
+                model_key=model_key,
             )
-        except MineruError:
-            return None
-
-        normalized_text = self.normalize_text(parsed.text)
-        if len(normalized_text) < self.settings.chat_image_mineru_min_text_chars:
-            return None
-        confidence_level = self._assess_ocr_confidence(normalized_text)
-        if confidence_level == "high" or (
-            confidence_level == "medium" and self._looks_sufficient_for_direct_use(normalized_text)
-        ):
+        )
+        ocr_raw_text = await self._extract_ocr_supplement(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            subject=subject,
+            model_key=model_key,
+            image_path=image_path,
+        )
+        normalized_ocr = self.normalize_text(ocr_raw_text)
+        prompt_summary = self._combine_vision_summary_and_ocr(multimodal_summary, normalized_ocr)
+        multimodal_confidence = self._assess_multimodal_confidence(multimodal_summary)
+        if multimodal_confidence in {"high", "medium"}:
             return ImageUnderstandingResult(
-                filter_text=normalized_text,
-                prompt_summary=normalized_text,
-                ocr_raw_text=parsed.text,
-                confidence_level=confidence_level,
-                source="mineru_ocr",
+                filter_text=normalized_ocr or multimodal_summary,
+                prompt_summary=prompt_summary,
+                ocr_raw_text=ocr_raw_text,
+                confidence_level=multimodal_confidence,
+                source="multimodal",
                 must_short_circuit=False,
             )
+
+        ocr_confidence = self._assess_ocr_confidence(normalized_ocr)
+        if ocr_confidence == "high" or (
+            ocr_confidence == "medium" and self._looks_sufficient_for_direct_use(normalized_ocr)
+        ):
+            return ImageUnderstandingResult(
+                filter_text=normalized_ocr,
+                prompt_summary=prompt_summary or normalized_ocr,
+                ocr_raw_text=ocr_raw_text,
+                confidence_level=ocr_confidence,
+                source="ocr",
+                must_short_circuit=False,
+            )
+
+        if prompt_summary:
+            return ImageUnderstandingResult(
+                filter_text=normalized_ocr or prompt_summary,
+                prompt_summary=prompt_summary,
+                ocr_raw_text=ocr_raw_text,
+                confidence_level="low",
+                source="multimodal" if multimodal_summary else "ocr",
+                must_short_circuit=True,
+            )
         return None
+
+    async def _extract_ocr_supplement(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        subject: str,
+        model_key: str | None,
+        image_path: str | None,
+    ) -> str:
+        paddleocr_result = await self._try_paddleocr_ocr(image_path=image_path)
+        if paddleocr_result is not None:
+            return paddleocr_result.ocr_raw_text or paddleocr_result.prompt_summary
+        if self._ocr_backend() == "paddleocr":
+            return ""
+        return await llm_service.extract_image_text(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            subject=subject,
+            model_key=model_key,
+        )
+
+    def _combine_vision_summary_and_ocr(self, summary: str, ocr_text: str) -> str:
+        summary = self.normalize_text(summary)
+        ocr_text = self.normalize_text(ocr_text)
+        if summary and ocr_text and ocr_text not in summary:
+            return f"{summary} OCR补充：{ocr_text}"
+        return summary or ocr_text
 
     async def _try_paddleocr_ocr(self, *, image_path: str | None) -> ImageUnderstandingResult | None:
         backend = self._ocr_backend()
@@ -365,7 +430,7 @@ class ChatImageUnderstandingService:
 
     def _ocr_backend(self) -> str:
         backend = str(self.settings.chat_image_ocr_backend or "hybrid").strip().lower()
-        if backend not in {"hybrid", "paddleocr", "mineru", "llm"}:
+        if backend not in {"hybrid", "paddleocr", "llm"}:
             return "hybrid"
         return backend
 

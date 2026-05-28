@@ -28,6 +28,7 @@ class LLMModelConfig(TimestampMixin, Base):
     provider_model: Mapped[str] = mapped_column(String(128))
     capability_text: Mapped[bool] = mapped_column(Boolean, default=True)
     capability_vision: Mapped[bool] = mapped_column(Boolean, default=False)
+    vision_understanding_priority: Mapped[bool] = mapped_column(Boolean, default=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

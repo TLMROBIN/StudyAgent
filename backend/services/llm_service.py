@@ -145,7 +145,6 @@ class LLMStreamEvent:
 
 class LLMService:
     DEFAULT_CHAT_MODEL_KEY = "minimax-m27"
-    LOCAL_VL_CHAT_MODEL_KEY = "qwen2.5-vl"
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -165,12 +164,6 @@ class LLMService:
                 model=settings.llm_fallback_model,
             ),
         ]
-        self._local_vl_provider = ProviderState(
-            name=settings.llm_local_vl_name,
-            base_url=settings.llm_local_vl_base_url,
-            api_key=settings.llm_local_vl_api_key,
-            model=settings.llm_local_vl_model,
-        )
         self._model_status_cache: dict[str, tuple[datetime, dict[str, str]]] = {}
         self._model_status_ttl_seconds = 300
 
@@ -183,11 +176,6 @@ class LLMService:
                 "key": self.DEFAULT_CHAT_MODEL_KEY,
                 "name": "MiniMax-M2.7",
                 "description": "highspeed",
-            },
-            {
-                "key": self.LOCAL_VL_CHAT_MODEL_KEY,
-                "name": "qwen2.5-vl",
-                "description": "图片理解推荐使用，但响应速度可能较慢。",
             },
         ]
 
@@ -204,8 +192,6 @@ class LLMService:
 
     def _providers_for_chat_model(self, model_key: str | None) -> list[ProviderState]:
         selected_key = self.normalize_chat_model_key(model_key)
-        if selected_key == self.LOCAL_VL_CHAT_MODEL_KEY:
-            return [self._local_vl_provider]
         configured = self._database_providers_for_model(selected_key)
         if configured:
             return configured
@@ -396,6 +382,66 @@ class LLMService:
                         )
                     )
                 return providers
+            finally:
+                session.close()
+        except Exception:
+            return []
+
+    def prefers_vision_understanding(self, model_key: str | None) -> bool:
+        if not model_key:
+            return False
+        try:
+            from sqlalchemy import select
+
+            from backend.models.llm_model import LLMModelConfig
+
+            session = self._session_factory()
+            try:
+                selected = session.scalar(
+                    select(LLMModelConfig).where(
+                        LLMModelConfig.model_key == model_key,
+                        LLMModelConfig.is_enabled.is_(True),
+                        LLMModelConfig.capability_vision.is_(True),
+                        LLMModelConfig.vision_understanding_priority.is_(True),
+                    )
+                )
+                return selected is not None
+            finally:
+                session.close()
+        except Exception:
+            return False
+
+    def _database_image_provider_for_model(self, model_key: str | None) -> list[ProviderState]:
+        if not model_key:
+            return []
+        try:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+
+            from backend.models.llm_model import LLMModelConfig
+
+            session = self._session_factory()
+            try:
+                selected = session.scalar(
+                    select(LLMModelConfig)
+                    .options(selectinload(LLMModelConfig.provider_account))
+                    .where(
+                        LLMModelConfig.model_key == model_key,
+                        LLMModelConfig.is_enabled.is_(True),
+                        LLMModelConfig.capability_vision.is_(True),
+                    )
+                )
+                if not selected or not selected.provider_account or not selected.provider_account.is_enabled:
+                    return []
+                account = selected.provider_account
+                return [
+                    ProviderState(
+                        name=account.provider_name,
+                        base_url=account.base_url,
+                        api_key=account.api_key,
+                        model=selected.provider_model,
+                    )
+                ]
             finally:
                 session.close()
         except Exception:
@@ -674,10 +720,7 @@ class LLMService:
         return ""
 
     def _image_completion_providers(self, model_key: str | None) -> list[ProviderState]:
-        providers: list[ProviderState] = []
-
-        self._append_unique_provider(providers, self._local_vl_provider)
-        return providers
+        return self._database_image_provider_for_model(model_key)
 
     @staticmethod
     def _append_unique_provider(providers: list[ProviderState], provider: ProviderState) -> None:

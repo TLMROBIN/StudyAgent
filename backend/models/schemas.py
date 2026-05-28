@@ -546,6 +546,7 @@ class LLMModelConfigCreate(BaseModel):
     provider_model: str = Field(min_length=1, max_length=128)
     capability_text: bool = True
     capability_vision: bool = False
+    vision_understanding_priority: bool = False
     is_enabled: bool = True
     is_primary: bool = False
     is_fallback: bool = False
@@ -568,6 +569,7 @@ class LLMModelConfigRead(BaseModel):
     provider_model: str
     capability_text: bool
     capability_vision: bool
+    vision_understanding_priority: bool
     is_enabled: bool
     is_primary: bool
     is_fallback: bool

@@ -385,8 +385,11 @@ def _build_prompt_question(*, payload_message: str, subject: str, understanding:
     return socratic_service.placeholder_question(subject)
 
 
-def _build_short_circuit_reply(subject: str) -> str:
-    return socratic_service.image_low_confidence_text(subject)
+def _build_short_circuit_reply(subject: str, understanding: ImageUnderstandingResult | None = None) -> str:
+    return socratic_service.image_low_confidence_text(
+        subject,
+        image_summary=understanding.prompt_summary if understanding else None,
+    )
 
 
 def _build_image_grounded_fallback(
@@ -714,7 +717,6 @@ async def stream_chat(
         )
         attachment_record.ocr_status = {
             "paddleocr": "paddleocr",
-            "mineru_ocr": "mineru_ocr",
             "ocr": "llm_ocr",
             "multimodal": "multimodal_fallback",
             "failed": "failed",
@@ -725,7 +727,7 @@ async def stream_chat(
 
     filter_question = _build_filter_question(payload_message=payload.message, understanding=image_understanding)
     if has_image_turn and image_understanding and image_understanding.must_short_circuit:
-        short_circuit_text = _build_short_circuit_reply(payload.subject)
+        short_circuit_text = _build_short_circuit_reply(payload.subject, image_understanding)
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if not existing_assistant:
             assistant_message = Message(
@@ -764,8 +766,6 @@ async def stream_chat(
     if not decision.allowed:
         filter_blocked_total.inc()
         refusal = filter_service.refusal_text
-        if has_image_turn:
-            refusal = filter_service.ensure_image_disclaimer(refusal)
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if not existing_assistant:
             assistant_message = Message(
@@ -846,7 +846,7 @@ async def stream_chat(
             llm_model=selected_model_key,
         )
         if cache_lookup.answer:
-            response_text = filter_service.ensure_image_disclaimer(cache_lookup.answer) if has_image_turn else cache_lookup.answer
+            response_text = cache_lookup.answer
             conversation.subject = subject
             conversation.guidance_stage = prompt.stage
             db.add(conversation)
@@ -1034,8 +1034,6 @@ async def stream_chat(
 
             if should_send_done and not emitted_text.strip():
                 emitted_text = fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
-            if has_image_turn:
-                emitted_text = filter_service.ensure_image_disclaimer(emitted_text)
             if should_send_done:
                 yield _sse_event("done", {"content": emitted_text})
         finally:

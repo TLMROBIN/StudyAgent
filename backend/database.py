@@ -55,6 +55,11 @@ def apply_runtime_schema_updates() -> None:
         if "llm_model_key" not in message_columns:
             statements.append("ALTER TABLE messages ADD COLUMN llm_model_key VARCHAR(64)")
 
+    if "llm_model_configs" in table_names:
+        model_columns = {column["name"] for column in inspector.get_columns("llm_model_configs")}
+        if "vision_understanding_priority" not in model_columns:
+            statements.append("ALTER TABLE llm_model_configs ADD COLUMN vision_understanding_priority BOOLEAN DEFAULT 0 NOT NULL")
+
     if "notifications" in table_names:
         notification_columns = {column["name"] for column in inspector.get_columns("notifications")}
         if "archived_at" not in notification_columns:
