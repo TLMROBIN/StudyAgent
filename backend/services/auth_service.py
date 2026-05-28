@@ -152,6 +152,8 @@ class AuthService:
     def update_password(self, db: Session, user: User, new_password: str) -> User:
         user.password_hash = get_password_hash(new_password)
         user.must_change_password = False
+        user.failed_login_count = 0
+        user.locked_until = None
         user.password_changed_at = datetime.now(UTC)
         db.add(user)
         db.commit()

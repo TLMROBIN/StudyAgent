@@ -1,6 +1,6 @@
 import asyncio
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -569,6 +569,44 @@ def test_reset_password_uses_generated_default(monkeypatch):
 
         assert result.username == "zhaolaoshi"
         assert teacher.password_hash == f"hash:{build_default_password('赵老师')}"
+    finally:
+        session.close()
+
+
+def test_reset_password_clears_failed_login_lock():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(
+            username="admin",
+            full_name="管理员",
+            role=UserRole.ADMIN,
+            password_hash="hash",
+        )
+        student = User(
+            username="zhoujundong14",
+            full_name="周俊栋",
+            role=UserRole.STUDENT,
+            password_hash="old-hash",
+            failed_login_count=6,
+            locked_until=datetime.now(UTC) + timedelta(minutes=15),
+        )
+        session.add_all([admin_user, student])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(student)
+
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        result = admin_router.reset_password(
+            admin_router.PasswordResetRequest(user_id=student.id),
+            session,
+            admin_user,
+            request,
+        )
+
+        assert result.username == "zhoujundong14"
+        assert student.failed_login_count == 0
+        assert student.locked_until is None
     finally:
         session.close()
 

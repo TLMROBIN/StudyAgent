@@ -10,6 +10,7 @@ from backend.services.account_service import (
 def test_transliterate_name_to_pinyin_handles_common_names():
     assert transliterate_name_to_pinyin("张三") == "zhangsan"
     assert transliterate_name_to_pinyin("欧阳娜娜") == "ouyangnana"
+    assert transliterate_name_to_pinyin("周俊栋") == "zhoujundong"
 
 
 def test_extract_classroom_number_supports_digits_and_chinese_numbers():

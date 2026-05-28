@@ -7,6 +7,7 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 httpx==0.28.1
 python-multipart==0.0.20
+pypinyin==0.55.0
 redis==6.4.0
 celery==5.5.3
 chromadb==1.0.20

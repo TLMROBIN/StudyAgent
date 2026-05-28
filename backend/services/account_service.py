@@ -6,6 +6,8 @@ import unicodedata
 from functools import lru_cache
 from pathlib import Path
 
+from pypinyin import Style, lazy_pinyin
+
 from backend.models.user import UserRole
 
 _DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "unihan_mandarin_map.json"
@@ -76,27 +78,60 @@ def transliterate_name_to_pinyin(full_name: str) -> str:
             remaining = remaining[len(surname) :]
             break
 
-    mapping = _mandarin_map()
+    pinyin_run: list[str] = []
+
+    def flush_pinyin_run() -> None:
+        if not pinyin_run:
+            return
+        parts.extend(_transliterate_chinese_run("".join(pinyin_run)))
+        pinyin_run.clear()
+
     for character in remaining:
         if character.isspace():
+            flush_pinyin_run()
             continue
         lowered = character.lower()
         if lowered.isascii() and lowered.isalnum():
+            flush_pinyin_run()
             parts.append(lowered)
             continue
         if character in _POLYPHONIC_OVERRIDES:
+            flush_pinyin_run()
             parts.append(_POLYPHONIC_OVERRIDES[character])
             continue
-        if character in mapping:
-            parts.append(_ascii_syllable(mapping[character]))
+        if _is_cjk(character):
+            pinyin_run.append(character)
             continue
+        flush_pinyin_run()
         ascii_chunks = _ASCII_PATTERN.findall(lowered)
         if ascii_chunks:
             parts.extend(ascii_chunks)
             continue
         if ord(character) > 127:
             parts.append(f"u{ord(character):x}")
+    flush_pinyin_run()
     return "".join(parts) or "user"
+
+
+def _is_cjk(character: str) -> bool:
+    return "\u4e00" <= character <= "\u9fff"
+
+
+def _transliterate_chinese_run(text: str) -> list[str]:
+    mapping = _mandarin_map()
+    syllables = lazy_pinyin(text, style=Style.NORMAL, strict=False, errors="default")
+    result: list[str] = []
+    for index, character in enumerate(text):
+        syllable = syllables[index] if index < len(syllables) else ""
+        ascii_syllable = _ascii_syllable(syllable)
+        if ascii_syllable and syllable != character:
+            result.append(ascii_syllable)
+            continue
+        if character in mapping:
+            result.append(_ascii_syllable(mapping[character]))
+            continue
+        result.append(f"u{ord(character):x}")
+    return result
 
 
 def build_generated_username(full_name: str, role: UserRole, classroom_name: str | None = None) -> str:
