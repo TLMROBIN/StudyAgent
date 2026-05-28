@@ -6,7 +6,11 @@ import unicodedata
 from functools import lru_cache
 from pathlib import Path
 
-from pypinyin import Style, lazy_pinyin
+try:
+    from pypinyin import Style, lazy_pinyin
+except ModuleNotFoundError:  # pragma: no cover - exercised by fallback behavior tests
+    Style = None
+    lazy_pinyin = None
 
 from backend.models.user import UserRole
 
@@ -119,7 +123,11 @@ def _is_cjk(character: str) -> bool:
 
 def _transliterate_chinese_run(text: str) -> list[str]:
     mapping = _mandarin_map()
-    syllables = lazy_pinyin(text, style=Style.NORMAL, strict=False, errors="default")
+    syllables = (
+        lazy_pinyin(text, style=Style.NORMAL, strict=False, errors="default")
+        if lazy_pinyin is not None and Style is not None
+        else []
+    )
     result: list[str] = []
     for index, character in enumerate(text):
         syllable = syllables[index] if index < len(syllables) else ""
