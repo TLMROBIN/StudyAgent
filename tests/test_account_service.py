@@ -19,6 +19,7 @@ def test_transliterate_chinese_run_falls_back_to_bundled_map(monkeypatch):
     monkeypatch.setattr("backend.services.account_service.Style", None)
 
     assert _transliterate_chinese_run("周俊栋") == ["zhou", "jun", "dong"]
+    assert _transliterate_chinese_run("刘家荣") == ["liu", "jia", "rong"]
 
 
 def test_extract_classroom_number_supports_digits_and_chinese_numbers():
