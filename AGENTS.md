@@ -27,6 +27,19 @@
 
 ---
 
+## 关键部署事实（容易误判）
+
+- **后端实际用 SQLite（不是 Postgres）**：compose 里 `studyagent-postgres-1` 容器存在且 healthy，但 backend 容器 env `DATABASE_URL=sqlite:////app/data/studyagent.db`。`SQLITE_PATH=data/studyagent.db`。
+  - 不要看到 `studyagent-postgres-1` 就按 PG 排查（连接上限、pg_stat_activity、lock 等）。SQLite 走单文件 + 文件锁。
+  - `backend/database.py` 是**唯一** `create_engine` 入口。
+  - SQLite + SQLAlchemy 仍会报 `QueuePool limit ... reached` 误报，因为 SQLAlchemy 看到 `pool_size>0` 就走 QueuePool 抽象层。
+- **项目目录在中文路径下**：`/home/binyu/文档/trae_projects/StudyAgent/`，不是 `~/Projects/StudyAgent/`。远程 `cd ~/Projects/StudyAgent` 必失败。
+- **容器代码挂载宿主机**（`./:/app`），代码改动 `docker compose restart backend` 即可，无需 rebuild。
+- **后端 compose 内端口**：8002 → 8000（不是宿主机 8001 直跑那个）。宿主机 8001 是 `uvicorn` 单独起的另一份（dev 用），与容器无关。
+- **admin 账户在 DB 里**：id=1 username=`admin`。DB 里**没有** `binyu` 账户，远程 web 登录别用 `binyu/4191` 试（那是 SSH 凭据，不是 web 凭据）。
+
+---
+
 ## 技术栈速查
 
 | 层次 | 技术 | 版本 |
