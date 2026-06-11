@@ -67,6 +67,28 @@ def _read_model(item: LLMModelConfig) -> LLMModelConfigRead:
     return LLMModelConfigRead.model_validate(item)
 
 
+def _ensure_single_flag(db, *, model_key: str, flag: str, exclude_id: int | None = None) -> None:
+    """Reset *flag* on every other model to False.
+
+    Why: the model table allows multiple `is_primary=True` / `is_fallback=True`
+    rows because the column is a plain boolean. The contract is "newest wins,
+    older ones auto-disabled", so we enforce it at the write boundary
+    (create / update / select endpoint).  Callers pass the *intended* model's
+    `model_key`; we look up its id, then flip the flag on every other row.
+    """
+    target = db.scalar(select(LLMModelConfig).where(LLMModelConfig.model_key == model_key))
+    if not target:
+        return
+    others = db.scalars(
+        select(LLMModelConfig).where(LLMModelConfig.id != target.id, getattr(LLMModelConfig, flag).is_(True))
+    ).all()
+    for other in others:
+        if exclude_id is not None and other.id == exclude_id:
+            continue
+        setattr(other, flag, False)
+        db.add(other)
+
+
 @router.get("/", response_model=list[LLMProviderRead])
 def list_llm_providers(db: DbSession, current_user: CurrentAdmin) -> list[LLMProviderRead]:
     items = db.scalars(select(LLMProviderConfig).order_by(LLMProviderConfig.id.asc())).all()
@@ -190,6 +212,11 @@ def create_model_config(
     _apply_policy(policy, payload.quota_policy)
     db.add(item)
     db.add(policy)
+    # Single-primary / single-fallback contract: latest setter wins.
+    if payload.is_primary:
+        _ensure_single_flag(db, model_key=payload.model_key, flag="is_primary")
+    if payload.is_fallback:
+        _ensure_single_flag(db, model_key=payload.model_key, flag="is_fallback")
     db.commit()
     db.refresh(item)
     audit_service.log(
@@ -248,6 +275,11 @@ def update_model_config(
     _apply_policy(policy, payload.quota_policy)
     db.add(item)
     db.add(policy)
+    # Single-primary / single-fallback contract: latest setter wins.
+    if payload.is_primary:
+        _ensure_single_flag(db, model_key=payload.model_key, flag="is_primary", exclude_id=item.id)
+    if payload.is_fallback:
+        _ensure_single_flag(db, model_key=payload.model_key, flag="is_fallback", exclude_id=item.id)
     db.commit()
     db.refresh(item)
     audit_service.log(
