@@ -11,10 +11,23 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
+
+# Pool sizing rationale (2026-06-11):
+#   * 远端后端曾出现 `QueuePool limit of size 5 overflow 10 reached` 雪崩，
+#     平板/前端的轮询一上来就把默认池打满，业务接口 30s 超时。
+#   * 这里是后端唯一一处 create_engine，调整后全栈受益。
+#   * SQLite 与 Postgres 同源代码：SQLite 不需要连接池（单文件 + 文件锁），
+#     显式给一个足够大的池即可避免误报；Postgres 会按真实 max_connections 限流。
+#   * pool_pre_ping=True：处理 DB 端 idle timeout（Postgres 场景下重要）。
+#   * pool_recycle=1800：定期回收，避免长连接被中间网络设备掐掉。
 engine = create_engine(
     settings.sqlalchemy_database_url,
     connect_args={"check_same_thread": False} if settings.sqlalchemy_database_url.startswith("sqlite") else {},
     future=True,
+    pool_size=20,
+    max_overflow=30,
+    pool_pre_ping=True,
+    pool_recycle=1800,
 )
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
 
