@@ -254,12 +254,7 @@ function chatModelQuotaLabel(model: ChatModelOption): string {
   return ''
 }
 
-function selectChatModel(modelKey: string) {
-  if (sending.value || isChatModelUnavailable(modelKey)) {
-    return
-  }
-  form.llmModel = modelKey
-}
+
 
 async function openConversation(id: number) {
   currentConversationId.value = id
@@ -1199,31 +1194,53 @@ onMounted(async () => {
         <el-select v-model="form.subject" :disabled="sending" placeholder="选择学科" @change="handleSubjectChange">
           <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
         </el-select>
-        <div class="chat-model-picker" role="radiogroup" aria-label="选择对话模型">
-          <button
+        <el-select
+          v-model="form.llmModel"
+          class="chat-model-select"
+          :disabled="sending"
+          placeholder="选择模型"
+          aria-label="选择对话模型"
+          popper-class="chat-model-select__popper"
+        >
+          <template #prefix>
+            <span class="chat-model-select__prefix">模型</span>
+          </template>
+          <template #label="{ value }">
+            <span class="chat-model-select__trigger">
+              <span class="chat-model-select__trigger-name">{{ chatModels.find((item) => item.key === value)?.name || value }}</span>
+              <span
+                :class="[
+                  'chat-model-select__trigger-status',
+                  `chat-model-select__trigger-status--${chatModelStatus(value).status}`,
+                ]"
+              >{{ chatModelStatusLabel(value) }}</span>
+            </span>
+          </template>
+          <el-option
             v-for="model in chatModels"
             :key="model.key"
-            type="button"
-            :class="[
-              'chat-model-option',
-              `chat-model-option--${chatModelStatus(model.key).status}`,
-              { 'chat-model-option--active': form.llmModel === model.key },
-            ]"
+            :value="model.key"
+            :label="model.name"
             :disabled="sending || isChatModelUnavailable(model.key)"
-            role="radio"
-            :aria-checked="form.llmModel === model.key"
-            @click="selectChatModel(model.key)"
+            class="chat-model-option"
           >
-            <span class="chat-model-option__head">
-              <span class="chat-model-option__name">{{ model.name }}</span>
-              <span class="chat-model-status">{{ chatModelStatusLabel(model.key) }}</span>
-            </span>
-            <span class="chat-model-option__description">{{ model.description }}</span>
-            <span v-if="chatModelQuotaLabel(model)" class="chat-model-option__quota">
-              {{ chatModelQuotaLabel(model) }}
-            </span>
-          </button>
-        </div>
+            <div
+              :class="[
+                'chat-model-option__row',
+                `chat-model-option--${chatModelStatus(model.key).status}`,
+              ]"
+            >
+              <div class="chat-model-option__head">
+                <span class="chat-model-option__name">{{ model.name }}</span>
+                <span class="chat-model-status">{{ chatModelStatusLabel(model.key) }}</span>
+              </div>
+              <div v-if="model.description" class="chat-model-option__description">{{ model.description }}</div>
+              <div v-if="chatModelQuotaLabel(model)" class="chat-model-option__quota">
+                {{ chatModelQuotaLabel(model) }}
+              </div>
+            </div>
+          </el-option>
+        </el-select>
         <el-input
           v-model="form.message"
           :disabled="sending"
