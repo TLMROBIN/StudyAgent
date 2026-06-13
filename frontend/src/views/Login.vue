@@ -46,6 +46,10 @@ async function submit() {
     loading.value = false
   }
 }
+
+function loginWithSso() {
+  window.location.href = `${import.meta.env.BASE_URL}api/auth/oidc/login`
+}
 </script>
 
 <template>
@@ -92,6 +96,9 @@ async function submit() {
       </el-form>
       <button class="primary-button login-submit" :disabled="loading" @click="submit">
         {{ loading ? '登录中...' : '进入系统' }}
+      </button>
+      <button class="secondary-button sso-login-submit" type="button" @click="loginWithSso">
+        使用统一平台登录
       </button>
     </div>
   </section>

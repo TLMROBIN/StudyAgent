@@ -1191,12 +1191,23 @@ textarea {
 }
 
 .login-mode-switch,
-.login-submit {
+.login-submit,
+.sso-login-submit {
   width: 100%;
 }
 
-.login-submit {
+.login-submit,
+.sso-login-submit {
   min-height: 48px;
+}
+
+.secondary-button {
+  border: 1px solid rgba(15, 118, 110, 0.24);
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.08);
+  color: var(--ink);
+  font-weight: 800;
+  cursor: pointer;
 }
 
 .login-note {
