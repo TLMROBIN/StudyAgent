@@ -5,8 +5,10 @@ import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8001'
+const publicBase = process.env.VITE_PUBLIC_BASE || '/'
 
 export default defineConfig({
+  base: publicBase,
   plugins: [
     vue(),
     AutoImport({

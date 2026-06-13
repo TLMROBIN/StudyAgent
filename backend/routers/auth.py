@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
+import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from backend.dependencies import CurrentUser, DbSession, oauth2_scheme
 from backend.models.schemas import (
@@ -16,6 +18,8 @@ from backend.models.schemas import (
 from backend.models.user import UserRole
 from backend.security import decode_token, verify_password
 from backend.services.auth_service import auth_service
+from backend.services.oidc_service import OidcAuthError, oidc_service
+from backend.config import get_settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -40,6 +44,64 @@ def staff_login(payload: StaffLoginRequest, request: Request, db: DbSession) -> 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     tokens = auth_service.issue_token_pair(user)
     return TokenResponse(**tokens)
+
+
+@router.get("/oidc/login")
+def oidc_login() -> RedirectResponse:
+    login_state = oidc_service.create_login_state()
+    response = RedirectResponse(login_state["authorization_url"], status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        "studyagent_oidc_state",
+        login_state["state"],
+        httponly=True,
+        samesite="lax",
+        max_age=600,
+        path="/",
+    )
+    response.set_cookie(
+        "studyagent_oidc_verifier",
+        login_state["code_verifier"],
+        httponly=True,
+        samesite="lax",
+        max_age=600,
+        path="/",
+    )
+    return response
+
+
+@router.get("/oidc/callback", response_class=HTMLResponse)
+def oidc_callback(code: str, state: str, request: Request, db: DbSession) -> Response:
+    expected_state = request.cookies.get("studyagent_oidc_state")
+    code_verifier = request.cookies.get("studyagent_oidc_verifier")
+    if not expected_state or not code_verifier or not secrets.compare_digest(expected_state, state):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OIDC state")
+    try:
+        claims = oidc_service.exchange_code_for_claims(code, code_verifier)
+        tokens = oidc_service.issue_local_tokens_for_claims(db, claims)
+    except OidcAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    web_base = get_settings().web_base_path.rstrip("/") + "/"
+    if tokens.get("must_change_password"):
+        target = f"{web_base}login"
+    else:
+        target = f"{web_base}{'student' if tokens.get('role') == 'student' else 'admin'}"
+    html = f"""<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>统一认证登录中</title></head>
+<body>
+<p>统一认证成功，正在进入 StudyAgent...</p>
+<script>
+localStorage.setItem("studyagent-access-token", {tokens["access_token"]!r});
+localStorage.setItem("studyagent-refresh-token", {tokens["refresh_token"]!r});
+location.replace({target!r});
+</script>
+</body>
+</html>"""
+    response = HTMLResponse(html)
+    response.delete_cookie("studyagent_oidc_state", path="/")
+    response.delete_cookie("studyagent_oidc_verifier", path="/")
+    return response
 
 
 @router.post("/refresh", response_model=TokenResponse)

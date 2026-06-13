@@ -220,7 +220,7 @@ export interface NotificationPayload {
   content: string
 }
 
-const rawBase = import.meta.env.VITE_API_BASE_URL || '/api'
+const rawBase = import.meta.env.VITE_API_BASE_URL || `${import.meta.env.BASE_URL}api`
 export const apiBase = rawBase.endsWith('/') ? rawBase.slice(0, -1) : rawBase
 
 export const api = axios.create({

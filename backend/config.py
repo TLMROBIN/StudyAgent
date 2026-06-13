@@ -16,12 +16,23 @@ class Settings(BaseSettings):
     app_name: str = Field(default="StudyAgent API", alias="APP_NAME")
     app_env: str = Field(default="development", alias="APP_ENV")
     api_prefix: str = Field(default="/api", alias="API_PREFIX")
+    web_base_path: str = Field(default="/", alias="WEB_BASE_PATH")
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")
 
     jwt_secret_key: str = Field(default="studyagent-dev-secret", alias="JWT_SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(default=30, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
+
+    oidc_enabled: bool = Field(default=False, alias="OIDC_ENABLED")
+    oidc_issuer: str = Field(default="http://10.50.159.62/auth/realms/school-platform", alias="OIDC_ISSUER")
+    oidc_client_id: str = Field(default="studyagent", alias="OIDC_CLIENT_ID")
+    oidc_client_secret: str | None = Field(default=None, alias="OIDC_CLIENT_SECRET")
+    oidc_redirect_uri: str = Field(
+        default="http://10.50.159.62/studyagent/api/auth/oidc/callback",
+        alias="OIDC_REDIRECT_URI",
+    )
+    oidc_scope: str = Field(default="openid profile email", alias="OIDC_SCOPE")
 
     bootstrap_admin_username: str = Field(default="admin", alias="BOOTSTRAP_ADMIN_USERNAME")
     bootstrap_admin_password: str = Field(default="StudyAgent123", alias="BOOTSTRAP_ADMIN_PASSWORD")
