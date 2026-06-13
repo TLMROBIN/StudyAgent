@@ -6,6 +6,8 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend ./
+ARG VITE_PUBLIC_BASE=/
+ENV VITE_PUBLIC_BASE=$VITE_PUBLIC_BASE
 RUN npm run build
 
 FROM nginx:1.27-alpine
