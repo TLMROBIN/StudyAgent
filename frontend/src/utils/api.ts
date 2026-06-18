@@ -220,6 +220,53 @@ export interface NotificationPayload {
   content: string
 }
 
+export interface StudentFeedbackItem {
+  id: number
+  content: string
+  reply_content?: string | null
+  replied_by_name?: string | null
+  replied_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface StudentFeedbackList {
+  items: StudentFeedbackItem[]
+  daily_limit: number
+  daily_remaining: number
+  feedback_banned: boolean
+}
+
+export interface AdminFeedbackItem extends StudentFeedbackItem {
+  student_id: number
+  student_name: string
+  student_username: string
+  student_grade?: number | null
+  grade_label?: string | null
+  classroom_name?: string | null
+  classroom_label?: string | null
+  student_feedback_banned: boolean
+}
+
+export interface FeedbackPayload {
+  content: string
+}
+
+export interface FeedbackReplyPayload {
+  reply_content: string
+}
+
+export interface FeedbackBanPayload {
+  reason?: string | null
+}
+
+export interface FeedbackBanResult {
+  student_id: number
+  is_banned: boolean
+  reason?: string | null
+  banned_at?: string | null
+}
+
 const rawBase = import.meta.env.VITE_API_BASE_URL || `${import.meta.env.BASE_URL}api`
 export const apiBase = rawBase.endsWith('/') ? rawBase.slice(0, -1) : rawBase
 
@@ -344,6 +391,36 @@ export async function updateAdminNotification(id: number, payload: NotificationP
 
 export async function archiveAdminNotification(id: number): Promise<NotificationItem> {
   const { data } = await api.post<NotificationItem>(`/admin/notifications/${id}/archive`)
+  return data
+}
+
+export async function fetchMyFeedback(): Promise<StudentFeedbackList> {
+  const { data } = await api.get<StudentFeedbackList>('/feedback')
+  return data
+}
+
+export async function createFeedback(payload: FeedbackPayload): Promise<StudentFeedbackItem> {
+  const { data } = await api.post<StudentFeedbackItem>('/feedback', payload)
+  return data
+}
+
+export async function fetchAdminFeedback(): Promise<AdminFeedbackItem[]> {
+  const { data } = await api.get<AdminFeedbackItem[]>('/admin/feedback')
+  return data
+}
+
+export async function replyAdminFeedback(id: number, payload: FeedbackReplyPayload): Promise<AdminFeedbackItem> {
+  const { data } = await api.put<AdminFeedbackItem>(`/admin/feedback/${id}/reply`, payload)
+  return data
+}
+
+export async function banStudentFeedback(studentId: number, payload: FeedbackBanPayload): Promise<FeedbackBanResult> {
+  const { data } = await api.post<FeedbackBanResult>(`/admin/feedback/students/${studentId}/ban`, payload)
+  return data
+}
+
+export async function unbanStudentFeedback(studentId: number): Promise<FeedbackBanResult> {
+  const { data } = await api.delete<FeedbackBanResult>(`/admin/feedback/students/${studentId}/ban`)
   return data
 }
 

@@ -12,12 +12,17 @@ from backend.dependencies import CurrentAdmin, DbSession
 from backend.grade_utils import format_grade_label
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import Conversation, Message
+from backend.models.feedback import StudentFeedback, StudentFeedbackBan
 from backend.models.notification import Notification
 from backend.models.schemas import (
+    AdminFeedbackRead,
     AuditLogRead,
     ClassroomOptionRead,
     ConversationArchiveMessageRead,
     ConversationArchiveRead,
+    FeedbackBanRead,
+    FeedbackBanWrite,
+    FeedbackReplyUpdate,
     NotificationRead,
     NotificationWrite,
     PasswordResetRequest,
@@ -91,6 +96,43 @@ def _notification_or_404(db: DbSession, notification_id: int) -> Notification:
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
     return item
+
+
+def _feedback_or_404(db: DbSession, feedback_id: int) -> StudentFeedback:
+    item = db.get(StudentFeedback, feedback_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback not found")
+    return item
+
+
+def _admin_feedback_read(item: StudentFeedback) -> AdminFeedbackRead:
+    student = item.student
+    return AdminFeedbackRead(
+        id=item.id,
+        student_id=item.student_id,
+        student_name=student.full_name if student else "",
+        student_username=student.username if student else "",
+        student_grade=student.grade if student else None,
+        grade_label=student.grade_label if student else None,
+        classroom_name=student.classroom_name if student else None,
+        classroom_label=student.classroom_label if student else None,
+        student_feedback_banned=student.feedback_ban is not None if student else False,
+        content=item.content,
+        reply_content=item.reply_content,
+        replied_by_name=item.replier.full_name if item.replier else None,
+        replied_at=item.replied_at,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _feedback_ban_read(student_id: int, ban: StudentFeedbackBan | None) -> FeedbackBanRead:
+    return FeedbackBanRead(
+        student_id=student_id,
+        is_banned=ban is not None,
+        reason=ban.reason if ban else None,
+        banned_at=ban.banned_at if ban else None,
+    )
 
 
 @router.get("/notifications", response_model=list[NotificationRead])
@@ -178,6 +220,115 @@ def archive_notification(
         detail={"title": item.title},
     )
     return NotificationRead.model_validate(item)
+
+
+@router.get("/feedback", response_model=list[AdminFeedbackRead])
+def list_feedback(db: DbSession, current_user: CurrentAdmin) -> list[AdminFeedbackRead]:
+    items = db.scalars(
+        select(StudentFeedback)
+        .options(
+            selectinload(StudentFeedback.student).selectinload(User.classroom),
+            selectinload(StudentFeedback.student).selectinload(User.feedback_ban),
+            selectinload(StudentFeedback.replier),
+        )
+        .order_by(StudentFeedback.created_at.desc(), StudentFeedback.id.desc())
+    ).all()
+    return [_admin_feedback_read(item) for item in items]
+
+
+@router.put("/feedback/{feedback_id}/reply", response_model=AdminFeedbackRead)
+def reply_feedback(
+    feedback_id: int,
+    payload: FeedbackReplyUpdate,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> AdminFeedbackRead:
+    item = _feedback_or_404(db, feedback_id)
+    item.reply_content = payload.reply_content.strip()
+    item.replied_by = current_user.id
+    item.replied_at = datetime.now(UTC)
+    db.add(item)
+    db.commit()
+    item = db.scalars(
+        select(StudentFeedback)
+        .options(
+            selectinload(StudentFeedback.student).selectinload(User.classroom),
+            selectinload(StudentFeedback.student).selectinload(User.feedback_ban),
+            selectinload(StudentFeedback.replier),
+        )
+        .where(StudentFeedback.id == feedback_id)
+    ).one()
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="reply_feedback",
+        target_type="student_feedback",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"student_id": item.student_id},
+    )
+    return _admin_feedback_read(item)
+
+
+@router.post("/feedback/students/{student_id}/ban", response_model=FeedbackBanRead)
+def ban_student_feedback(
+    student_id: int,
+    payload: FeedbackBanWrite,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> FeedbackBanRead:
+    student = db.get(User, student_id)
+    if not student or student.role != UserRole.STUDENT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    ban = db.scalar(select(StudentFeedbackBan).where(StudentFeedbackBan.student_id == student_id).limit(1))
+    if not ban:
+        ban = StudentFeedbackBan(student_id=student_id, banned_by=current_user.id, banned_at=datetime.now(UTC))
+    ban.reason = payload.reason.strip() if payload.reason else None
+    ban.banned_by = current_user.id
+    ban.banned_at = datetime.now(UTC)
+    db.add(ban)
+    db.commit()
+    db.refresh(ban)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="ban_feedback",
+        target_type="user",
+        target_id=str(student_id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"reason": ban.reason},
+    )
+    return _feedback_ban_read(student_id, ban)
+
+
+@router.delete("/feedback/students/{student_id}/ban", response_model=FeedbackBanRead)
+def unban_student_feedback(
+    student_id: int,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> FeedbackBanRead:
+    student = db.get(User, student_id)
+    if not student or student.role != UserRole.STUDENT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    ban = db.scalar(select(StudentFeedbackBan).where(StudentFeedbackBan.student_id == student_id).limit(1))
+    if ban:
+        db.delete(ban)
+        db.commit()
+        audit_service.log(
+            db,
+            actor=current_user,
+            action="unban_feedback",
+            target_type="user",
+            target_id=str(student_id),
+            result="success",
+            ip_address=request.client.host if request.client else None,
+        )
+    return _feedback_ban_read(student_id, None)
 
 
 def _ensure_generated_username_available(db: DbSession, username: str, *, exclude_user_id: int | None = None) -> None:

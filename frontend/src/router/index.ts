@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/auth'
 import { forceLoginRedirect } from '../utils/navigation'
 
 const AdminDashboard = () => import('../views/AdminDashboard.vue')
+const AdminFeedback = () => import('../views/AdminFeedback.vue')
 const AgentConfig = () => import('../views/AgentConfig.vue')
 const AuditLogs = () => import('../views/AuditLogs.vue')
 const ConversationArchive = () => import('../views/ConversationArchive.vue')
@@ -12,6 +13,7 @@ const KnowledgeManage = () => import('../views/KnowledgeManage.vue')
 const Login = () => import('../views/Login.vue')
 const ModelManage = () => import('../views/ModelManage.vue')
 const StudentChat = () => import('../views/StudentChat.vue')
+const StudentFeedback = () => import('../views/StudentFeedback.vue')
 const UserManage = () => import('../views/UserManage.vue')
 
 const router = createRouter({
@@ -20,8 +22,10 @@ const router = createRouter({
     { path: '/', redirect: '/student' },
     { path: '/login', component: Login, meta: { public: true } },
     { path: '/student', component: StudentChat, meta: { requiresAuth: true, roles: ['student'] } },
+    { path: '/student/feedback', component: StudentFeedback, meta: { requiresAuth: true, roles: ['student'] } },
     { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/knowledge', component: KnowledgeManage, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
+    { path: '/admin/feedback', component: AdminFeedback, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/conversations', component: ConversationArchive, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/audit', component: AuditLogs, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/agent', component: AgentConfig, meta: { requiresAuth: true, roles: ['admin'] } },

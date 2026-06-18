@@ -1,6 +1,7 @@
 from backend.models.agent_config import AgentConfig
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
+from backend.models.feedback import StudentFeedback, StudentFeedbackBan
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeChunk, KnowledgeDocument
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
@@ -17,6 +18,8 @@ __all__ = [
     "ChatMessageAttachment",
     "Conversation",
     "DocumentStatus",
+    "StudentFeedback",
+    "StudentFeedbackBan",
     "GuidanceStage",
     "ImportTask",
     "KnowledgeChunk",
