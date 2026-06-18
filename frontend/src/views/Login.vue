@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 
 import { useAuthStore } from '../stores/auth'
+import { fetchOidcLoginEnabled } from '../utils/oidc'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -12,6 +13,11 @@ const mode = ref<'student' | 'staff'>('student')
 const studentForm = reactive({ username: '', password: '' })
 const staffForm = reactive({ username: '', password: '' })
 const loading = ref(false)
+const oidcLoginEnabled = ref(false)
+
+onMounted(async () => {
+  oidcLoginEnabled.value = await fetchOidcLoginEnabled()
+})
 
 function resolveLoginError(error: unknown) {
   if (axios.isAxiosError(error)) {
@@ -97,7 +103,7 @@ function loginWithSso() {
       <button class="primary-button login-submit" :disabled="loading" @click="submit">
         {{ loading ? '登录中...' : '进入系统' }}
       </button>
-      <button class="secondary-button sso-login-submit" type="button" @click="loginWithSso">
+      <button v-if="oidcLoginEnabled" class="secondary-button sso-login-submit" type="button" @click="loginWithSso">
         使用统一平台登录
       </button>
     </div>
