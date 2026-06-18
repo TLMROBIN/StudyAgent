@@ -66,6 +66,17 @@ class User(TimestampMixin, Base):
     created_llm_provider_accounts: Mapped[list["LLMProviderAccount"]] = relationship(back_populates="creator")
     created_llm_model_configs: Mapped[list["LLMModelConfig"]] = relationship(back_populates="creator")
     created_notifications: Mapped[list["Notification"]] = relationship(back_populates="creator")
+    feedback_items: Mapped[list["StudentFeedback"]] = relationship(
+        back_populates="student",
+        foreign_keys="StudentFeedback.student_id",
+        cascade="all, delete-orphan",
+    )
+    feedback_ban: Mapped["StudentFeedbackBan | None"] = relationship(
+        back_populates="student",
+        foreign_keys="StudentFeedbackBan.student_id",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     @property
     def is_graduated(self) -> bool:
@@ -99,3 +110,4 @@ if TYPE_CHECKING:
     from backend.models.llm_model import LLMModelConfig
     from backend.models.llm_provider import LLMProviderConfig
     from backend.models.notification import Notification
+    from backend.models.feedback import StudentFeedback, StudentFeedbackBan

@@ -34,6 +34,7 @@ const navigationItems = computed<NavigationItem[]>(() => {
 
   if (auth.user?.role === 'student') {
     items.push({ to: '/student', label: '学生答疑', shortLabel: '答疑' })
+    items.push({ to: '/student/feedback', label: '意见反馈', shortLabel: '反馈' })
   }
 
   if (auth.user?.role !== 'student') {
@@ -45,6 +46,7 @@ const navigationItems = computed<NavigationItem[]>(() => {
 
   if (auth.user?.role === 'admin') {
     items.push(
+      { to: '/admin/feedback', label: '意见反馈', shortLabel: '反馈' },
       { to: '/admin/conversations', label: '会话归档', shortLabel: '归档' },
       { to: '/admin/audit', label: '审计日志', shortLabel: '审计' },
       { to: '/admin/agent', label: '智能体配置', shortLabel: '智能体' },

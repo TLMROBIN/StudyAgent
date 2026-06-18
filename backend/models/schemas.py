@@ -435,6 +435,53 @@ class NotificationRead(BaseModel):
     archived_at: datetime | None = None
 
 
+class FeedbackCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=1000)
+
+
+class FeedbackReplyUpdate(BaseModel):
+    reply_content: str = Field(min_length=1, max_length=1000)
+
+
+class FeedbackBanWrite(BaseModel):
+    reason: str | None = Field(default=None, max_length=255)
+
+
+class StudentFeedbackRead(BaseModel):
+    id: int
+    content: str
+    reply_content: str | None = None
+    replied_by_name: str | None = None
+    replied_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudentFeedbackListRead(BaseModel):
+    items: list[StudentFeedbackRead]
+    daily_limit: int
+    daily_remaining: int
+    feedback_banned: bool
+
+
+class AdminFeedbackRead(StudentFeedbackRead):
+    student_id: int
+    student_name: str
+    student_username: str
+    student_grade: int | None = None
+    grade_label: str | None = None
+    classroom_name: str | None = None
+    classroom_label: str | None = None
+    student_feedback_banned: bool = False
+
+
+class FeedbackBanRead(BaseModel):
+    student_id: int
+    is_banned: bool
+    reason: str | None = None
+    banned_at: datetime | None = None
+
+
 class LLMProviderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     base_url: str = Field(min_length=1, max_length=255)
