@@ -22,10 +22,16 @@ from backend.services.oidc_service import OidcAuthError, oidc_service
 from backend.config import get_settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+OIDC_DISABLED_MESSAGE = "统一平台登录暂未启用，请使用账号密码登录。"
 
 
 def _client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
+
+
+def _ensure_oidc_enabled() -> None:
+    if not get_settings().oidc_enabled:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=OIDC_DISABLED_MESSAGE)
 
 
 @router.post("/student/login", response_model=TokenResponse)
@@ -46,8 +52,17 @@ def staff_login(payload: StaffLoginRequest, request: Request, db: DbSession) -> 
     return TokenResponse(**tokens)
 
 
+@router.get("/oidc/config")
+def oidc_config() -> dict[str, bool | str]:
+    return {
+        "enabled": get_settings().oidc_enabled,
+        "message": "" if get_settings().oidc_enabled else OIDC_DISABLED_MESSAGE,
+    }
+
+
 @router.get("/oidc/login")
 def oidc_login() -> RedirectResponse:
+    _ensure_oidc_enabled()
     login_state = oidc_service.create_login_state()
     response = RedirectResponse(login_state["authorization_url"], status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
@@ -71,6 +86,7 @@ def oidc_login() -> RedirectResponse:
 
 @router.get("/oidc/callback", response_class=HTMLResponse)
 def oidc_callback(code: str, state: str, request: Request, db: DbSession) -> Response:
+    _ensure_oidc_enabled()
     expected_state = request.cookies.get("studyagent_oidc_state")
     code_verifier = request.cookies.get("studyagent_oidc_verifier")
     if not expected_state or not code_verifier or not secrets.compare_digest(expected_state, state):
