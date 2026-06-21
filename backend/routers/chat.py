@@ -62,6 +62,8 @@ from backend.services.request_replay_service import request_replay_service
 from backend.services.physics_error_profile_service import physics_error_profile_service
 from backend.services.physics_guidance_service import physics_guidance_service
 from backend.services.socratic_service import socratic_service
+from backend.services.subject_guidance_service import subject_guidance_service
+from backend.services.subject_profile_service import subject_profile_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 STREAM_HEARTBEAT_SECONDS = 15
@@ -441,6 +443,75 @@ def _build_physics_practice_response(
     return content, assets, 0
 
 
+def _math_practice_from_row(row: Any) -> tuple[str, list[dict[str, Any]]]:
+    metadata = row.metadata_json or {}
+    assets = _normalize_practice_assets(metadata.get("asset_refs"))
+    question_text = str(metadata.get("question_text") or row.content or "").strip()
+    question_text = _ensure_practice_image_markers(question_text, assets)
+    number = str(metadata.get("question_number") or "").strip()
+    title = f"**数学巩固练习：第{number}题**" if number else "**数学巩固练习**"
+    content = (
+        f"{title}\n\n"
+        f"{question_text}\n\n"
+        "先别急着要答案。请你先完成两步：\n"
+        "1. 圈出已知量、未知量和目标关系。\n"
+        "2. 判断这题应该用定义、公式、图形关系，还是设元列方程。"
+    )
+    return content, assets
+
+
+def _generated_math_practice(question: str, *, profile_summary: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
+    top_error_type = (profile_summary or {}).get("top_error_type")
+    top_error_label = (profile_summary or {}).get("top_error_label")
+    prefix = f"针对你的高频错因：{top_error_label}\n\n" if top_error_label else ""
+    if top_error_type == "word_problem_modeling" or any(keyword in question for keyword in ("应用题", "数量关系", "设", "列方程", "行程")):
+        stem = "甲、乙两人同时从相距 $600\\,\\text{m}$ 的两地相向而行。甲每分钟走 $70\\,\\text{m}$，乙每分钟走 $50\\,\\text{m}$，几分钟后两人相遇？"
+        guide = "请按“识别量→说关系→转方程”来做：先圈出速度、时间、路程，再用一句话说出总路程和两人路程的关系。"
+    elif top_error_type == "calculation_error":
+        stem = "化简：$3(2x-1)-2(x+4)$。"
+        guide = "请先逐项展开，再合并同类项；特别检查负号和括号。"
+    elif top_error_type == "concept_confusion":
+        stem = "已知函数 $y=2x+1$。请判断当 $x$ 增大时，$y$ 如何变化。"
+        guide = "请先用一个具体数值例子建立直觉，再说出一次函数中系数 $2$ 的意义。"
+    else:
+        stem = "已知 $2x+3=11$，求 $x$。"
+        guide = "请先说出目标是把哪个量单独留下，再说明第一步为什么要两边同时减去 $3$。"
+    content = (
+        "**数学巩固练习（系统生成）**\n\n"
+        f"{prefix}"
+        f"{stem}\n\n"
+        f"{guide}\n"
+        "最后一步计算请你自己完成，我可以继续帮你检查思路。"
+    )
+    return content, []
+
+
+def _build_math_practice_response(
+    db: DbSession,
+    *,
+    subject: str,
+    question: str,
+    student_id: int,
+    student_grade: int | None,
+) -> tuple[str, list[dict[str, Any]], int]:
+    profile_summary = subject_profile_service.profile_summary(db, student_id=student_id, subject=subject)
+    rows = rag_service.recommend_questions(
+        db,
+        subject,
+        question,
+        student_grade=student_grade,
+        limit=1,
+        difficulty_preference="basic",
+    )
+    if rows:
+        content, assets = _math_practice_from_row(rows[0])
+        if profile_summary.get("top_error_label"):
+            content = f"针对你的高频错因：{profile_summary['top_error_label']}\n\n{content}"
+        return content, assets, 1
+    content, assets = _generated_math_practice(question, profile_summary=profile_summary)
+    return content, assets, 0
+
+
 def _physics_error_record_evidence(prompt_question: str, history_pairs: list[tuple[str, str]]) -> str:
     current = prompt_question.strip()
     if "：" in current:
@@ -465,6 +536,70 @@ def _physics_error_record_response(error_type: str, knowledge_point: str | None,
         f"已记录到物理错因档案：{label}{point_text}。\n\n"
         f"这类错因目前累计 {count} 次。后面你说“再来一题”时，我会优先围绕这个弱点出巩固题。"
     )
+
+
+def _subject_error_record_response(subject: str, error_type: str, knowledge_point: str | None, profile_summary: dict[str, Any]) -> str:
+    label = profile_summary.get("top_error_label") or error_type
+    count = int(profile_summary.get("error_counts", {}).get(error_type, 0))
+    point_text = f"；关联知识点：{knowledge_point}" if knowledge_point else ""
+    return (
+        f"已记录到{subject}错因档案：{label}{point_text}。\n\n"
+        f"这类错因目前累计 {count} 次。后面你说“再来一题”时，我会优先围绕这个弱点出巩固题。"
+    )
+
+
+def _english_vocabulary_response(result: dict[str, Any]) -> str:
+    added = [str(word) for word in result.get("added", [])]
+    if added:
+        return (
+            f"已加入英语词汇 DNA：{', '.join(added)}。\n\n"
+            "下一次复习时，先说词义和词性，再用它自己造一个短句。"
+        )
+    return "这次没有识别到新的英文词汇。你可以直接发：把 photosynthesis 存入词汇DNA。"
+
+
+def _chinese_material_response(result: dict[str, Any]) -> str:
+    tags = [str(tag) for tag in result.get("tags", []) if str(tag).strip()]
+    tag_text = "、".join(tags) if tags else "待归类"
+    return (
+        f"已存入语文素材库，标签：{tag_text}。\n\n"
+        "写作时你可以说“帮我找关于某个主题的素材”，我会优先从素材库里帮你调取。"
+    )
+
+
+def _persist_direct_assistant_response(
+    db: DbSession,
+    *,
+    conversation: Conversation,
+    user_turn_index: int,
+    subject: str,
+    guidance_stage: GuidanceStage,
+    selected_model_key: str,
+    response_text: str,
+    assets: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    response_assets = list(assets or [])
+    conversation.subject = subject
+    conversation.guidance_stage = guidance_stage
+    db.add(conversation)
+    existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+    if existing_assistant:
+        db.commit()
+        return existing_assistant.content, list(existing_assistant.assets or [])
+
+    assistant_message = Message(
+        conversation_id=conversation.id,
+        role=MessageRole.ASSISTANT,
+        content=response_text,
+        assets=response_assets,
+        turn_index=user_turn_index,
+        guidance_stage=guidance_stage,
+        llm_model_key=selected_model_key,
+    )
+    db.add(assistant_message)
+    guidance_stage_total.labels(stage=guidance_stage.value).inc()
+    db.commit()
+    return response_text, response_assets
 
 
 def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -> Conversation:
@@ -980,6 +1115,166 @@ async def stream_chat(
         image_confidence=image_understanding.confidence_level if image_understanding else None,
         image_related=has_image_turn,
     )
+    if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
+        user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
+        event = subject_profile_service.record_error_event(
+            db,
+            student_id=current_user.id,
+            subject=subject,
+            conversation_id=conversation.id,
+            message_id=user_message.id if user_message else None,
+            evidence_text=_physics_error_record_evidence(prompt_question, history_pairs),
+        )
+        profile_summary = subject_profile_service.profile_summary(db, student_id=current_user.id, subject=subject)
+        response_text = _subject_error_record_response(subject, event.error_type, event.knowledge_point, profile_summary)
+        response_text, response_assets = _persist_direct_assistant_response(
+            db,
+            conversation=conversation,
+            user_turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=prompt.stage,
+            selected_model_key=selected_model_key,
+            response_text=response_text,
+        )
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=subject,
+                guidance_stage=prompt.stage,
+                final_content=response_text,
+                assets=response_assets,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=prompt.stage.value,
+                content=response_text,
+                request=request,
+                assets=response_assets,
+            ),
+            media_type="text/event-stream",
+        )
+    if subject == "数学" and subject_guidance_service.is_math_practice_request(prompt_question):
+        response_text, response_assets, practice_context_chunks = _build_math_practice_response(
+            db,
+            subject=subject,
+            question=retrieval_query,
+            student_id=current_user.id,
+            student_grade=current_user.grade,
+        )
+        response_text, response_assets = _persist_direct_assistant_response(
+            db,
+            conversation=conversation,
+            user_turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=prompt.stage,
+            selected_model_key=selected_model_key,
+            response_text=response_text,
+            assets=response_assets,
+        )
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=subject,
+                guidance_stage=prompt.stage,
+                final_content=response_text,
+                assets=response_assets,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=prompt.stage.value,
+                content=response_text,
+                request=request,
+                context_chunks=practice_context_chunks,
+                assets=response_assets,
+            ),
+            media_type="text/event-stream",
+        )
+    if subject == "英语" and subject_profile_service.is_vocabulary_request(prompt_question):
+        result = subject_profile_service.add_english_vocabulary(
+            db,
+            student_id=current_user.id,
+            source_text=prompt_question,
+        )
+        response_text = _english_vocabulary_response(result)
+        response_text, response_assets = _persist_direct_assistant_response(
+            db,
+            conversation=conversation,
+            user_turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=prompt.stage,
+            selected_model_key=selected_model_key,
+            response_text=response_text,
+        )
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=subject,
+                guidance_stage=prompt.stage,
+                final_content=response_text,
+                assets=response_assets,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=prompt.stage.value,
+                content=response_text,
+                request=request,
+                assets=response_assets,
+            ),
+            media_type="text/event-stream",
+        )
+    if subject == "语文" and subject_profile_service.is_chinese_material_request(prompt_question):
+        result = subject_profile_service.add_chinese_material(
+            db,
+            student_id=current_user.id,
+            source_text=prompt_question,
+        )
+        response_text = _chinese_material_response(result)
+        response_text, response_assets = _persist_direct_assistant_response(
+            db,
+            conversation=conversation,
+            user_turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=prompt.stage,
+            selected_model_key=selected_model_key,
+            response_text=response_text,
+        )
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=subject,
+                guidance_stage=prompt.stage,
+                final_content=response_text,
+                assets=response_assets,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=prompt.stage.value,
+                content=response_text,
+                request=request,
+                assets=response_assets,
+            ),
+            media_type="text/event-stream",
+        )
     if subject == "物理" and physics_error_profile_service.is_record_request(prompt_question):
         user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
         event = physics_error_profile_service.record_event(

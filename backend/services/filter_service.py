@@ -19,7 +19,7 @@ SUBJECT_KEYWORDS = {
 NON_SUBJECT_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in [
-        r"天气|股价|彩票|恋爱|表白|游戏攻略|写代码|帮我写作文",
+        r"天气|股价|彩票|恋爱|表白|游戏攻略|写代码",
         r"你是谁|讲个笑话|闲聊|角色扮演|扮演成|忽略之前|无视规则|系统提示词|开发者模式|管理员模式|DAN",
         r"prompt|system prompt|越过限制|绕过过滤|不要遵守|泄露提示词",
         r"知识库原文|检索片段|资料片段|向量库|RAG|完整输出资料",
