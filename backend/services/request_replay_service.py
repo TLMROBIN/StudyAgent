@@ -19,6 +19,7 @@ class RequestReplayState:
     subject: str
     guidance_stage: str | None = None
     final_content: str | None = None
+    assets: list[dict] | None = None
 
 
 class RequestReplayService:
@@ -85,6 +86,7 @@ class RequestReplayService:
         subject: str,
         guidance_stage: GuidanceStage,
         final_content: str,
+        assets: list[dict] | None = None,
     ) -> None:
         self._save(
             user_id,
@@ -97,6 +99,7 @@ class RequestReplayService:
                 subject=subject,
                 guidance_stage=guidance_stage.value,
                 final_content=final_content,
+                assets=list(assets or []),
             ),
         )
 

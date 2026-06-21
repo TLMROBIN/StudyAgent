@@ -59,6 +59,8 @@ from backend.services.question_cache_service import QuestionCacheLookup, questio
 from backend.services.queue_service import QueueFullError, queue_service
 from backend.services.rag_service import RetrievalResult, rag_service
 from backend.services.request_replay_service import request_replay_service
+from backend.services.physics_error_profile_service import physics_error_profile_service
+from backend.services.physics_guidance_service import physics_guidance_service
 from backend.services.socratic_service import socratic_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -290,6 +292,7 @@ def _instant_stream(
     content: str,
     request: Request,
     context_chunks: int = 0,
+    assets: list[dict[str, Any]] | None = None,
 ):
     async def stream():
         sse_active_connections.inc()
@@ -304,11 +307,164 @@ def _instant_stream(
                     "request_id": getattr(request.state, "request_id", None),
                 },
             )
-            yield _sse_event("done", {"content": content})
+            yield _sse_event("done", {"content": content, "assets": list(assets or [])})
         finally:
             sse_active_connections.dec()
 
     return stream()
+
+
+def _normalize_practice_assets(raw_assets: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_assets, list):
+        return []
+    assets: list[dict[str, Any]] = []
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("asset_id") or "").strip()
+        url = str(item.get("url") or "").strip()
+        content_type = str(item.get("content_type") or "").strip()
+        filename = str(item.get("filename") or asset_id or "asset").strip()
+        if not asset_id or not url or not content_type:
+            continue
+        assets.append(
+            {
+                "asset_id": asset_id,
+                "filename": filename,
+                "content_type": content_type,
+                "url": url,
+                "title": item.get("title"),
+                "description": item.get("description"),
+            }
+        )
+    return assets
+
+
+def _ensure_practice_image_markers(question_text: str, assets: list[dict[str, Any]]) -> str:
+    text = question_text.strip()
+    if not assets or "【附图" in text:
+        return text
+    markers = []
+    for index, asset in enumerate(assets, start=1):
+        if not str(asset.get("content_type") or "").startswith("image/"):
+            continue
+        title = str(asset.get("title") or asset.get("filename") or "题图").strip()
+        markers.append(f"【附图{index}：{title}】")
+    if not markers:
+        return text
+    return f"{text}\n\n{''.join(markers)}"
+
+
+def _physics_practice_from_row(row: Any) -> tuple[str, list[dict[str, Any]]]:
+    metadata = row.metadata_json or {}
+    assets = _normalize_practice_assets(metadata.get("asset_refs"))
+    question_text = str(metadata.get("question_text") or row.content or "").strip()
+    question_text = _ensure_practice_image_markers(question_text, assets)
+    number = str(metadata.get("question_number") or "").strip()
+    title = f"**巩固练习：第{number}题**" if number else "**巩固练习**"
+    content = (
+        f"{title}\n\n"
+        f"{question_text}\n\n"
+        "先别急着要答案。请你先完成两步：\n"
+        "1. 这道题应该先画哪类物理图景？\n"
+        "2. 你判断它属于哪个物理模型？"
+    )
+    return content, assets
+
+
+def _generated_physics_practice(question: str, *, profile_summary: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
+    top_error_type = (profile_summary or {}).get("top_error_type")
+    top_error_label = (profile_summary or {}).get("top_error_label")
+    prefix = f"针对你的高频错因：{top_error_label}\n\n" if top_error_label else ""
+    if top_error_type == "formula_misuse":
+        stem = (
+            "一个电热器标有 $220\\,\\text{V}$、$1100\\,\\text{W}$。现在把它接入实际电压为 $200\\,\\text{V}$ 的电路中。"
+        )
+        guide = "请先判断应该用额定功率还是实际功率公式，并写出公式适用条件；代入前检查单位。"
+    elif top_error_type == "math_tool":
+        stem = "一辆车以 $72\\,\\text{km/h}$ 的速度匀速行驶 $15\\,\\text{min}$，求通过的路程。"
+        guide = "请先完成单位换算，再列式；特别检查 $\\text{km/h}$ 到 $\\text{m/s}$、分钟到秒。"
+    elif top_error_type == "concept_confusion":
+        stem = "同样大小的压力分别作用在针尖和手掌大小的接触面上，产生的效果明显不同。"
+        guide = "请先用生活经验解释压力和压强的区别，再判断哪个物理量随受力面积改变。"
+    elif top_error_type == "process_analysis":
+        stem = "一个物块先沿光滑斜面下滑，随后进入粗糙水平面并逐渐停下。"
+        guide = "请先把过程分成两个阶段，分别画出每段的运动状态和受力情况。"
+    elif any(keyword in question for keyword in ("电路", "电流", "电压", "电阻")):
+        stem = (
+            "一个电路中有电源、开关、定值电阻 $R_1$ 和滑动变阻器 $R_2$ 串联，"
+            "电压表测 $R_2$ 两端电压。闭合开关后，滑片向右移动时，电压表示数发生变化。"
+        )
+        guide = "请先画等效电路图，并判断电流路径有几条。"
+    elif any(keyword in question for keyword in ("能量", "机械能", "动能", "势能")):
+        stem = "一个小球从光滑斜面顶端由静止释放，滑到底端后进入粗糙水平面并逐渐停下。"
+        guide = "请先画能量转化图，标出每一段能量从哪里来、到哪里去。"
+    else:
+        stem = (
+            "一个物块在水平桌面上受到水平向右的拉力 $F=5\\,\\text{N}$，"
+            "并做匀速直线运动。物块重力为 $20\\,\\text{N}$。"
+        )
+        guide = "请先画受力分析图，标出重力、支持力、拉力和摩擦力。"
+    content = (
+        "**巩固练习（系统生成）**\n\n"
+        f"{prefix}"
+        f"{stem}\n\n"
+        f"{guide}\n"
+        "先回答：这题属于什么物理模型？你会列出哪一个方向上的关系式？"
+    )
+    return content, []
+
+
+def _build_physics_practice_response(
+    db: DbSession,
+    *,
+    subject: str,
+    question: str,
+    student_id: int,
+    student_grade: int | None,
+) -> tuple[str, list[dict[str, Any]], int]:
+    profile_summary = physics_error_profile_service.profile_summary(db, student_id=student_id, subject=subject)
+    rows = rag_service.recommend_questions(
+        db,
+        subject,
+        question,
+        student_grade=student_grade,
+        limit=1,
+        difficulty_preference="basic",
+    )
+    if rows:
+        content, assets = _physics_practice_from_row(rows[0])
+        if profile_summary.get("top_error_label"):
+            content = f"针对你的高频错因：{profile_summary['top_error_label']}\n\n{content}"
+        return content, assets, 1
+    content, assets = _generated_physics_practice(question, profile_summary=profile_summary)
+    return content, assets, 0
+
+
+def _physics_error_record_evidence(prompt_question: str, history_pairs: list[tuple[str, str]]) -> str:
+    current = prompt_question.strip()
+    if "：" in current:
+        suffix = current.rsplit("：", 1)[-1].strip()
+        if suffix:
+            return suffix
+    if ":" in current:
+        suffix = current.rsplit(":", 1)[-1].strip()
+        if suffix:
+            return suffix
+    for role, content in reversed(history_pairs):
+        if role == MessageRole.USER.value and content.strip():
+            return content.strip()
+    return current
+
+
+def _physics_error_record_response(error_type: str, knowledge_point: str | None, profile_summary: dict[str, Any]) -> str:
+    label = profile_summary.get("top_error_label") or error_type
+    count = int(profile_summary.get("error_counts", {}).get(error_type, 0))
+    point_text = f"；关联知识点：{knowledge_point}" if knowledge_point else ""
+    return (
+        f"已记录到物理错因档案：{label}{point_text}。\n\n"
+        f"这类错因目前累计 {count} 次。后面你说“再来一题”时，我会优先围绕这个弱点出巩固题。"
+    )
 
 
 def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -> Conversation:
@@ -617,6 +773,7 @@ async def stream_chat(
                     guidance_stage=replay_state.guidance_stage or conversation.guidance_stage.value,
                     content=replay_state.final_content,
                     request=request,
+                    assets=list(replay_state.assets or []),
                 ),
                 media_type="text/event-stream",
             )
@@ -644,6 +801,7 @@ async def stream_chat(
                     subject=conversation.subject,
                     guidance_stage=existing_assistant.guidance_stage,
                     final_content=existing_assistant.content,
+                    assets=list(existing_assistant.assets or []),
                 )
             return StreamingResponse(
                 _instant_stream(
@@ -651,6 +809,7 @@ async def stream_chat(
                     guidance_stage=existing_assistant.guidance_stage.value,
                     content=existing_assistant.content,
                     request=request,
+                    assets=list(existing_assistant.assets or []),
                 ),
                 media_type="text/event-stream",
             )
@@ -821,6 +980,107 @@ async def stream_chat(
         image_confidence=image_understanding.confidence_level if image_understanding else None,
         image_related=has_image_turn,
     )
+    if subject == "物理" and physics_error_profile_service.is_record_request(prompt_question):
+        user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
+        event = physics_error_profile_service.record_event(
+            db,
+            student_id=current_user.id,
+            subject=subject,
+            conversation_id=conversation.id,
+            message_id=user_message.id if user_message else None,
+            evidence_text=_physics_error_record_evidence(prompt_question, history_pairs),
+        )
+        profile_summary = physics_error_profile_service.profile_summary(db, student_id=current_user.id, subject=subject)
+        response_text = _physics_error_record_response(event.error_type, event.knowledge_point, profile_summary)
+        conversation.subject = subject
+        conversation.guidance_stage = prompt.stage
+        db.add(conversation)
+        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+        if existing_assistant:
+            response_text = existing_assistant.content
+        else:
+            assistant_message = Message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT,
+                content=response_text,
+                turn_index=user_turn_index,
+                guidance_stage=prompt.stage,
+                llm_model_key=selected_model_key,
+            )
+            db.add(assistant_message)
+            guidance_stage_total.labels(stage=prompt.stage.value).inc()
+        db.commit()
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=subject,
+                guidance_stage=prompt.stage,
+                final_content=response_text,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=prompt.stage.value,
+                content=response_text,
+                request=request,
+            ),
+            media_type="text/event-stream",
+        )
+    if subject == "物理" and physics_guidance_service.is_practice_request(prompt_question):
+        response_text, response_assets, practice_context_chunks = _build_physics_practice_response(
+            db,
+            subject=subject,
+            question=retrieval_query,
+            student_id=current_user.id,
+            student_grade=current_user.grade,
+        )
+        conversation.subject = subject
+        conversation.guidance_stage = prompt.stage
+        db.add(conversation)
+        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+        if existing_assistant:
+            response_text = existing_assistant.content
+            response_assets = list(existing_assistant.assets or [])
+        else:
+            assistant_message = Message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT,
+                content=response_text,
+                assets=response_assets,
+                turn_index=user_turn_index,
+                guidance_stage=prompt.stage,
+                llm_model_key=selected_model_key,
+            )
+            db.add(assistant_message)
+            guidance_stage_total.labels(stage=prompt.stage.value).inc()
+        db.commit()
+        if payload.request_id:
+            request_replay_service.mark_completed(
+                user_id=current_user.id,
+                request_id=payload.request_id,
+                question_hash=request_fingerprint,
+                conversation_id=conversation.id,
+                turn_index=user_turn_index,
+                subject=subject,
+                guidance_stage=prompt.stage,
+                final_content=response_text,
+                assets=response_assets,
+            )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id,
+                guidance_stage=prompt.stage.value,
+                content=response_text,
+                request=request,
+                context_chunks=practice_context_chunks,
+                assets=response_assets,
+            ),
+            media_type="text/event-stream",
+        )
     fallback_text = _build_image_grounded_fallback(
         fallback_text=prompt.fallback_text,
         subject=subject,

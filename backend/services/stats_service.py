@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
 from backend.models.user import User, UserRole
+from backend.services.physics_error_profile_service import physics_error_profile_service
 
 
 class StatsService:
@@ -124,6 +125,7 @@ class StatsService:
                 4,
             ),
             "last_active_at": max((conversation.updated_at for conversation in conversations), default=None),
+            "physics_error_profile": physics_error_profile_service.profile_summary(db, student_id=student_id, subject="物理"),
         }
 
     def classroom_breakdown(self, db: Session, viewer: User) -> list[dict]:

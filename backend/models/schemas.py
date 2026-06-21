@@ -106,6 +106,15 @@ class ChatAttachmentRead(BaseModel):
     ocr_status: str | None = None
 
 
+class KnowledgeAssetRead(BaseModel):
+    asset_id: str
+    filename: str
+    content_type: str
+    url: str
+    title: str | None = None
+    description: str | None = None
+
+
 class MessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,6 +122,7 @@ class MessageRead(BaseModel):
     role: MessageRole
     content: str
     attachment: ChatAttachmentRead | None = None
+    assets: list[KnowledgeAssetRead] = Field(default_factory=list)
     turn_index: int
     guidance_stage: GuidanceStage
     llm_model_key: str | None = None
@@ -270,15 +280,6 @@ class KnowledgeDocumentBulkUpdate(BaseModel):
 class KnowledgeStructureOptionRead(BaseModel):
     chapter: str
     sections: list[str] = Field(default_factory=list)
-
-
-class KnowledgeAssetRead(BaseModel):
-    asset_id: str
-    filename: str
-    content_type: str
-    url: str
-    title: str | None = None
-    description: str | None = None
 
 
 class KnowledgeChunkRead(BaseModel):
@@ -709,6 +710,7 @@ class StudentProfile(BaseModel):
     focus_subject: str | None = None
     fallback_ratio: float = 0.0
     last_active_at: datetime | None = None
+    physics_error_profile: dict[str, Any] = Field(default_factory=dict)
 
 
 class UserImportIssue(BaseModel):

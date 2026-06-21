@@ -5,7 +5,7 @@ from enum import Enum
 import re
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text, event
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, JSON, String, Text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -99,6 +99,7 @@ class Message(TimestampMixin, Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
     role: Mapped[MessageRole] = mapped_column(SqlEnum(MessageRole), index=True)
     content: Mapped[str] = mapped_column(Text)
+    assets: Mapped[list[dict]] = mapped_column(JSON, default=list)
     turn_index: Mapped[int] = mapped_column(Integer, default=0)
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
     llm_model_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
