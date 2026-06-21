@@ -454,6 +454,7 @@ class StudentFeedbackRead(BaseModel):
     reply_content: str | None = None
     replied_by_name: str | None = None
     replied_at: datetime | None = None
+    student_unread: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -463,6 +464,7 @@ class StudentFeedbackListRead(BaseModel):
     daily_limit: int
     daily_remaining: int
     feedback_banned: bool
+    unread_reply_count: int = 0
 
 
 class AdminFeedbackRead(StudentFeedbackRead):
@@ -481,6 +483,34 @@ class FeedbackBanRead(BaseModel):
     is_banned: bool
     reason: str | None = None
     banned_at: datetime | None = None
+
+
+class FeedbackUnreadSummaryRead(BaseModel):
+    unread_feedback_replies: int = 0
+    unread_release_notes: int = 0
+    has_unread: bool = False
+
+
+class ReleaseNoteWrite(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=5000)
+    is_published: bool = True
+
+
+class ReleaseNoteRead(BaseModel):
+    id: int
+    title: str
+    content: str
+    is_published: bool
+    is_read: bool = False
+    published_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReleaseNoteListRead(BaseModel):
+    items: list[ReleaseNoteRead]
+    unread_count: int = 0
 
 
 class LLMProviderCreate(BaseModel):

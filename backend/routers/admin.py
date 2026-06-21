@@ -12,7 +12,7 @@ from backend.dependencies import CurrentAdmin, DbSession
 from backend.grade_utils import format_grade_label
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import Conversation, Message
-from backend.models.feedback import StudentFeedback, StudentFeedbackBan
+from backend.models.feedback import ReleaseNote, StudentFeedback, StudentFeedbackBan
 from backend.models.notification import Notification
 from backend.models.schemas import (
     AdminFeedbackRead,
@@ -26,6 +26,8 @@ from backend.models.schemas import (
     NotificationRead,
     NotificationWrite,
     PasswordResetRequest,
+    ReleaseNoteRead,
+    ReleaseNoteWrite,
     UserCreate,
     UserImportIssue,
     UserImportResult,
@@ -38,6 +40,7 @@ from backend.services.account_service import build_default_password, build_gener
 from backend.services.audit_service import audit_service
 from backend.services.auth_service import auth_service
 from backend.services.student_grade_service import student_grade_service
+from backend.routers.feedback import feedback_reply_is_unread
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 MANAGED_USER_ROLES = {UserRole.STUDENT, UserRole.TEACHER}
@@ -105,7 +108,14 @@ def _feedback_or_404(db: DbSession, feedback_id: int) -> StudentFeedback:
     return item
 
 
-def _admin_feedback_read(item: StudentFeedback) -> AdminFeedbackRead:
+def _release_note_or_404(db: DbSession, note_id: int) -> ReleaseNote:
+    item = db.get(ReleaseNote, note_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Release note not found")
+    return item
+
+
+def _admin_feedback_read(db: DbSession, item: StudentFeedback) -> AdminFeedbackRead:
     student = item.student
     return AdminFeedbackRead(
         id=item.id,
@@ -121,6 +131,20 @@ def _admin_feedback_read(item: StudentFeedback) -> AdminFeedbackRead:
         reply_content=item.reply_content,
         replied_by_name=item.replier.full_name if item.replier else None,
         replied_at=item.replied_at,
+        student_unread=feedback_reply_is_unread(db, item, item.student_id),
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _release_note_read(item: ReleaseNote) -> ReleaseNoteRead:
+    return ReleaseNoteRead(
+        id=item.id,
+        title=item.title,
+        content=item.content,
+        is_published=item.is_published,
+        is_read=True,
+        published_at=item.published_at,
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
@@ -222,6 +246,78 @@ def archive_notification(
     return NotificationRead.model_validate(item)
 
 
+@router.get("/release-notes", response_model=list[ReleaseNoteRead])
+def list_release_notes(db: DbSession, current_user: CurrentAdmin) -> list[ReleaseNoteRead]:
+    notes = db.scalars(select(ReleaseNote).order_by(ReleaseNote.created_at.desc(), ReleaseNote.id.desc())).all()
+    return [_release_note_read(note) for note in notes]
+
+
+@router.post("/release-notes", response_model=ReleaseNoteRead, status_code=status.HTTP_201_CREATED)
+def create_release_note(
+    payload: ReleaseNoteWrite,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> ReleaseNoteRead:
+    now = datetime.now(UTC)
+    item = ReleaseNote(
+        title=payload.title.strip(),
+        content=payload.content.strip(),
+        is_published=payload.is_published,
+        published_at=now if payload.is_published else None,
+        created_by=current_user.id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="create_release_note",
+        target_type="release_note",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"title": item.title, "is_published": item.is_published},
+    )
+    return _release_note_read(item)
+
+
+@router.put("/release-notes/{note_id}", response_model=ReleaseNoteRead)
+def update_release_note(
+    note_id: int,
+    payload: ReleaseNoteWrite,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> ReleaseNoteRead:
+    item = _release_note_or_404(db, note_id)
+    was_published = item.is_published
+    item.title = payload.title.strip()
+    item.content = payload.content.strip()
+    item.is_published = payload.is_published
+    if payload.is_published and (not was_published or item.published_at is None):
+        item.published_at = datetime.now(UTC)
+    elif not payload.is_published:
+        item.published_at = None
+    elif payload.is_published and was_published:
+        item.published_at = datetime.now(UTC)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="update_release_note",
+        target_type="release_note",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"title": item.title, "is_published": item.is_published},
+    )
+    return _release_note_read(item)
+
+
 @router.get("/feedback", response_model=list[AdminFeedbackRead])
 def list_feedback(db: DbSession, current_user: CurrentAdmin) -> list[AdminFeedbackRead]:
     items = db.scalars(
@@ -233,7 +329,7 @@ def list_feedback(db: DbSession, current_user: CurrentAdmin) -> list[AdminFeedba
         )
         .order_by(StudentFeedback.created_at.desc(), StudentFeedback.id.desc())
     ).all()
-    return [_admin_feedback_read(item) for item in items]
+    return [_admin_feedback_read(db, item) for item in items]
 
 
 @router.put("/feedback/{feedback_id}/reply", response_model=AdminFeedbackRead)
@@ -269,7 +365,7 @@ def reply_feedback(
         ip_address=request.client.host if request.client else None,
         detail={"student_id": item.student_id},
     )
-    return _admin_feedback_read(item)
+    return _admin_feedback_read(db, item)
 
 
 @router.post("/feedback/students/{student_id}/ban", response_model=FeedbackBanRead)
