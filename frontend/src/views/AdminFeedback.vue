@@ -4,16 +4,29 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   banStudentFeedback,
+  createAdminReleaseNote,
   fetchAdminFeedback,
+  fetchAdminReleaseNotes,
   replyAdminFeedback,
   type AdminFeedbackItem,
+  type ReleaseNoteItem,
   unbanStudentFeedback,
+  updateAdminReleaseNote,
 } from '../utils/api'
 
 const loading = ref(false)
+const releaseNotesLoading = ref(false)
 const savingId = ref<number | null>(null)
+const releaseNoteSaving = ref(false)
 const items = ref<AdminFeedbackItem[]>([])
+const releaseNotes = ref<ReleaseNoteItem[]>([])
 const replyDrafts = reactive<Record<number, string>>({})
+const releaseNoteForm = reactive({
+  id: null as number | null,
+  title: '',
+  content: '',
+  is_published: true,
+})
 
 const unrepliedCount = computed(() => items.value.filter((item) => !item.reply_content).length)
 
@@ -47,6 +60,66 @@ async function loadFeedback() {
     ElMessage.error('反馈列表加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadReleaseNotes() {
+  releaseNotesLoading.value = true
+  try {
+    releaseNotes.value = await fetchAdminReleaseNotes()
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('更新日志加载失败')
+  } finally {
+    releaseNotesLoading.value = false
+  }
+}
+
+function resetReleaseNoteForm() {
+  releaseNoteForm.id = null
+  releaseNoteForm.title = ''
+  releaseNoteForm.content = ''
+  releaseNoteForm.is_published = true
+}
+
+function editReleaseNote(item: ReleaseNoteItem) {
+  releaseNoteForm.id = item.id
+  releaseNoteForm.title = item.title
+  releaseNoteForm.content = item.content
+  releaseNoteForm.is_published = item.is_published
+}
+
+async function submitReleaseNote() {
+  const title = releaseNoteForm.title.trim()
+  const content = releaseNoteForm.content.trim()
+  if (!title || !content) {
+    ElMessage.info('请填写更新日志标题和内容')
+    return
+  }
+  releaseNoteSaving.value = true
+  try {
+    if (releaseNoteForm.id) {
+      await updateAdminReleaseNote(releaseNoteForm.id, {
+        title,
+        content,
+        is_published: releaseNoteForm.is_published,
+      })
+      ElMessage.success('更新日志已保存')
+    } else {
+      await createAdminReleaseNote({
+        title,
+        content,
+        is_published: releaseNoteForm.is_published,
+      })
+      ElMessage.success(releaseNoteForm.is_published ? '更新日志已发布' : '更新日志草稿已保存')
+    }
+    resetReleaseNoteForm()
+    await loadReleaseNotes()
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(responseDetail(error, '更新日志保存失败'))
+  } finally {
+    releaseNoteSaving.value = false
   }
 }
 
@@ -111,6 +184,7 @@ async function unbanFeedback(item: AdminFeedbackItem) {
 
 onMounted(() => {
   void loadFeedback()
+  void loadReleaseNotes()
 })
 </script>
 
@@ -185,6 +259,68 @@ onMounted(() => {
       </article>
       <p v-if="!items.length" class="panel-subcopy">暂无学生反馈。</p>
     </section>
+
+    <section class="panel release-note-admin-panel">
+      <div class="panel-header panel-header--wrap">
+        <div>
+          <p class="eyebrow">Release Notes</p>
+          <h2>发布更新日志</h2>
+          <p class="panel-subcopy">发布后，学生端“意见反馈”里的“更新日志”入口会显示红点提醒。</p>
+        </div>
+        <button v-if="releaseNoteForm.id" class="ghost-button" :disabled="releaseNoteSaving" @click="resetReleaseNoteForm">
+          取消编辑
+        </button>
+      </div>
+      <form class="feedback-admin-reply release-note-form" @submit.prevent="submitReleaseNote">
+        <el-input
+          v-model="releaseNoteForm.title"
+          maxlength="120"
+          placeholder="更新日志标题"
+          :disabled="releaseNoteSaving"
+        />
+        <textarea
+          v-model="releaseNoteForm.content"
+          class="textarea"
+          maxlength="5000"
+          rows="6"
+          placeholder="面向学生的更新说明"
+          :disabled="releaseNoteSaving"
+        ></textarea>
+        <label class="release-note-publish-toggle">
+          <input v-model="releaseNoteForm.is_published" type="checkbox" />
+          立即发布给学生
+        </label>
+        <div class="row-actions">
+          <span class="panel-subcopy">{{ releaseNoteForm.content.trim().length }}/5000</span>
+          <button class="primary-button" type="submit" :disabled="releaseNoteSaving">
+            {{ releaseNoteForm.id ? '保存更新日志' : '发布更新日志' }}
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <section v-loading="releaseNotesLoading" class="panel feedback-admin-list">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Release History</p>
+          <h2>更新日志记录</h2>
+        </div>
+        <button class="ghost-button" :disabled="releaseNotesLoading" @click="loadReleaseNotes">刷新</button>
+      </div>
+      <article v-for="item in releaseNotes" :key="item.id" class="feedback-admin-card">
+        <div class="feedback-admin-head">
+          <div>
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.is_published ? `已发布 · ${formatTime(item.published_at)}` : '草稿' }}</span>
+          </div>
+          <button class="ghost-button" :disabled="releaseNoteSaving" @click="editReleaseNote(item)">编辑</button>
+        </div>
+        <div class="feedback-admin-content">
+          <p>{{ item.content }}</p>
+        </div>
+      </article>
+      <p v-if="!releaseNotes.length" class="panel-subcopy">暂无更新日志。</p>
+    </section>
   </section>
 </template>
 
@@ -223,6 +359,24 @@ onMounted(() => {
 .feedback-admin-content p {
   margin: 0;
   white-space: pre-wrap;
+}
+
+.release-note-admin-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.release-note-form {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.release-note-publish-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
 }
 
 @media (max-width: 780px) {

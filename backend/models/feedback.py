@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -36,6 +36,45 @@ class StudentFeedbackBan(TimestampMixin, Base):
 
     student: Mapped["User"] = relationship(foreign_keys=[student_id], back_populates="feedback_ban")
     admin: Mapped["User | None"] = relationship(foreign_keys=[banned_by])
+
+
+class StudentFeedbackReadState(TimestampMixin, Base):
+    __tablename__ = "student_feedback_read_states"
+    __table_args__ = (UniqueConstraint("student_id", "feedback_id", name="uq_student_feedback_read_states_student_feedback"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    feedback_id: Mapped[int] = mapped_column(ForeignKey("student_feedback.id", ondelete="CASCADE"), index=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    student: Mapped["User"] = relationship(foreign_keys=[student_id])
+    feedback: Mapped[StudentFeedback] = relationship()
+
+
+class ReleaseNote(TimestampMixin, Base):
+    __tablename__ = "release_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(120))
+    content: Mapped[str] = mapped_column(Text)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    creator: Mapped["User | None"] = relationship(foreign_keys=[created_by])
+
+
+class ReleaseNoteReadState(TimestampMixin, Base):
+    __tablename__ = "release_note_read_states"
+    __table_args__ = (UniqueConstraint("student_id", "release_note_id", name="uq_release_note_read_states_student_note"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    release_note_id: Mapped[int] = mapped_column(ForeignKey("release_notes.id", ondelete="CASCADE"), index=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    student: Mapped["User"] = relationship(foreign_keys=[student_id])
+    release_note: Mapped[ReleaseNote] = relationship()
 
 
 if TYPE_CHECKING:

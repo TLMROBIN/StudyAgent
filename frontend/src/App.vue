@@ -3,6 +3,7 @@ import { computed, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from './stores/auth'
+import { fetchFeedbackUnreadSummary, type FeedbackUnreadSummary } from './utils/api'
 import { forceLoginRedirect } from './utils/navigation'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'studyagent-sidebar-collapsed'
@@ -11,6 +12,7 @@ interface NavigationItem {
   to: string
   label: string
   shortLabel: string
+  showUnreadDot?: boolean
 }
 
 function readSidebarCollapsed() {
@@ -24,6 +26,11 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const sidebarCollapsed = ref(readSidebarCollapsed())
+const unreadSummary = ref<FeedbackUnreadSummary>({
+  unread_feedback_replies: 0,
+  unread_release_notes: 0,
+  has_unread: false,
+})
 
 const requiresAuth = computed(() => route.matched.some((record) => record.meta.requiresAuth))
 const showShell = computed(() => route.path !== '/login')
@@ -34,7 +41,12 @@ const navigationItems = computed<NavigationItem[]>(() => {
 
   if (auth.user?.role === 'student') {
     items.push({ to: '/student', label: '学生答疑', shortLabel: '答疑' })
-    items.push({ to: '/student/feedback', label: '意见反馈', shortLabel: '反馈' })
+    items.push({
+      to: '/student/feedback',
+      label: '意见反馈',
+      shortLabel: '反馈',
+      showUnreadDot: unreadSummary.value.has_unread,
+    })
   }
 
   if (auth.user?.role !== 'student') {
@@ -77,6 +89,32 @@ watch(sidebarCollapsed, (value) => {
   }
   window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, value ? '1' : '0')
 })
+
+watch(
+  () => [auth.initialized, auth.user?.role, route.fullPath] as const,
+  () => {
+    if (!auth.initialized || auth.user?.role !== 'student') {
+      unreadSummary.value = {
+        unread_feedback_replies: 0,
+        unread_release_notes: 0,
+        has_unread: false,
+      }
+      return
+    }
+    fetchFeedbackUnreadSummary()
+      .then((summary) => {
+        unreadSummary.value = summary
+      })
+      .catch(() => {
+        unreadSummary.value = {
+          unread_feedback_replies: 0,
+          unread_release_notes: 0,
+          has_unread: false,
+        }
+      })
+  },
+  { immediate: true },
+)
 
 async function handleLogout() {
   await auth.logout()
@@ -123,6 +161,7 @@ function toggleSidebar() {
           >
             <span class="nav-link__short">{{ item.shortLabel }}</span>
             <span v-if="!sidebarCollapsed" class="nav-link__label">{{ item.label }}</span>
+            <span v-if="item.showUnreadDot" class="nav-unread-dot" aria-label="有未读内容"></span>
           </RouterLink>
         </nav>
       </div>

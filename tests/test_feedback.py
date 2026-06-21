@@ -7,9 +7,11 @@ from sqlalchemy.pool import StaticPool
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
 from backend.models import feedback, user  # noqa: F401
+from backend.models.feedback import ReleaseNote, StudentFeedbackReadState
 from backend.models.user import Classroom, User, UserRole
 from backend.routers import admin as admin_router
 from backend.routers import feedback as feedback_router
+from backend.routers import release_notes as release_notes_router
 
 
 def build_session():
@@ -23,6 +25,7 @@ def build_client(session_factory, current_user: User) -> TestClient:
     app = FastAPI()
     app.include_router(admin_router.router)
     app.include_router(feedback_router.router)
+    app.include_router(release_notes_router.router)
 
     def override_db():
         session = session_factory()
@@ -112,6 +115,40 @@ def test_student_feedback_limit_admin_reply_and_student_readback():
     assert first_item["reply_content"] == "已收到，我们会排进优化清单。"
 
 
+def test_admin_feedback_reply_sets_student_unread_until_marked_read():
+    session_factory = build_session()
+    admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
+    student = create_student_with_classroom(session_factory)
+    student_client = build_client(session_factory, student)
+    admin_client = build_client(session_factory, admin)
+
+    created = student_client.post("/api/feedback", json={"content": "想知道更新了哪些功能"})
+    assert created.status_code == 201
+    feedback_id = created.json()["id"]
+    assert student_client.get("/api/feedback/unread-summary").json()["unread_feedback_replies"] == 0
+
+    replied = admin_client.put(f"/api/admin/feedback/{feedback_id}/reply", json={"reply_content": "请看更新日志入口。"})
+    assert replied.status_code == 200
+    assert replied.json()["student_unread"] is True
+
+    summary = student_client.get("/api/feedback/unread-summary")
+    assert summary.status_code == 200
+    assert summary.json()["unread_feedback_replies"] == 1
+    items = student_client.get("/api/feedback").json()["items"]
+    assert next(item for item in items if item["id"] == feedback_id)["student_unread"] is True
+
+    marked = student_client.post(f"/api/feedback/{feedback_id}/read")
+    assert marked.status_code == 200
+    assert marked.json()["student_unread"] is False
+    assert student_client.get("/api/feedback/unread-summary").json()["unread_feedback_replies"] == 0
+
+    session = session_factory()
+    try:
+        assert session.query(StudentFeedbackReadState).count() == 1
+    finally:
+        session.close()
+
+
 def test_admin_can_ban_and_unban_student_feedback_permission():
     session_factory = build_session()
     admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
@@ -134,3 +171,55 @@ def test_admin_can_ban_and_unban_student_feedback_permission():
 
     allowed = student_client.post("/api/feedback", json={"content": "解除封禁后可以提交"})
     assert allowed.status_code == 201
+
+
+def test_admin_can_publish_release_notes_and_student_read_state_tracks_unread():
+    session_factory = build_session()
+    admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
+    student = create_student_with_classroom(session_factory)
+    student_client = build_client(session_factory, student)
+    admin_client = build_client(session_factory, admin)
+
+    draft = admin_client.post(
+        "/api/admin/release-notes",
+        json={
+            "title": "物理答疑体验升级",
+            "content": "新增图景优先引导、错因档案和对话内巩固练习。",
+            "is_published": False,
+        },
+    )
+    assert draft.status_code == 201
+    assert student_client.get("/api/release-notes").json()["items"] == []
+
+    published = admin_client.put(
+        f"/api/admin/release-notes/{draft.json()['id']}",
+        json={
+            "title": "物理答疑体验升级",
+            "content": "新增图景优先引导、错因档案和对话内巩固练习。",
+            "is_published": True,
+        },
+    )
+    assert published.status_code == 200
+    assert published.json()["published_at"] is not None
+
+    notes = student_client.get("/api/release-notes")
+    assert notes.status_code == 200
+    assert notes.json()["unread_count"] == 1
+    assert notes.json()["items"][0]["is_read"] is False
+
+    summary = student_client.get("/api/feedback/unread-summary")
+    assert summary.status_code == 200
+    assert summary.json()["unread_release_notes"] == 1
+    assert summary.json()["has_unread"] is True
+
+    marked = student_client.post(f"/api/release-notes/{published.json()['id']}/read")
+    assert marked.status_code == 200
+    assert marked.json()["is_read"] is True
+    assert student_client.get("/api/feedback/unread-summary").json()["unread_release_notes"] == 0
+
+    session = session_factory()
+    try:
+        note = session.query(ReleaseNote).one()
+        assert note.created_by == admin.id
+    finally:
+        session.close()

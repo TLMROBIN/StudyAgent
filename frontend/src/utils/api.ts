@@ -227,6 +227,7 @@ export interface StudentFeedbackItem {
   reply_content?: string | null
   replied_by_name?: string | null
   replied_at?: string | null
+  student_unread: boolean
   created_at: string
   updated_at: string
 }
@@ -236,6 +237,7 @@ export interface StudentFeedbackList {
   daily_limit: number
   daily_remaining: number
   feedback_banned: boolean
+  unread_reply_count: number
 }
 
 export interface AdminFeedbackItem extends StudentFeedbackItem {
@@ -266,6 +268,34 @@ export interface FeedbackBanResult {
   is_banned: boolean
   reason?: string | null
   banned_at?: string | null
+}
+
+export interface FeedbackUnreadSummary {
+  unread_feedback_replies: number
+  unread_release_notes: number
+  has_unread: boolean
+}
+
+export interface ReleaseNoteItem {
+  id: number
+  title: string
+  content: string
+  is_published: boolean
+  is_read: boolean
+  published_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ReleaseNoteList {
+  items: ReleaseNoteItem[]
+  unread_count: number
+}
+
+export interface ReleaseNotePayload {
+  title: string
+  content: string
+  is_published: boolean
 }
 
 const rawBase = import.meta.env.VITE_API_BASE_URL || `${import.meta.env.BASE_URL}api`
@@ -405,6 +435,16 @@ export async function createFeedback(payload: FeedbackPayload): Promise<StudentF
   return data
 }
 
+export async function fetchFeedbackUnreadSummary(): Promise<FeedbackUnreadSummary> {
+  const { data } = await api.get<FeedbackUnreadSummary>('/feedback/unread-summary')
+  return data
+}
+
+export async function markFeedbackRead(id: number): Promise<StudentFeedbackItem> {
+  const { data } = await api.post<StudentFeedbackItem>(`/feedback/${id}/read`)
+  return data
+}
+
 export async function fetchAdminFeedback(): Promise<AdminFeedbackItem[]> {
   const { data } = await api.get<AdminFeedbackItem[]>('/admin/feedback')
   return data
@@ -422,6 +462,31 @@ export async function banStudentFeedback(studentId: number, payload: FeedbackBan
 
 export async function unbanStudentFeedback(studentId: number): Promise<FeedbackBanResult> {
   const { data } = await api.delete<FeedbackBanResult>(`/admin/feedback/students/${studentId}/ban`)
+  return data
+}
+
+export async function fetchReleaseNotes(): Promise<ReleaseNoteList> {
+  const { data } = await api.get<ReleaseNoteList>('/release-notes')
+  return data
+}
+
+export async function markReleaseNoteRead(id: number): Promise<ReleaseNoteItem> {
+  const { data } = await api.post<ReleaseNoteItem>(`/release-notes/${id}/read`)
+  return data
+}
+
+export async function fetchAdminReleaseNotes(): Promise<ReleaseNoteItem[]> {
+  const { data } = await api.get<ReleaseNoteItem[]>('/admin/release-notes')
+  return data
+}
+
+export async function createAdminReleaseNote(payload: ReleaseNotePayload): Promise<ReleaseNoteItem> {
+  const { data } = await api.post<ReleaseNoteItem>('/admin/release-notes', payload)
+  return data
+}
+
+export async function updateAdminReleaseNote(id: number, payload: ReleaseNotePayload): Promise<ReleaseNoteItem> {
+  const { data } = await api.put<ReleaseNoteItem>(`/admin/release-notes/${id}`, payload)
   return data
 }
 
