@@ -18,12 +18,13 @@ from starlette.datastructures import Headers
 from backend.config import Settings
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
-from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
+from backend.models import agent_config, audit_log, conversation, knowledge, learning_profile, user  # noqa: F401
 from pydantic import ValidationError
 
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
 from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
+from backend.models.learning_profile import StudentErrorEvent, StudentSkillProfile
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
 from backend.models.llm_usage import LLMUsageEvent
@@ -1448,6 +1449,205 @@ def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monk
             "answer_text",
             "explanation_text",
         }
+    finally:
+        session.close()
+
+
+def test_physics_practice_request_streams_question_bank_assets(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="physics-questions.docx",
+            file_path="/tmp/physics-questions.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=128,
+            resource_type=ResourceType.QUESTION_SET.value,
+            grade=2,
+        )
+        session.add(document)
+        session.commit()
+        session.refresh(document)
+
+        row = KnowledgeChunk(
+            document_id=document.id,
+            subject="物理",
+            chunk_index=0,
+            content="第1题\n\n题目：如图所示，物块在水平面上匀速运动，分析受力。【附图1：受力图】",
+            metadata_json={
+                "question_number": "1",
+                "question_text": "如图所示，物块在水平面上匀速运动，分析受力。【附图1：受力图】",
+                "contains_images": True,
+                "image_count": 1,
+                "asset_refs": [
+                    {
+                        "asset_id": "image-force-001",
+                        "filename": "image-force-001.png",
+                        "content_type": "image/png",
+                        "url": "/api/knowledge/documents/1/assets/image-force-001.png",
+                        "title": "受力图",
+                        "description": None,
+                    }
+                ],
+            },
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+        monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [row])
+
+        async def fail_stream_response(*args, **kwargs):
+            raise AssertionError("practice requests should not call the LLM stream before returning a banked question")
+            yield ""
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="再给我一道同类型巩固题", request_id="practice-bank-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        assert [event for event, _ in events] == ["meta", "done"]
+        done_payload = events[-1][1]
+        assert "巩固练习" in done_payload["content"]
+        assert "【附图1：受力图】" in done_payload["content"]
+        assert done_payload["assets"][0]["asset_id"] == "image-force-001"
+
+        assistant = session.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+        assert assistant is not None
+        assert assistant.assets[0]["asset_id"] == "image-force-001"
+
+        conversation = chat_router.get_conversation(assistant.conversation_id, session, current_user)
+        assert conversation.messages[-1].assets[0].asset_id == "image-force-001"
+    finally:
+        session.close()
+
+
+def test_physics_practice_request_generates_text_question_when_bank_is_empty(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+        monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [])
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="出一道受力分析巩固题", request_id="practice-generated-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "巩固练习（系统生成）" in done_payload["content"]
+        assert "受力分析图" in done_payload["content"]
+        assert done_payload["assets"] == []
+    finally:
+        session.close()
+
+
+def test_physics_error_record_request_persists_profile_with_explicit_consent(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+
+        async def fail_stream_response(*args, **kwargs):
+            raise AssertionError("error-record requests should be handled without LLM streaming")
+            yield ""
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="帮我记录这道错因：我没画受力图，漏掉了摩擦力", request_id="record-error-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "已记录到物理错因档案" in done_payload["content"]
+        assert "图景建立错误" in done_payload["content"]
+
+        event = session.scalar(select(StudentErrorEvent))
+        profile = session.scalar(select(StudentSkillProfile))
+        assert event is not None
+        assert event.error_type == "diagram_establishment"
+        assert event.message_id is not None
+        assert profile is not None
+        assert profile.profile_json["error_counts"]["diagram_establishment"] == 1
+    finally:
+        session.close()
+
+
+def test_physics_practice_generation_uses_recorded_error_profile(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        profile = StudentSkillProfile(
+            student_id=current_user.id,
+            subject="物理",
+            profile_json={
+                "total_events": 2,
+                "top_error_type": "formula_misuse",
+                "top_error_label": "公式误用",
+                "error_counts": {"formula_misuse": 2},
+                "recent_weaknesses": ["公式适用条件不清"],
+            },
+        )
+        session.add(profile)
+        session.commit()
+
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+        monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [])
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="再来一道巩固题", request_id="profile-practice-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "针对你的高频错因：公式误用" in done_payload["content"]
+        assert "公式适用条件" in done_payload["content"]
+        assert "单位" in done_payload["content"]
     finally:
         session.close()
 

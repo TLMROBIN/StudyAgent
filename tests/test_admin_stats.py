@@ -12,8 +12,9 @@ from sqlalchemy.pool import StaticPool
 from backend.database import Base
 from backend.database import get_db
 from backend.dependencies import get_current_user
-from backend.models import agent_config, audit_log, conversation, knowledge, user  # noqa: F401
+from backend.models import agent_config, audit_log, conversation, knowledge, learning_profile, user  # noqa: F401
 from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
+from backend.models.learning_profile import StudentSkillProfile
 from backend.models.schemas import StudentPortrait
 from backend.models.user import Classroom, User, UserRole
 from backend.routers import admin as admin_router
@@ -113,6 +114,44 @@ def test_stats_service_returns_classroom_breakdown_and_portraits():
         assert portrait_rows[0]["login_account"] == "zhangsan1"
         assert portrait_rows[0]["focus_subject"] == "数学"
         assert portrait_rows[0]["fallback_ratio"] == 1.0
+    finally:
+        session.close()
+
+
+def test_student_profile_includes_physics_error_profile():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        student = User(
+            username="physics1",
+            full_name="物理学生",
+            role=UserRole.STUDENT,
+            password_hash="hash",
+            grade=2,
+        )
+        session.add(student)
+        session.commit()
+        session.refresh(student)
+        session.add(
+            StudentSkillProfile(
+                student_id=student.id,
+                subject="物理",
+                profile_json={
+                    "total_events": 3,
+                    "top_error_type": "diagram_establishment",
+                    "top_error_label": "图景建立错误",
+                    "error_counts": {"diagram_establishment": 3},
+                    "recent_weaknesses": ["受力分析"],
+                },
+            )
+        )
+        session.commit()
+
+        profile = stats_service.student_profile(session, student.id)
+
+        assert profile["physics_error_profile"]["total_events"] == 3
+        assert profile["physics_error_profile"]["top_error_label"] == "图景建立错误"
+        assert profile["physics_error_profile"]["recent_weaknesses"] == ["受力分析"]
     finally:
         session.close()
 

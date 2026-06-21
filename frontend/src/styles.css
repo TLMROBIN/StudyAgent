@@ -271,10 +271,25 @@ textarea {
 
 .student-page-grid {
   grid-template-columns: minmax(134px, 148px) minmax(0, 1fr);
+  align-items: stretch;
+  height: calc(100vh - 56px);
+  overflow: hidden;
 }
 
 .student-history-panel {
   align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: calc(100vh - 56px);
+}
+
+.student-history-panel .conversation-list {
+  min-height: 0;
+  overflow-y: scroll;
+  padding-right: 8px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
 }
 
 .dashboard-stack {
@@ -526,8 +541,12 @@ textarea {
 }
 
 .chat-panel {
-  min-height: calc(100vh - 56px);
-  grid-template-rows: auto auto 1fr auto auto;
+  align-content: stretch;
+  grid-template-rows: auto auto minmax(220px, 1fr) auto auto;
+  height: calc(100vh - 56px);
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .student-notice-bar {
@@ -579,20 +598,25 @@ textarea {
 }
 
 .chat-stream {
-  display: grid;
-  align-content: start;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
-  min-height: 360px;
-  max-height: 60vh;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: scroll;
+  max-width: 100%;
   min-width: 0;
+  min-height: 0;
+  padding-right: 8px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
 }
 
 .bubble {
-  width: fit-content;
-  max-width: 78%;
+  flex: 0 0 auto;
+  width: min(78%, 720px);
+  max-width: 100%;
   min-width: 0;
   padding: 16px 18px;
   border-radius: 22px;
@@ -600,15 +624,42 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.student-history-panel .conversation-list,
+.chat-stream {
+  scrollbar-color: rgba(15, 118, 110, 0.58) rgba(24, 33, 47, 0.08);
+  scrollbar-width: thin;
+}
+
+.student-history-panel .conversation-list::-webkit-scrollbar,
+.chat-stream::-webkit-scrollbar {
+  width: 10px;
+}
+
+.student-history-panel .conversation-list::-webkit-scrollbar-track,
+.chat-stream::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(24, 33, 47, 0.08);
+}
+
+.student-history-panel .conversation-list::-webkit-scrollbar-thumb,
+.chat-stream::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(255, 252, 246, 0.92);
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.58);
+}
+
+.chat-stream .bubble:first-child {
+  margin-top: auto;
+}
+
 .bubble.user {
-  justify-self: end;
-  margin-left: auto;
+  align-self: flex-end;
   background: linear-gradient(135deg, #0f766e, #0f9c90);
   color: #fff;
 }
 
 .bubble.assistant {
-  justify-self: start;
+  align-self: flex-start;
   background: #fffaf0;
   border: 1px solid var(--line);
 }
@@ -1644,6 +1695,7 @@ textarea {
   }
 
   .chat-panel {
+    height: auto;
     min-height: auto;
   }
 
@@ -1656,6 +1708,22 @@ textarea {
   .login-card {
     width: 100%;
     justify-self: stretch;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 1080px) {
+  .student-page-grid {
+    grid-template-columns: minmax(126px, 144px) minmax(0, 1fr);
+    gap: 12px;
+    height: calc(100vh - 56px);
+    overflow: hidden;
+  }
+
+  .student-page-grid .student-history-panel,
+  .student-page-grid .chat-panel {
+    height: calc(100vh - 56px);
+    max-height: calc(100vh - 56px);
+    min-height: 0;
   }
 }
 

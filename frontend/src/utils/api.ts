@@ -53,6 +53,7 @@ export interface ChatMessageRead {
   role: 'user' | 'assistant'
   content: string
   attachment?: ChatMessageAttachment | null
+  assets?: KnowledgeAsset[]
 }
 
 export interface ChatConversationRead {

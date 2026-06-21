@@ -66,8 +66,8 @@ def test_build_prompt_requires_grounding_on_image_summary():
 
 def test_basic_concept_question_uses_explanation_mode():
     prompt = socratic_service.build_prompt(
-        question="什么是惯性",
-        subject="物理",
+        question="什么是函数单调性",
+        subject="数学",
         history=[],
         retrieved_context="",
         system_prompt="",
@@ -77,6 +77,38 @@ def test_basic_concept_question_uses_explanation_mode():
     assert "问题类型：concept_explanation" in system_text
     assert "2-4 句解释基础概念" in system_text
     assert "1 个检查理解的问题" in system_text
+
+
+def test_physics_calculation_prompt_uses_diagram_first_strategy():
+    prompt = socratic_service.build_prompt(
+        question="如图所示，物块在斜面上匀速下滑，求摩擦力",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "物理专项引导策略" in system_text
+    assert "受力分析图" in system_text
+    assert "先画" in prompt.fallback_text
+    assert "先把已知条件和要求的量分别列出来" not in prompt.fallback_text
+
+
+def test_physics_concept_prompt_uses_intuition_before_formula():
+    prompt = socratic_service.build_prompt(
+        question="为什么压强和受力面积有关？",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "物理概念直觉模式" in system_text
+    assert "生活经验" in system_text
+    assert "实验想象" in system_text
+    assert "公式" in system_text
 
 
 def test_exercise_question_stays_guided_even_with_answer_language():

@@ -38,6 +38,7 @@ interface ConversationSummary {
 
 type RecommendationMode = 'context' | 'keyword'
 
+const SHOW_RECOMMENDATION_PANEL = false
 const RECOMMENDATION_FETCH_LIMIT = 3
 const RECOMMENDATION_PAGE_SIZE = 3
 const recommendationDifficultyOptions = [
@@ -268,6 +269,7 @@ async function openConversation(id: number) {
     role: item.role,
     content: item.content,
     attachment: item.attachment || null,
+    assets: item.assets || [],
   }))
   await preloadMessageAttachments(messages.value)
   resetRecommendations()
@@ -710,8 +712,10 @@ async function preloadMessageAttachments(items: ChatMessageRead[]) {
     }
     return [item.attachment]
   })
-  if (attachments.length) {
-    await preloadAssets(attachments)
+  const messageAssets = items.flatMap((item) => item.assets || [])
+  const assets = [...attachments, ...messageAssets]
+  if (assets.length) {
+    await preloadAssets(assets)
   }
 }
 
@@ -991,7 +995,7 @@ async function sendMessage() {
     content,
     attachment,
   })
-  messages.value.push({ role: 'assistant', content: '' })
+  messages.value.push({ role: 'assistant', content: '', assets: [] })
   queueScrollToBottom()
 
   try {
@@ -1029,6 +1033,10 @@ async function sendMessage() {
         if (event === 'done') {
           const last = messages.value[messages.value.length - 1]
           if (last && last.role === 'assistant' && typeof data.content === 'string') {
+            if (Array.isArray(data.assets)) {
+              last.assets = data.assets as KnowledgeAsset[]
+              void preloadAssets(last.assets)
+            }
             last.content = data.content
             queueScrollToBottom()
           }
@@ -1171,7 +1179,7 @@ onMounted(async () => {
               <span>{{ item.attachment.filename }}</span>
             </a>
           </div>
-          <div class="message-body" v-html="renderMessageBody(item.content)"></div>
+          <div class="message-body" v-html="renderMessageBody(item.content, item.assets || [])"></div>
         </article>
       </div>
 
@@ -1287,7 +1295,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <section class="recommendation-panel">
+      <section v-if="SHOW_RECOMMENDATION_PANEL" class="recommendation-panel">
         <div class="panel-header panel-header--stack">
           <div>
             <p class="eyebrow">Practice Picks</p>

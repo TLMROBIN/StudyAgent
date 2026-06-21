@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEHOLDER
+from backend.services.physics_guidance_service import PhysicsGuidanceStrategy, physics_guidance_service
 
 
 @dataclass
@@ -41,6 +42,18 @@ class SocraticService:
             return "concept_explanation"
         return "concept"
 
+    def physics_strategy(
+        self,
+        question: str,
+        subject: str,
+        stage: GuidanceStage,
+        *,
+        image_summary: str | None = None,
+    ) -> PhysicsGuidanceStrategy | None:
+        if subject != "物理":
+            return None
+        return physics_guidance_service.analyze(question, stage=stage, image_summary=image_summary)
+
     def build_prompt(
         self,
         question: str,
@@ -56,6 +69,7 @@ class SocraticService:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
         question_type = self.infer_question_type(question)
+        physics_strategy = self.physics_strategy(question, subject, stage, image_summary=image_summary)
         system_sections = [
             self.base_prompt,
             system_prompt,
@@ -66,11 +80,23 @@ class SocraticService:
             "涉及数学、物理、化学中的公式、方程、上下标或希腊字母时，请使用标准 LaTeX 书写。",
             "行内公式使用 $...$，独立公式使用 $$...$$，不要使用图片或伪公式文本代替。",
         ]
+        if physics_strategy:
+            system_sections.append(physics_strategy.prompt_section)
+            if physics_strategy.teaching_mode.value == "concept_intuition":
+                system_sections.append(
+                    "物理概念直觉模式：回答顺序必须是生活经验、实验想象、公式或定义意义；"
+                    "每一步都用一个问题让学生参与。"
+                )
         if question_type == "concept_explanation":
-            system_sections.append(
-                "基础知识解释模式：先用 2-4 句解释基础概念，再问 1 个检查理解的问题。"
-                "不要代写题目最终答案；如果问题其实是具体习题，转为引导式提问。"
-            )
+            if subject == "物理":
+                system_sections.append(
+                    "物理概念题不要直接给课本式定义；先建立直觉，再检查学生能否迁移到新情境。"
+                )
+            else:
+                system_sections.append(
+                    "基础知识解释模式：先用 2-4 句解释基础概念，再问 1 个检查理解的问题。"
+                    "不要代写题目最终答案；如果问题其实是具体习题，转为引导式提问。"
+                )
         if image_related:
             if image_confidence == "low":
                 system_sections.append(
@@ -99,7 +125,14 @@ class SocraticService:
         return PromptPackage(
             messages=messages,
             stage=stage,
-            fallback_text=self.build_fallback_text(question, subject, stage, question_type, image_related=image_related),
+            fallback_text=self.build_fallback_text(
+                question,
+                subject,
+                stage,
+                question_type,
+                image_related=image_related,
+                physics_strategy=physics_strategy,
+            ),
             image_related=image_related,
         )
 
@@ -111,7 +144,10 @@ class SocraticService:
         question_type: str,
         *,
         image_related: bool = False,
+        physics_strategy: PhysicsGuidanceStrategy | None = None,
     ) -> str:
+        if physics_strategy:
+            return self._wrap_image_text(physics_strategy.fallback_text, image_related=image_related)
         if question_type == "calculation":
             if stage == GuidanceStage.INITIAL:
                 text = f"先不要急着算结果。针对这道{subject}题，你先把已知条件和要求的量分别列出来，第一步你打算从哪个公式或定理入手？"
@@ -138,7 +174,15 @@ class SocraticService:
 
     def safe_guided_rewrite(self, question: str, subject: str, stage: GuidanceStage, *, image_related: bool = False) -> str:
         question_type = self.infer_question_type(question)
-        return self.build_fallback_text(question, subject, stage, question_type, image_related=image_related)
+        physics_strategy = self.physics_strategy(question, subject, stage)
+        return self.build_fallback_text(
+            question,
+            subject,
+            stage,
+            question_type,
+            image_related=image_related,
+            physics_strategy=physics_strategy,
+        )
 
     def image_low_confidence_text(self, subject: str, image_summary: str | None = None) -> str:
         summary = " ".join((image_summary or "").split())
