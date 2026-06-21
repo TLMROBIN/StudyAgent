@@ -18,6 +18,13 @@ def test_output_validator_blocks_direct_answer():
     assert "direct_answer_detected" in validation.issues
 
 
+def test_chinese_writing_coach_request_is_allowed_as_academic_prompt():
+    decision = filter_service.check_question("帮我写作文怎么构思，不要代写", "语文")
+
+    assert decision.allowed
+    assert decision.subject == "语文"
+
+
 def test_image_answer_validator_accepts_human_low_confidence_disclaimer():
     invalid = filter_service.validate_image_answer("先看图中的已知条件，再判断受力方向。")
     valid = filter_service.validate_image_answer("这张图片我看得不太清，理解可能有误。先看图中的已知条件，再判断受力方向。")

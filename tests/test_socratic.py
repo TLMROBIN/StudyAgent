@@ -111,6 +111,85 @@ def test_physics_concept_prompt_uses_intuition_before_formula():
     assert "公式" in system_text
 
 
+def test_math_word_problem_prompt_uses_modeling_sequence():
+    prompt = socratic_service.build_prompt(
+        question="应用题读了三遍还是不知道怎么设 x，行程相遇问题怎么列方程？",
+        subject="数学",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "数学专项引导策略" in system_text
+    assert "识别量→说关系→转方程" in system_text
+    assert "数量关系" in prompt.fallback_text
+
+
+def test_english_text_prompt_routes_grammar_writing_and_vocabulary_modes():
+    grammar_prompt = socratic_service.build_prompt(
+        question="I goes to school every day，帮我检查语法",
+        subject="英语",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    writing_prompt = socratic_service.build_prompt(
+        question="帮我批改这篇英语作文，看看句式怎么升级",
+        subject="英语",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    vocabulary_prompt = socratic_service.build_prompt(
+        question="把 photosynthesis 存入词汇DNA，之后提醒我复习",
+        subject="英语",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+
+    assert "英语语法追问教练" in grammar_prompt.messages[0]["content"]
+    assert "AI外教三维批改法" in writing_prompt.messages[0]["content"]
+    assert "词汇DNA" in vocabulary_prompt.messages[0]["content"]
+
+
+def test_chinese_prompt_routes_reading_writing_classical_and_material_modes():
+    reading_prompt = socratic_service.build_prompt(
+        question="这道现代文阅读理解为什么我总是答不到点？",
+        subject="语文",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    writing_prompt = socratic_service.build_prompt(
+        question="帮我爆破作文思路，题目是成长",
+        subject="语文",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    classical_prompt = socratic_service.build_prompt(
+        question="这首古诗的作者心情是什么，文言文背景也看不懂",
+        subject="语文",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+    material_prompt = socratic_service.build_prompt(
+        question="存入素材库：关于坚持的名言和事例",
+        subject="语文",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+    )
+
+    assert "出题人视角" in reading_prompt.messages[0]["content"]
+    assert "语文写作教练" in writing_prompt.messages[0]["content"]
+    assert "文言文复活" in classical_prompt.messages[0]["content"]
+    assert "语文素材库" in material_prompt.messages[0]["content"]
+
+
 def test_exercise_question_stays_guided_even_with_answer_language():
     prompt = socratic_service.build_prompt(
         question="这道题答案是多少",

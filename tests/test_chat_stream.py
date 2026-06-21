@@ -493,7 +493,8 @@ def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
     assert final_text != chat_router.filter_service.image_uncertainty_text
     assert "我识别到这张数学题图里主要有" in final_text
     assert "函数图像经过点 A" in final_text
-    assert "先不要急着算结果" in final_text
+    assert "题目条件、目标结论" in final_text
+    assert "函数" in final_text
     assert "我是 AI" not in final_text
 
 
@@ -1648,6 +1649,163 @@ def test_physics_practice_generation_uses_recorded_error_profile(monkeypatch):
         assert "针对你的高频错因：公式误用" in done_payload["content"]
         assert "公式适用条件" in done_payload["content"]
         assert "单位" in done_payload["content"]
+    finally:
+        session.close()
+
+
+def test_math_error_record_request_persists_profile_with_explicit_consent(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+
+        async def fail_stream_response(*args, **kwargs):
+            raise AssertionError("math error-record requests should be handled without LLM streaming")
+            yield ""
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="帮我记录数学错因：应用题读不懂，不知道设什么为x", request_id="math-record-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "已记录到数学错因档案" in done_payload["content"]
+        assert "应用题建模困难" in done_payload["content"]
+
+        event = session.scalar(select(StudentErrorEvent))
+        profile = session.scalar(select(StudentSkillProfile))
+        assert event is not None
+        assert event.subject == "数学"
+        assert event.error_type == "word_problem_modeling"
+        assert profile is not None
+        assert profile.profile_json["error_counts"]["word_problem_modeling"] == 1
+    finally:
+        session.close()
+
+
+def test_math_practice_request_generates_text_question_when_bank_is_empty(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+        monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [])
+
+        async def fail_stream_response(*args, **kwargs):
+            raise AssertionError("math practice requests should not call LLM streaming")
+            yield ""
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="再给我一道应用题同类型练习", request_id="math-practice-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "数学巩固练习（系统生成）" in done_payload["content"]
+        assert "识别量" in done_payload["content"]
+        assert "转方程" in done_payload["content"]
+        assert done_payload["assets"] == []
+    finally:
+        session.close()
+
+
+def test_english_vocabulary_dna_request_persists_profile(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+
+        async def fail_stream_response(*args, **kwargs):
+            raise AssertionError("vocabulary DNA requests should be handled without LLM streaming")
+            yield ""
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="英语", message="把 photosynthesis 存入词汇DNA，意思是光合作用", request_id="vocab-dna-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "已加入英语词汇 DNA" in done_payload["content"]
+        assert "photosynthesis" in done_payload["content"]
+
+        profile = session.scalar(select(StudentSkillProfile))
+        assert profile is not None
+        assert profile.subject == "英语"
+        assert profile.profile_json["vocabulary_items"][0]["word"] == "photosynthesis"
+    finally:
+        session.close()
+
+
+def test_chinese_material_library_request_persists_profile(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_user(session_factory, role=UserRole.STUDENT, grade=2)
+    session = session_factory()
+    try:
+        monkeypatch.setattr(
+            chat_router,
+            "_retrieve_context_for_chat",
+            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+        )
+
+        async def fail_stream_response(*args, **kwargs):
+            raise AssertionError("material library requests should be handled without LLM streaming")
+            yield ""
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="语文", message="存入素材库：关于坚持的素材，苏轼被贬黄州后仍写出赤壁名篇。", request_id="material-1"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+
+        done_payload = events[-1][1]
+        assert "已存入语文素材库" in done_payload["content"]
+        assert "坚持" in done_payload["content"]
+
+        profile = session.scalar(select(StudentSkillProfile))
+        assert profile is not None
+        assert profile.subject == "语文"
+        assert "苏轼" in profile.profile_json["material_items"][0]["text"]
     finally:
         session.close()
 

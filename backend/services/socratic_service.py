@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEHOLDER
 from backend.services.physics_guidance_service import PhysicsGuidanceStrategy, physics_guidance_service
+from backend.services.subject_guidance_service import SubjectGuidanceStrategy, subject_guidance_service
 
 
 @dataclass
@@ -54,6 +55,11 @@ class SocraticService:
             return None
         return physics_guidance_service.analyze(question, stage=stage, image_summary=image_summary)
 
+    def subject_strategy(self, question: str, subject: str, stage: GuidanceStage) -> SubjectGuidanceStrategy | None:
+        if subject == "物理":
+            return None
+        return subject_guidance_service.analyze(question, subject, stage)
+
     def build_prompt(
         self,
         question: str,
@@ -70,6 +76,7 @@ class SocraticService:
         stage = self.infer_stage(turn_count)
         question_type = self.infer_question_type(question)
         physics_strategy = self.physics_strategy(question, subject, stage, image_summary=image_summary)
+        subject_strategy = self.subject_strategy(question, subject, stage)
         system_sections = [
             self.base_prompt,
             system_prompt,
@@ -87,6 +94,8 @@ class SocraticService:
                     "物理概念直觉模式：回答顺序必须是生活经验、实验想象、公式或定义意义；"
                     "每一步都用一个问题让学生参与。"
                 )
+        if subject_strategy:
+            system_sections.append(subject_strategy.prompt_section)
         if question_type == "concept_explanation":
             if subject == "物理":
                 system_sections.append(
@@ -132,6 +141,7 @@ class SocraticService:
                 question_type,
                 image_related=image_related,
                 physics_strategy=physics_strategy,
+                subject_strategy=subject_strategy,
             ),
             image_related=image_related,
         )
@@ -145,9 +155,12 @@ class SocraticService:
         *,
         image_related: bool = False,
         physics_strategy: PhysicsGuidanceStrategy | None = None,
+        subject_strategy: SubjectGuidanceStrategy | None = None,
     ) -> str:
         if physics_strategy:
             return self._wrap_image_text(physics_strategy.fallback_text, image_related=image_related)
+        if subject_strategy:
+            return self._wrap_image_text(subject_strategy.fallback_text, image_related=image_related)
         if question_type == "calculation":
             if stage == GuidanceStage.INITIAL:
                 text = f"先不要急着算结果。针对这道{subject}题，你先把已知条件和要求的量分别列出来，第一步你打算从哪个公式或定理入手？"
@@ -175,6 +188,7 @@ class SocraticService:
     def safe_guided_rewrite(self, question: str, subject: str, stage: GuidanceStage, *, image_related: bool = False) -> str:
         question_type = self.infer_question_type(question)
         physics_strategy = self.physics_strategy(question, subject, stage)
+        subject_strategy = self.subject_strategy(question, subject, stage)
         return self.build_fallback_text(
             question,
             subject,
@@ -182,6 +196,7 @@ class SocraticService:
             question_type,
             image_related=image_related,
             physics_strategy=physics_strategy,
+            subject_strategy=subject_strategy,
         )
 
     def image_low_confidence_text(self, subject: str, image_summary: str | None = None) -> str:
