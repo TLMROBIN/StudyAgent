@@ -629,8 +629,8 @@ textarea {
 }
 
 .bubble {
-  flex: 0 1 auto;
-  width: fit-content;
+  flex: 0 0 auto;
+  width: auto;
   max-width: min(78%, 720px);
   min-width: 0;
   padding: 16px 18px;
@@ -688,7 +688,7 @@ textarea {
 .message-body {
   display: grid;
   gap: 10px;
-  width: 100%;
+  max-width: 100%;
   min-width: 0;
   word-break: break-word;
   overflow-wrap: anywhere;
