@@ -7,9 +7,11 @@ import pinia from './pinia'
 import router from './router'
 import './styles.css'
 import { installSessionLifecycle } from './utils/sessionLifecycle'
+import { installViewportHeight } from './utils/viewportHeight'
 
 const app = createApp(App)
 app.use(pinia)
 app.use(router)
 installSessionLifecycle(pinia, router)
+installViewportHeight()
 app.mount('#app')

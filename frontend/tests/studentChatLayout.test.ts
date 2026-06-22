@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const styles = readFileSync(resolve(testDir, '../src/styles.css'), 'utf8')
+const mainSource = readFileSync(resolve(testDir, '../src/main.ts'), 'utf8')
+const viewportHeightSourcePath = resolve(testDir, '../src/utils/viewportHeight.ts')
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -36,4 +38,50 @@ assert.match(
   styles,
   /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(126px,\s*144px\) minmax\(0,\s*1fr\)/,
   'student page should stay two-column on tablet widths',
+)
+
+assert.match(
+  styles,
+  /--student-panel-height:\s*calc\(var\(--app-viewport-height,\s*100vh\) - var\(--shell-main-block-padding\)\)/,
+  'student panels should use the measured visual viewport instead of raw 100vh',
+)
+
+for (const selector of ['.student-page-grid', '.student-history-panel', '.chat-panel']) {
+  const rule = ruleFor(selector)
+  assert.match(rule, /var\(--student-panel-height\)/, `${selector} should track the measured student panel height`)
+  assert.doesNotMatch(rule, /calc\(100vh - 56px\)/, `${selector} should not use raw 100vh tablet height`)
+}
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(72px,\s*1fr\) auto auto/,
+  'tablet chat stream should be allowed to shrink so the composer stays visible',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.chat-actions\s*\{[\s\S]*?order:\s*2/,
+  'tablet action buttons should be prioritized before secondary helper copy',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.panel-subcopy\s*\{[\s\S]*?order:\s*3/,
+  'tablet helper copy should not push send controls below the panel',
+)
+
+assert.match(mainSource, /installViewportHeight/, 'main.ts should install the visual viewport height synchronizer')
+assert.ok(
+  mainSource.indexOf('installViewportHeight()') > -1 &&
+    mainSource.indexOf('installViewportHeight()') < mainSource.indexOf("app.mount('#app')"),
+  'visual viewport height should be synced before mounting the app',
+)
+
+const viewportHeightSource = readFileSync(viewportHeightSourcePath, 'utf8')
+assert.match(viewportHeightSource, /visualViewport/, 'viewport helper should prefer visualViewport on tablet WebViews')
+assert.match(viewportHeightSource, /innerHeight/, 'viewport helper should fall back to innerHeight')
+assert.match(
+  viewportHeightSource,
+  /setProperty\(\s*VIEWPORT_HEIGHT_PROPERTY/,
+  'viewport helper should write the measured height to the root CSS variable',
 )
