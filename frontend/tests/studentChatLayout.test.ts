@@ -19,7 +19,13 @@ function ruleFor(selector: string) {
 }
 
 const bubbleRule = ruleFor('.bubble')
-assert.match(bubbleRule, /width:\s*fit-content/, 'short chat bubbles should shrink to their message length')
+assert.match(bubbleRule, /flex:\s*0 0 auto/, 'chat bubbles should not collapse under flex sizing')
+assert.match(bubbleRule, /width:\s*auto/, 'chat bubbles should use stable intrinsic sizing')
+assert.doesNotMatch(
+  bubbleRule,
+  /width:\s*fit-content/,
+  'fit-content creates unstable right-aligned bubble widths in Chrome on narrow tablets',
+)
 assert.doesNotMatch(
   bubbleRule,
   /(?:^|;\s*)width:\s*min\(78%,\s*720px\)/,
@@ -30,6 +36,14 @@ assert.match(bubbleRule, /overflow-wrap:\s*anywhere/, 'long tokens should wrap b
 
 const userBubbleRule = ruleFor('.bubble.user')
 assert.match(userBubbleRule, /align-self:\s*flex-end/, 'student bubbles should stay right aligned')
+
+const messageBodyRule = ruleFor('.message-body')
+assert.match(messageBodyRule, /max-width:\s*100%/, 'message bodies should stay inside the bubble width cap')
+assert.doesNotMatch(
+  messageBodyRule,
+  /(?:^|;\s*)width:\s*100%/,
+  'message bodies should not force a cyclic full-width calculation inside content-sized bubbles',
+)
 
 for (const selector of ['.student-history-panel .conversation-list', '.chat-stream']) {
   const rule = ruleFor(selector)
