@@ -1765,6 +1765,80 @@ textarea {
   }
 }
 
+@media (min-width: 641px) and (max-width: 1080px) and (max-height: 620px) {
+  :root {
+    --shell-main-block-padding: 24px;
+  }
+
+  .app-root--shell .app-main {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  .student-page-grid .chat-panel {
+    gap: 10px;
+    padding: 14px;
+    grid-template-rows: auto auto minmax(40px, 1fr) auto auto;
+  }
+
+  .student-page-grid .student-history-panel {
+    padding-block: 14px;
+  }
+
+  .student-notice-bar {
+    min-height: 28px;
+    padding: 4px 8px;
+  }
+
+  .chat-panel .panel-header {
+    gap: 8px;
+  }
+
+  .chat-panel .panel-header h2 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 1.25;
+  }
+
+  .chat-panel .eyebrow {
+    margin-bottom: 4px;
+  }
+
+  .chat-stream {
+    gap: 8px;
+    padding-right: 6px;
+  }
+
+  .bubble {
+    padding: 12px 14px;
+    border-radius: 18px;
+    line-height: 1.55;
+  }
+
+  .bubble-role {
+    margin-bottom: 4px;
+  }
+
+  .chat-controls {
+    gap: 8px;
+  }
+
+  .chat-controls .el-textarea__inner {
+    height: 62px;
+    min-height: 62px !important;
+  }
+
+  .chat-controls .panel-subcopy {
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .chat-actions .ghost-button,
+  .chat-actions .primary-button {
+    padding: 9px 14px;
+  }
+}
+
 @media (max-width: 640px) {
   :root {
     --shell-page-gap: 12px;
