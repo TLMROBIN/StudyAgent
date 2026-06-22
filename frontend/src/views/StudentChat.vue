@@ -1199,7 +1199,14 @@ onMounted(async () => {
           style="display: none"
           @change="handleImageSelection"
         />
-        <el-select v-model="form.subject" :disabled="sending" placeholder="选择学科" @change="handleSubjectChange">
+        <el-select
+          v-model="form.subject"
+          class="chat-subject-select"
+          :disabled="sending"
+          placeholder="选择学科"
+          aria-label="选择答疑学科"
+          @change="handleSubjectChange"
+        >
           <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
         </el-select>
         <el-select

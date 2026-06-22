@@ -36,6 +36,92 @@ def apply_runtime_schema_updates() -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
     statements: list[str] = []
+    planned_new_tables: set[str] = set()
+
+    def index_missing(table_name: str, index_name: str) -> bool:
+        if table_name not in table_names:
+            return False
+        if table_name in planned_new_tables:
+            return True
+        return index_name not in {index["name"] for index in inspector.get_indexes(table_name)}
+
+    if "student_feedback" in table_names and "student_feedback_read_states" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE student_feedback_read_states (
+                id INTEGER NOT NULL PRIMARY KEY,
+                student_id INTEGER NOT NULL,
+                feedback_id INTEGER NOT NULL,
+                read_at DATETIME NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_student_feedback_read_states_student_feedback UNIQUE (student_id, feedback_id),
+                FOREIGN KEY(feedback_id) REFERENCES student_feedback (id) ON DELETE CASCADE,
+                FOREIGN KEY(student_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+            """
+        )
+        table_names.add("student_feedback_read_states")
+        planned_new_tables.add("student_feedback_read_states")
+
+    if "release_notes" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE release_notes (
+                id INTEGER NOT NULL PRIMARY KEY,
+                title VARCHAR(120) NOT NULL,
+                content TEXT NOT NULL,
+                is_published BOOLEAN NOT NULL,
+                published_at DATETIME,
+                created_by INTEGER,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(created_by) REFERENCES users (id) ON DELETE SET NULL
+            )
+            """
+        )
+        table_names.add("release_notes")
+        planned_new_tables.add("release_notes")
+
+    if "release_notes" in table_names and "release_note_read_states" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE release_note_read_states (
+                id INTEGER NOT NULL PRIMARY KEY,
+                student_id INTEGER NOT NULL,
+                release_note_id INTEGER NOT NULL,
+                read_at DATETIME NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_release_note_read_states_student_note UNIQUE (student_id, release_note_id),
+                FOREIGN KEY(release_note_id) REFERENCES release_notes (id) ON DELETE CASCADE,
+                FOREIGN KEY(student_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+            """
+        )
+        table_names.add("release_note_read_states")
+        planned_new_tables.add("release_note_read_states")
+
+    feedback_indexes = {
+        "student_feedback_read_states": [
+            ("ix_student_feedback_read_states_student_id", "student_id"),
+            ("ix_student_feedback_read_states_feedback_id", "feedback_id"),
+            ("ix_student_feedback_read_states_read_at", "read_at"),
+        ],
+        "release_notes": [
+            ("ix_release_notes_is_published", "is_published"),
+            ("ix_release_notes_published_at", "published_at"),
+        ],
+        "release_note_read_states": [
+            ("ix_release_note_read_states_student_id", "student_id"),
+            ("ix_release_note_read_states_release_note_id", "release_note_id"),
+            ("ix_release_note_read_states_read_at", "read_at"),
+        ],
+    }
+    for table_name, indexes in feedback_indexes.items():
+        for index_name, column_name in indexes:
+            if index_missing(table_name, index_name):
+                statements.append(f"CREATE INDEX {index_name} ON {table_name} ({column_name})")
     if "knowledge_documents" in table_names:
         columns = {column["name"] for column in inspector.get_columns("knowledge_documents")}
         if "resource_type" not in columns:
@@ -82,6 +168,8 @@ def apply_runtime_schema_updates() -> None:
         feedback_columns = {column["name"] for column in inspector.get_columns("student_feedback")}
         if "archived_at" not in feedback_columns:
             statements.append("ALTER TABLE student_feedback ADD COLUMN archived_at DATETIME")
+        if "archived_at" not in feedback_columns or index_missing("student_feedback", "ix_student_feedback_archived_at"):
+            statements.append("CREATE INDEX ix_student_feedback_archived_at ON student_feedback (archived_at)")
 
     with engine.begin() as connection:
         for statement in statements:

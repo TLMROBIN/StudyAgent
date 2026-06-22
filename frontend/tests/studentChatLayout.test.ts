@@ -88,6 +88,17 @@ assert.match(
   'chat panel grid children should be allowed to shrink inside the visible panel boundary',
 )
 
+const studentChatSource = readFileSync(resolve(testDir, '../src/views/StudentChat.vue'), 'utf8')
+assert.match(
+  studentChatSource,
+  /class="chat-subject-select"/,
+  'student subject selector should have a dedicated width class',
+)
+
+const chatSubjectSelectRule = ruleFor('.chat-subject-select')
+assert.match(chatSubjectSelectRule, /flex:\s*0 0 108px/, 'subject selector should reserve readable label width')
+assert.match(chatSubjectSelectRule, /min-width:\s*108px/, 'subject selector should not collapse to an icon-only control')
+
 assert.match(
   styles,
   /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(72px,\s*1fr\) auto auto/,
