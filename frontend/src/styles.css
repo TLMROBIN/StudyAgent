@@ -11,6 +11,9 @@
   --brand-2: #db6b2c;
   --shadow: 0 24px 60px rgba(24, 33, 47, 0.12);
   --shell-page-gap: 28px;
+  --app-viewport-height: 100vh;
+  --shell-main-block-padding: 56px;
+  --student-panel-height: calc(var(--app-viewport-height, 100vh) - var(--shell-main-block-padding));
   --sidebar-expanded-width: 288px;
   --sidebar-collapsed-width: 92px;
 }
@@ -26,7 +29,7 @@ body {
 
 body {
   margin: 0;
-  min-height: 100vh;
+  min-height: var(--app-viewport-height, 100vh);
   background:
     radial-gradient(circle at top left, rgba(15, 118, 110, 0.18), transparent 32%),
     radial-gradient(circle at bottom right, rgba(219, 107, 44, 0.18), transparent 24%),
@@ -47,7 +50,7 @@ textarea {
 
 .app-root {
   position: relative;
-  min-height: 100vh;
+  min-height: var(--app-viewport-height, 100vh);
   min-width: 0;
   max-width: 100vw;
   overflow-x: hidden;
@@ -97,7 +100,7 @@ textarea {
   flex-direction: column;
   justify-content: space-between;
   width: var(--shell-sidebar-width);
-  height: 100vh;
+  height: var(--app-viewport-height, 100vh);
   padding: 22px 16px 20px;
   border-right: 1px solid rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(16px);
@@ -133,13 +136,13 @@ textarea {
 }
 
 .app-root--shell .app-main {
-  min-height: 100vh;
+  min-height: var(--app-viewport-height, 100vh);
   padding: 28px 28px 28px calc(var(--shell-sidebar-width) + var(--shell-page-gap));
   transition: padding-left 0.24s ease;
 }
 
 .app-main--plain {
-  min-height: 100vh;
+  min-height: var(--app-viewport-height, 100vh);
   padding: 0;
 }
 
@@ -284,14 +287,14 @@ textarea {
 .student-page-grid {
   grid-template-columns: minmax(134px, 148px) minmax(0, 1fr);
   align-items: stretch;
-  height: calc(100vh - 56px);
+  height: var(--student-panel-height);
   overflow: hidden;
 }
 
 .student-history-panel {
   align-content: start;
   grid-template-rows: auto minmax(0, 1fr);
-  max-height: calc(100vh - 56px);
+  max-height: var(--student-panel-height);
 }
 
 .student-history-panel .conversation-list {
@@ -555,7 +558,7 @@ textarea {
 .chat-panel {
   align-content: stretch;
   grid-template-rows: auto auto minmax(220px, 1fr) auto auto;
-  height: calc(100vh - 56px);
+  height: var(--student-panel-height);
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -1727,21 +1730,34 @@ textarea {
   .student-page-grid {
     grid-template-columns: minmax(126px, 144px) minmax(0, 1fr);
     gap: 12px;
-    height: calc(100vh - 56px);
+    height: var(--student-panel-height);
     overflow: hidden;
   }
 
   .student-page-grid .student-history-panel,
   .student-page-grid .chat-panel {
-    height: calc(100vh - 56px);
-    max-height: calc(100vh - 56px);
+    height: var(--student-panel-height);
+    max-height: var(--student-panel-height);
     min-height: 0;
+  }
+
+  .student-page-grid .chat-panel {
+    grid-template-rows: auto auto minmax(72px, 1fr) auto auto;
+  }
+
+  .student-page-grid .chat-actions {
+    order: 2;
+  }
+
+  .student-page-grid .panel-subcopy {
+    order: 3;
   }
 }
 
 @media (max-width: 640px) {
   :root {
     --shell-page-gap: 12px;
+    --shell-main-block-padding: 24px;
     --sidebar-expanded-width: 188px;
     --sidebar-collapsed-width: 68px;
   }
@@ -1762,5 +1778,10 @@ textarea {
 
   .recommendation-card__head {
     flex-direction: column;
+  }
+
+  .student-page-grid {
+    height: auto;
+    overflow: visible;
   }
 }
