@@ -149,8 +149,16 @@ bash scripts/post_deploy_check.sh
 
 说明：
 
-- 脚本主要覆盖 API、登录接口、监控入口的存活检查
+- 脚本覆盖 API、登录接口、前端登录页、前端 JS/CSS bundle MIME、监控入口的存活检查
 - 知识库切分预览、题目拆分质量、推荐题卡片仍需要人工验收
+
+如果本轮包含前端 Vue / TS / CSS 改动，不要只重启 `backend`。Nginx 镜像内 baked 了前端 bundle，应使用：
+
+```bash
+bash scripts/publish_frontend_bundle.sh
+```
+
+该脚本会执行 `docker compose build nginx`、`docker compose up -d --no-deps nginx`，随后运行 `scripts/post_deploy_check.sh` 验证页面引用的 JS/CSS bundle 真的由 Nginx 按正确 MIME 类型提供。
 
 ### 2. 人工验收清单
 

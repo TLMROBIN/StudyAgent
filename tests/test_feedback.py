@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend import database
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
 from backend.models import feedback, user  # noqa: F401
@@ -19,6 +20,66 @@ def build_session():
     SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)
     return SessionLocal
+
+
+def test_runtime_schema_updates_repair_feedback_tables_for_existing_sqlite(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY,
+                    username VARCHAR(64) NOT NULL,
+                    full_name VARCHAR(120) NOT NULL,
+                    role VARCHAR(16) NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    is_active BOOLEAN NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE student_feedback (
+                    id INTEGER PRIMARY KEY,
+                    student_id INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    reply_content TEXT,
+                    replied_by INTEGER,
+                    replied_at DATETIME,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+
+    monkeypatch.setattr(database, "engine", engine)
+    database.apply_runtime_schema_updates()
+
+    inspector = inspect(engine)
+    assert inspector.has_table("release_notes")
+    assert inspector.has_table("release_note_read_states")
+    assert inspector.has_table("student_feedback_read_states")
+
+    feedback_columns = {column["name"] for column in inspector.get_columns("student_feedback")}
+    assert "archived_at" in feedback_columns
+
+    release_note_indexes = {index["name"] for index in inspector.get_indexes("release_notes")}
+    assert "ix_release_notes_is_published" in release_note_indexes
+    assert "ix_release_notes_published_at" in release_note_indexes
+
+    feedback_read_indexes = {index["name"] for index in inspector.get_indexes("student_feedback_read_states")}
+    assert "ix_student_feedback_read_states_feedback_id" in feedback_read_indexes
+    assert "ix_student_feedback_read_states_read_at" in feedback_read_indexes
+
+    note_read_indexes = {index["name"] for index in inspector.get_indexes("release_note_read_states")}
+    assert "ix_release_note_read_states_release_note_id" in note_read_indexes
+    assert "ix_release_note_read_states_read_at" in note_read_indexes
 
 
 def build_client(session_factory, current_user: User) -> TestClient:

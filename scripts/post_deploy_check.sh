@@ -37,6 +37,58 @@ http_status() {
   curl -s -o /dev/null -w '%{http_code}' "$1"
 }
 
+http_content_type() {
+  curl -fsSI "$1" | awk 'BEGIN{IGNORECASE=1} /^Content-Type:/ {print $2; exit}' | tr -d '\r'
+}
+
+absolute_asset_url() {
+  local asset_path="$1"
+  local web_origin
+  web_origin="$(printf '%s\n' "$WEB_BASE_URL" | sed -E 's#^(https?://[^/]+).*$#\1#')"
+  if [[ "$asset_path" == http://* || "$asset_path" == https://* ]]; then
+    printf '%s\n' "$asset_path"
+  elif [[ "$asset_path" == /* ]]; then
+    printf '%s%s\n' "$web_origin" "$asset_path"
+  else
+    printf '%s/%s\n' "${WEB_BASE_URL%/}" "$asset_path"
+  fi
+}
+
+extract_frontend_assets() {
+  local html="$1"
+  printf '%s\n' "$html" \
+    | grep -Eo '(src|href)="[^"]+\.(js|css)(\?[^"]*)?"' \
+    | sed -E 's/^(src|href)="([^"]+)".*$/\2/' \
+    | sort -u
+}
+
+check_frontend_bundle_assets() {
+  local html asset_url content_type
+  html="$(http_body "${WEB_BASE_URL}/login")"
+  require_contains "$html" "/assets/" "前端 HTML 未引用 Vite bundle，可能不是发布构建产物"
+
+  local assets
+  assets="$(extract_frontend_assets "$html")"
+  [[ -n "$assets" ]] || fail "前端 HTML 未解析到 JS/CSS bundle 资源"
+
+  while IFS= read -r asset; do
+    [[ -n "$asset" ]] || continue
+    asset_url="$(absolute_asset_url "$asset")"
+    content_type="$(http_content_type "$asset_url")"
+    case "$asset" in
+      *.js|*.js\?*)
+        [[ "$content_type" == application/javascript* || "$content_type" == text/javascript* ]] \
+          || fail "前端 JS bundle Content-Type 异常：${asset_url} -> ${content_type:-empty}"
+        ;;
+      *.css|*.css\?*)
+        [[ "$content_type" == text/css* ]] \
+          || fail "前端 CSS bundle Content-Type 异常：${asset_url} -> ${content_type:-empty}"
+        ;;
+    esac
+  done <<< "$assets"
+  pass "前端 bundle assets"
+}
+
 check_api_health() {
   local body
   body="$(http_body "${API_BASE_URL}/health")"
@@ -99,6 +151,7 @@ main() {
   check_admin_login
   check_auth_me
   check_web_login
+  check_frontend_bundle_assets
 
   if curl -fsS "${PROMETHEUS_URL}/-/ready" >/dev/null 2>&1; then
     check_prometheus
