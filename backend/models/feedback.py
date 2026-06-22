@@ -19,9 +19,14 @@ class StudentFeedback(TimestampMixin, Base):
     reply_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     replied_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     student: Mapped["User"] = relationship(foreign_keys=[student_id], back_populates="feedback_items")
     replier: Mapped["User | None"] = relationship(foreign_keys=[replied_by])
+
+    @property
+    def is_archived(self) -> bool:
+        return self.archived_at is not None
 
 
 class StudentFeedbackBan(TimestampMixin, Base):

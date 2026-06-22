@@ -78,6 +78,11 @@ def apply_runtime_schema_updates() -> None:
         if "archived_at" not in notification_columns:
             statements.append("ALTER TABLE notifications ADD COLUMN archived_at DATETIME")
 
+    if "student_feedback" in table_names:
+        feedback_columns = {column["name"] for column in inspector.get_columns("student_feedback")}
+        if "archived_at" not in feedback_columns:
+            statements.append("ALTER TABLE student_feedback ADD COLUMN archived_at DATETIME")
+
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))

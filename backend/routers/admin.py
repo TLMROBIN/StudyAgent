@@ -134,6 +134,8 @@ def _admin_feedback_read(db: DbSession, item: StudentFeedback) -> AdminFeedbackR
         student_unread=feedback_reply_is_unread(db, item, item.student_id),
         created_at=item.created_at,
         updated_at=item.updated_at,
+        is_archived=item.is_archived,
+        archived_at=item.archived_at,
     )
 
 
@@ -319,8 +321,8 @@ def update_release_note(
 
 
 @router.get("/feedback", response_model=list[AdminFeedbackRead])
-def list_feedback(db: DbSession, current_user: CurrentAdmin) -> list[AdminFeedbackRead]:
-    items = db.scalars(
+def list_feedback(db: DbSession, current_user: CurrentAdmin, include_archived: bool = False) -> list[AdminFeedbackRead]:
+    query = (
         select(StudentFeedback)
         .options(
             selectinload(StudentFeedback.student).selectinload(User.classroom),
@@ -328,7 +330,10 @@ def list_feedback(db: DbSession, current_user: CurrentAdmin) -> list[AdminFeedba
             selectinload(StudentFeedback.replier),
         )
         .order_by(StudentFeedback.created_at.desc(), StudentFeedback.id.desc())
-    ).all()
+    )
+    if not include_archived:
+        query = query.where(StudentFeedback.archived_at.is_(None))
+    items = db.scalars(query).all()
     return [_admin_feedback_read(db, item) for item in items]
 
 
@@ -359,6 +364,58 @@ def reply_feedback(
         db,
         actor=current_user,
         action="reply_feedback",
+        target_type="student_feedback",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"student_id": item.student_id},
+    )
+    return _admin_feedback_read(db, item)
+
+
+@router.post("/feedback/{feedback_id}/archive", response_model=AdminFeedbackRead)
+def archive_feedback(
+    feedback_id: int,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> AdminFeedbackRead:
+    item = _feedback_or_404(db, feedback_id)
+    if item.archived_at is None:
+        item.archived_at = datetime.now(UTC)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="archive_feedback",
+        target_type="student_feedback",
+        target_id=str(item.id),
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"student_id": item.student_id},
+    )
+    return _admin_feedback_read(db, item)
+
+
+@router.delete("/feedback/{feedback_id}/archive", response_model=AdminFeedbackRead)
+def restore_feedback(
+    feedback_id: int,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> AdminFeedbackRead:
+    item = _feedback_or_404(db, feedback_id)
+    if item.archived_at is not None:
+        item.archived_at = None
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="restore_feedback",
         target_type="student_feedback",
         target_id=str(item.id),
         result="success",
