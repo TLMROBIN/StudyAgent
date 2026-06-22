@@ -557,11 +557,16 @@ textarea {
 
 .chat-panel {
   align-content: stretch;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(220px, 1fr) auto auto;
   height: var(--student-panel-height);
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
+}
+
+.chat-panel > * {
+  min-width: 0;
 }
 
 .student-notice-bar {

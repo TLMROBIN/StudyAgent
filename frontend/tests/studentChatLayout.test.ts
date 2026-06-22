@@ -74,6 +74,20 @@ for (const selector of ['.student-page-grid', '.student-history-panel', '.chat-p
   assert.doesNotMatch(rule, /calc\(100vh - 56px\)/, `${selector} should not use raw 100vh tablet height`)
 }
 
+const chatPanelRule = ruleFor('.chat-panel')
+assert.match(
+  chatPanelRule,
+  /grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+  'chat panel should use a shrinkable grid column so long notice text cannot widen the chat stream',
+)
+
+const chatPanelChildrenRule = ruleFor('.chat-panel > *')
+assert.match(
+  chatPanelChildrenRule,
+  /min-width:\s*0/,
+  'chat panel grid children should be allowed to shrink inside the visible panel boundary',
+)
+
 assert.match(
   styles,
   /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(72px,\s*1fr\) auto auto/,
