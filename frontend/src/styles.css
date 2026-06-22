@@ -629,9 +629,9 @@ textarea {
 }
 
 .bubble {
-  flex: 0 0 auto;
-  width: min(78%, 720px);
-  max-width: 100%;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: min(78%, 720px);
   min-width: 0;
   padding: 16px 18px;
   border-radius: 22px;
