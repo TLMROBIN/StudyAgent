@@ -117,6 +117,36 @@ assert.match(
   'tablet helper copy should not push send controls below the panel',
 )
 
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?:root\s*\{[\s\S]*?--shell-main-block-padding:\s*24px/,
+  'low-height landscape tablets should reduce the shell vertical budget so chat actions stay visible',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.app-root--shell \.app-main\s*\{[\s\S]*?padding-top:\s*12px[\s\S]*?padding-bottom:\s*12px/,
+  'low-height landscape tablets should use tighter page padding',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?gap:\s*10px[\s\S]*?padding:\s*14px[\s\S]*?grid-template-rows:\s*auto auto minmax\(40px,\s*1fr\) auto auto/,
+  'low-height landscape chat panels should compact fixed chrome before clipping action buttons',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.chat-controls \.el-textarea__inner\s*\{[\s\S]*?height:\s*62px/,
+  'low-height landscape composer should use a shorter text area',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.chat-actions \.ghost-button,[\s\S]*?\.chat-actions \.primary-button\s*\{[\s\S]*?padding:\s*9px 14px/,
+  'low-height landscape action buttons should use compact padding',
+)
+
 assert.match(mainSource, /installViewportHeight/, 'main.ts should install the visual viewport height synchronizer')
 assert.ok(
   mainSource.indexOf('installViewportHeight()') > -1 &&
