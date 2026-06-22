@@ -19,9 +19,17 @@ function ruleFor(selector: string) {
 }
 
 const bubbleRule = ruleFor('.bubble')
-assert.ok(!/width:\s*fit-content\b/.test(bubbleRule), 'student bubbles must not shrink to min-content width')
-assert.match(bubbleRule, /width:\s*min\(78%,\s*720px\)/, 'bubbles should have a stable readable width capped by the chat stream')
-assert.match(bubbleRule, /max-width:\s*100%/, 'bubbles must not overflow their chat stream')
+assert.match(bubbleRule, /width:\s*fit-content/, 'short chat bubbles should shrink to their message length')
+assert.doesNotMatch(
+  bubbleRule,
+  /(?:^|;\s*)width:\s*min\(78%,\s*720px\)/,
+  'chat bubbles should not use a fixed half-panel width',
+)
+assert.match(bubbleRule, /max-width:\s*min\(78%,\s*720px\)/, 'long chat bubbles should wrap at the readable width cap')
+assert.match(bubbleRule, /overflow-wrap:\s*anywhere/, 'long tokens should wrap before they push a bubble off screen')
+
+const userBubbleRule = ruleFor('.bubble.user')
+assert.match(userBubbleRule, /align-self:\s*flex-end/, 'student bubbles should stay right aligned')
 
 for (const selector of ['.student-history-panel .conversation-list', '.chat-stream']) {
   const rule = ruleFor(selector)
