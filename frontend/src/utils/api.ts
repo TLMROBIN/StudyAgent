@@ -249,6 +249,8 @@ export interface AdminFeedbackItem extends StudentFeedbackItem {
   classroom_name?: string | null
   classroom_label?: string | null
   student_feedback_banned: boolean
+  is_archived: boolean
+  archived_at?: string | null
 }
 
 export interface FeedbackPayload {
@@ -445,13 +447,25 @@ export async function markFeedbackRead(id: number): Promise<StudentFeedbackItem>
   return data
 }
 
-export async function fetchAdminFeedback(): Promise<AdminFeedbackItem[]> {
-  const { data } = await api.get<AdminFeedbackItem[]>('/admin/feedback')
+export async function fetchAdminFeedback(includeArchived = false): Promise<AdminFeedbackItem[]> {
+  const { data } = await api.get<AdminFeedbackItem[]>('/admin/feedback', {
+    params: includeArchived ? { include_archived: true } : undefined,
+  })
   return data
 }
 
 export async function replyAdminFeedback(id: number, payload: FeedbackReplyPayload): Promise<AdminFeedbackItem> {
   const { data } = await api.put<AdminFeedbackItem>(`/admin/feedback/${id}/reply`, payload)
+  return data
+}
+
+export async function archiveAdminFeedback(id: number): Promise<AdminFeedbackItem> {
+  const { data } = await api.post<AdminFeedbackItem>(`/admin/feedback/${id}/archive`)
+  return data
+}
+
+export async function restoreAdminFeedback(id: number): Promise<AdminFeedbackItem> {
+  const { data } = await api.delete<AdminFeedbackItem>(`/admin/feedback/${id}/archive`)
   return data
 }
 

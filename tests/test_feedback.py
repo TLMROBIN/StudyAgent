@@ -149,6 +149,45 @@ def test_admin_feedback_reply_sets_student_unread_until_marked_read():
         session.close()
 
 
+def test_admin_can_archive_feedback_and_restore_it_in_admin_queue():
+    session_factory = build_session()
+    admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
+    student = create_student_with_classroom(session_factory)
+    student_client = build_client(session_factory, student)
+    admin_client = build_client(session_factory, admin)
+
+    first = student_client.post("/api/feedback", json={"content": "希望首页少一些弹窗"})
+    second = student_client.post("/api/feedback", json={"content": "希望错题能导出"})
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    archived = admin_client.post(f"/api/admin/feedback/{first.json()['id']}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["is_archived"] is True
+    assert archived.json()["archived_at"] is not None
+
+    active_items = admin_client.get("/api/admin/feedback")
+    assert active_items.status_code == 200
+    assert [item["id"] for item in active_items.json()] == [second.json()["id"]]
+
+    archived_items = admin_client.get("/api/admin/feedback?include_archived=true")
+    assert archived_items.status_code == 200
+    assert [item["id"] for item in archived_items.json()] == [second.json()["id"], first.json()["id"]]
+
+    restored = admin_client.delete(f"/api/admin/feedback/{first.json()['id']}/archive")
+    assert restored.status_code == 200
+    assert restored.json()["is_archived"] is False
+    assert restored.json()["archived_at"] is None
+
+    restored_items = admin_client.get("/api/admin/feedback")
+    assert restored_items.status_code == 200
+    assert [item["id"] for item in restored_items.json()] == [second.json()["id"], first.json()["id"]]
+
+    student_items = student_client.get("/api/feedback")
+    assert student_items.status_code == 200
+    assert {item["id"] for item in student_items.json()["items"]} == {first.json()["id"], second.json()["id"]}
+
+
 def test_admin_can_ban_and_unban_student_feedback_permission():
     session_factory = build_session()
     admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")

@@ -3,11 +3,13 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
+  archiveAdminFeedback,
   banStudentFeedback,
   createAdminReleaseNote,
   fetchAdminFeedback,
   fetchAdminReleaseNotes,
   replyAdminFeedback,
+  restoreAdminFeedback,
   type AdminFeedbackItem,
   type ReleaseNoteItem,
   unbanStudentFeedback,
@@ -20,6 +22,7 @@ const savingId = ref<number | null>(null)
 const releaseNoteSaving = ref(false)
 const items = ref<AdminFeedbackItem[]>([])
 const releaseNotes = ref<ReleaseNoteItem[]>([])
+const includeArchivedFeedback = ref(false)
 const replyDrafts = reactive<Record<number, string>>({})
 const releaseNoteForm = reactive({
   id: null as number | null,
@@ -29,6 +32,7 @@ const releaseNoteForm = reactive({
 })
 
 const unrepliedCount = computed(() => items.value.filter((item) => !item.reply_content).length)
+const archivedCount = computed(() => items.value.filter((item) => item.is_archived).length)
 
 function formatTime(value?: string | null) {
   if (!value) {
@@ -51,7 +55,7 @@ function responseDetail(error: unknown, fallback: string) {
 async function loadFeedback() {
   loading.value = true
   try {
-    items.value = await fetchAdminFeedback()
+    items.value = await fetchAdminFeedback(includeArchivedFeedback.value)
     for (const item of items.value) {
       replyDrafts[item.id] = item.reply_content || ''
     }
@@ -61,6 +65,11 @@ async function loadFeedback() {
   } finally {
     loading.value = false
   }
+}
+
+async function toggleArchivedFeedback() {
+  includeArchivedFeedback.value = !includeArchivedFeedback.value
+  await loadFeedback()
 }
 
 async function loadReleaseNotes() {
@@ -182,6 +191,34 @@ async function unbanFeedback(item: AdminFeedbackItem) {
   }
 }
 
+async function archiveFeedback(item: AdminFeedbackItem) {
+  savingId.value = item.id
+  try {
+    await archiveAdminFeedback(item.id)
+    ElMessage.success('反馈已归档')
+    await loadFeedback()
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(responseDetail(error, '反馈归档失败'))
+  } finally {
+    savingId.value = null
+  }
+}
+
+async function restoreFeedback(item: AdminFeedbackItem) {
+  savingId.value = item.id
+  try {
+    await restoreAdminFeedback(item.id)
+    ElMessage.success('反馈已恢复到待处理列表')
+    await loadFeedback()
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(responseDetail(error, '反馈恢复失败'))
+  } finally {
+    savingId.value = null
+  }
+}
+
 onMounted(() => {
   void loadFeedback()
   void loadReleaseNotes()
@@ -198,12 +235,20 @@ onMounted(() => {
       </div>
       <div class="toolbar">
         <span class="detail-chip">待回复 {{ unrepliedCount }}</span>
+        <span v-if="includeArchivedFeedback" class="detail-chip detail-chip--muted">已归档 {{ archivedCount }}</span>
+        <button class="ghost-button" :disabled="loading" @click="toggleArchivedFeedback">
+          {{ includeArchivedFeedback ? '隐藏已归档' : '显示已归档' }}
+        </button>
         <button class="ghost-button" :disabled="loading" @click="loadFeedback">刷新</button>
       </div>
     </div>
 
     <section v-loading="loading" class="panel feedback-admin-list">
-      <article v-for="item in items" :key="item.id" class="feedback-admin-card">
+      <article
+        v-for="item in items"
+        :key="item.id"
+        :class="['feedback-admin-card', { 'feedback-admin-card--archived': item.is_archived }]"
+      >
         <div class="feedback-admin-head">
           <div>
             <strong>{{ item.student_name }}</strong>
@@ -216,11 +261,17 @@ onMounted(() => {
             <span :class="['detail-chip', { 'detail-chip--muted': item.student_feedback_banned }]">
               {{ item.student_feedback_banned ? '反馈已暂停' : '可反馈' }}
             </span>
+            <span v-if="item.is_archived" class="detail-chip detail-chip--muted">
+              已归档
+            </span>
           </div>
         </div>
         <div class="feedback-admin-content">
           <p>{{ item.content }}</p>
-          <span>提交 {{ formatTime(item.created_at) }}</span>
+          <span>
+            提交 {{ formatTime(item.created_at) }}
+            <template v-if="item.archived_at"> · 归档 {{ formatTime(item.archived_at) }}</template>
+          </span>
         </div>
         <div class="feedback-admin-reply">
           <textarea
@@ -237,6 +288,22 @@ onMounted(() => {
             </span>
             <button class="primary-button" :disabled="savingId === item.id" @click="saveReply(item)">
               保存回复
+            </button>
+            <button
+              v-if="!item.is_archived"
+              class="ghost-button"
+              :disabled="savingId === item.id"
+              @click="archiveFeedback(item)"
+            >
+              归档
+            </button>
+            <button
+              v-else
+              class="ghost-button"
+              :disabled="savingId === item.id"
+              @click="restoreFeedback(item)"
+            >
+              恢复
             </button>
             <button
               v-if="!item.student_feedback_banned"
@@ -257,7 +324,9 @@ onMounted(() => {
           </div>
         </div>
       </article>
-      <p v-if="!items.length" class="panel-subcopy">暂无学生反馈。</p>
+      <p v-if="!items.length" class="panel-subcopy">
+        {{ includeArchivedFeedback ? '暂无学生反馈。' : '暂无待处理学生反馈，可切换查看已归档记录。' }}
+      </p>
     </section>
 
     <section class="panel release-note-admin-panel">
@@ -337,6 +406,10 @@ onMounted(() => {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 252, 246, 0.72);
+}
+
+.feedback-admin-card--archived {
+  background: rgba(245, 246, 248, 0.76);
 }
 
 .feedback-admin-head,

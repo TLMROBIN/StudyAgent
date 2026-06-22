@@ -476,6 +476,8 @@ class AdminFeedbackRead(StudentFeedbackRead):
     classroom_name: str | None = None
     classroom_label: str | None = None
     student_feedback_banned: bool = False
+    is_archived: bool = False
+    archived_at: datetime | None = None
 
 
 class FeedbackBanRead(BaseModel):
