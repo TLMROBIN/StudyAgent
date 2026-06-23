@@ -25,6 +25,29 @@
 - **绝不静默扩展范围**：PDF 改动不应意外影响 DOCX/TXT 链路，除非明确要求
 - 不在 `.omx/plans/` 下的规划文件中做任何修改（只读）
 
+## Codex 自动收尾与恢复规则
+
+- 做完会影响远端部署的后端、前端、配置或路由改动后，默认运行：
+
+  ```bash
+  REQUIRE_REMOTE_HEAD_MATCH=1 bash scripts/studyagent_deploy_verify.sh
+  ```
+
+  只有远端 4080s checkout、本机 HEAD、`origin/main`、GitHub `main`、API health、OpenAPI、前端 `/login`、`backend/worker/nginx` 状态都通过后，才能说“部署已验证”。
+- 如果只是本机开发自测，才显式使用：
+
+  ```bash
+  VERIFY_TARGET=local bash scripts/studyagent_deploy_verify.sh
+  ```
+
+- 对话崩溃、上下文丢失或用户说“继续”时，先运行只读恢复现场：
+
+  ```bash
+  bash scripts/studyagent_recover_context.sh
+  ```
+
+  先看本机 Git、worktree、远端 4080s checkout、compose 服务、OpenAPI 和前端状态，再决定下一步；不要凭聊天记忆重开任务。
+
 ---
 
 ## 关键部署事实（容易误判）
