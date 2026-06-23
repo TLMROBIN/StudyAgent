@@ -119,6 +119,18 @@ assert.match(
 
 assert.match(
   styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1280px\) and \(orientation:\s*landscape\)[\s\S]*?\.student-page-grid \.chat-actions\s*\{[\s\S]*?order:\s*2/,
+  'wide legacy landscape tablets should keep chat action buttons before helper copy',
+)
+
+assert.match(
+  styles,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1280px\) and \(orientation:\s*landscape\)[\s\S]*?\.student-page-grid \.panel-subcopy\s*\{[\s\S]*?order:\s*3/,
+  'wide legacy landscape helper copy should be lower priority than action buttons',
+)
+
+assert.match(
+  styles,
   /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?:root\s*\{[\s\S]*?--shell-main-block-padding:\s*24px/,
   'low-height landscape tablets should reduce the shell vertical budget so chat actions stay visible',
 )
