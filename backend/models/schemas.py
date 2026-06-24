@@ -173,6 +173,13 @@ class ConversationArchiveRead(BaseModel):
     messages: list[ConversationArchiveMessageRead] = []
 
 
+class ConversationArchiveListRead(BaseModel):
+    items: list[ConversationArchiveRead]
+    total: int
+    page: int
+    page_size: int
+
+
 class ChatRequest(BaseModel):
     subject: str
     message: str = ""

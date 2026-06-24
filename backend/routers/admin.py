@@ -5,7 +5,7 @@ import io
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from backend.dependencies import CurrentAdmin, DbSession
@@ -18,6 +18,7 @@ from backend.models.schemas import (
     AdminFeedbackRead,
     AuditLogRead,
     ClassroomOptionRead,
+    ConversationArchiveListRead,
     ConversationArchiveMessageRead,
     ConversationArchiveRead,
     FeedbackBanRead,
@@ -872,6 +873,7 @@ async def import_students_legacy(
 def _conversation_archive_query(
     *,
     student_id: int | None = None,
+    student_name: str | None = None,
     subject: str | None = None,
     deleted_by_student: bool | None = None,
 ):
@@ -885,6 +887,9 @@ def _conversation_archive_query(
     )
     if student_id is not None:
         query = query.where(Conversation.student_id == student_id)
+    normalized_student_name = (student_name or "").strip()
+    if normalized_student_name:
+        query = query.join(Conversation.student).where(User.full_name.contains(normalized_student_name))
     normalized_subject = (subject or "").strip()
     if normalized_subject:
         query = query.where(Conversation.subject == normalized_subject)
@@ -931,24 +936,35 @@ def _archive_read(conversation: Conversation) -> ConversationArchiveRead:
     )
 
 
-@router.get("/conversation-archive", response_model=list[ConversationArchiveRead])
+@router.get("/conversation-archive", response_model=ConversationArchiveListRead)
 def list_conversation_archive(
     db: DbSession,
     current_user: CurrentAdmin,
     student_id: int | None = None,
+    student_name: str | None = None,
     subject: str | None = None,
     deleted_by_student: bool | None = None,
-    limit: int = 200,
-) -> list[ConversationArchiveRead]:
-    bounded_limit = max(1, min(limit, 1000))
+    page: int = 1,
+    page_size: int = 20,
+) -> ConversationArchiveListRead:
+    bounded_page = max(1, page)
+    bounded_page_size = max(1, min(page_size, 100))
+    base_query = _conversation_archive_query(
+        student_id=student_id,
+        student_name=student_name,
+        subject=subject,
+        deleted_by_student=deleted_by_student,
+    )
+    total = db.scalar(select(func.count()).select_from(base_query.order_by(None).subquery())) or 0
     rows = db.scalars(
-        _conversation_archive_query(
-            student_id=student_id,
-            subject=subject,
-            deleted_by_student=deleted_by_student,
-        ).limit(bounded_limit)
+        base_query.offset((bounded_page - 1) * bounded_page_size).limit(bounded_page_size)
     ).all()
-    return [_archive_read(row) for row in rows]
+    return ConversationArchiveListRead(
+        items=[_archive_read(row) for row in rows],
+        total=total,
+        page=bounded_page,
+        page_size=bounded_page_size,
+    )
 
 
 @router.get("/conversation-archive/export")
@@ -956,12 +972,14 @@ def export_conversation_archive(
     db: DbSession,
     current_user: CurrentAdmin,
     student_id: int | None = None,
+    student_name: str | None = None,
     subject: str | None = None,
     deleted_by_student: bool | None = None,
 ) -> Response:
     rows = db.scalars(
         _conversation_archive_query(
             student_id=student_id,
+            student_name=student_name,
             subject=subject,
             deleted_by_student=deleted_by_student,
         )
