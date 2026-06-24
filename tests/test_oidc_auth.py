@@ -10,6 +10,7 @@ from backend.models import agent_config, audit_log, conversation, knowledge, use
 from backend.models.user import User, UserRole
 from backend.routers import auth as auth_router
 from backend.security import get_password_hash
+from backend.services import oidc_service as oidc_service_module
 from backend.services.oidc_service import OidcAuthError, oidc_service
 
 
@@ -50,6 +51,48 @@ def test_oidc_callback_claims_issue_existing_student_token_pair():
         assert tokens["must_change_password"] is False
     finally:
         session.close()
+
+
+def test_oidc_exchange_passes_access_token_for_at_hash_validation(monkeypatch):
+    captured_decode_kwargs = {}
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, url, data):
+            return FakeResponse({"id_token": "id-token", "access_token": "access-token"})
+
+        def get(self, url):
+            return FakeResponse({"keys": []})
+
+    def fake_decode(token, jwks, **kwargs):
+        captured_decode_kwargs.update(kwargs)
+        return {"sub": "student001", "preferred_username": "student001"}
+
+    monkeypatch.setattr(oidc_service_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(oidc_service_module.jwt, "decode", fake_decode)
+
+    claims = oidc_service.exchange_code_for_claims("code", "verifier")
+
+    assert claims["preferred_username"] == "student001"
+    assert captured_decode_kwargs["access_token"] == "access-token"
 
 
 def test_oidc_callback_claims_reject_unbound_user():
