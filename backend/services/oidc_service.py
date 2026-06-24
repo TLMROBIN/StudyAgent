@@ -85,6 +85,7 @@ class OidcService:
                 algorithms=["RS256"],
                 audience=self.settings.oidc_client_id,
                 issuer=self.settings.oidc_issuer.rstrip("/"),
+                access_token=token_payload.get("access_token"),
             )
         except Exception as exc:  # jose raises several concrete JWT errors.
             raise OidcAuthError("OIDC id_token validation failed") from exc
