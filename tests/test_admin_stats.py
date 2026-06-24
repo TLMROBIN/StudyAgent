@@ -707,15 +707,66 @@ def test_admin_can_view_student_cleared_conversation_archive():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload[0]["student_name"] == "张三"
-    assert payload[0]["student_username"] == "zhangsan1"
-    assert payload[0]["classroom_label"] == "高一1班"
-    assert payload[0]["subject"] == "数学"
-    assert payload[0]["deleted_by_student"] is True
-    assert payload[0]["deleted_by_student_at"] is not None
-    assert [message["content"] for message in payload[0]["messages"]] == ["函数单调性怎么判断", "先看定义域。"]
-    assert payload[0]["messages"][0]["llm_model_key"] is None
-    assert payload[0]["messages"][1]["llm_model_key"] == "minimax-m27"
+    assert payload["total"] == 1
+    assert payload["page"] == 1
+    assert payload["page_size"] == 20
+    item = payload["items"][0]
+    assert item["student_name"] == "张三"
+    assert item["student_username"] == "zhangsan1"
+    assert item["classroom_label"] == "高一1班"
+    assert item["subject"] == "数学"
+    assert item["deleted_by_student"] is True
+    assert item["deleted_by_student_at"] is not None
+    assert [message["content"] for message in item["messages"]] == ["函数单调性怎么判断", "先看定义域。"]
+    assert item["messages"][0]["llm_model_key"] is None
+    assert item["messages"][1]["llm_model_key"] == "minimax-m27"
+
+
+def test_admin_conversation_archive_paginates_and_filters_by_student_name():
+    SessionLocal = build_session()
+    session = SessionLocal()
+    try:
+        admin_user = User(username="admin", full_name="管理员", role=UserRole.ADMIN, password_hash="hash")
+        zhang = User(username="zhangsan1", full_name="张三", role=UserRole.STUDENT, password_hash="hash")
+        li = User(username="lisi1", full_name="李四", role=UserRole.STUDENT, password_hash="hash")
+        session.add_all([admin_user, zhang, li])
+        session.commit()
+        session.refresh(admin_user)
+        session.refresh(zhang)
+        session.refresh(li)
+        zhang_conversations = []
+        for index in range(3):
+            conversation_row = Conversation(
+                student_id=zhang.id,
+                subject="数学",
+                updated_at=datetime(2026, 5, 23, 9, index, tzinfo=UTC),
+            )
+            session.add(conversation_row)
+            zhang_conversations.append((conversation_row, index))
+        li_conversation = Conversation(
+            student_id=li.id,
+            subject="数学",
+            updated_at=datetime(2026, 5, 23, 10, 0, tzinfo=UTC),
+        )
+        session.add(li_conversation)
+        session.flush()
+        for conversation_row, index in zhang_conversations:
+            session.add(Message(conversation_id=conversation_row.id, role=MessageRole.USER, content=f"张三会话 {index}"))
+        session.add(Message(conversation_id=li_conversation.id, role=MessageRole.USER, content="李四会话"))
+        session.commit()
+    finally:
+        session.close()
+
+    client = build_admin_client(SessionLocal, admin_user)
+    response = client.get("/api/admin/conversation-archive", params={"student_name": "张", "page": 2, "page_size": 2})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["page"] == 2
+    assert payload["page_size"] == 2
+    assert [item["student_name"] for item in payload["items"]] == ["张三"]
+    assert [item["topic"] for item in payload["items"]] == ["张三会话 0"]
 
 
 def test_admin_can_export_conversation_archive_csv():
