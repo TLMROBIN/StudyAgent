@@ -142,7 +142,6 @@ const canSend = computed(() => (
   && !selectedModelQuotaExhausted.value
 ))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
-const guidanceStageLabel = computed(() => stageLabel(guidanceStage.value))
 const notificationText = computed(() => {
   if (!notifications.value.length) {
     return '暂无通知'
@@ -1147,14 +1146,6 @@ onMounted(async () => {
           <span class="student-notice-bar__text">{{ notificationText }}</span>
         </span>
       </div>
-      <div class="panel-header">
-        <div>
-          <p class="eyebrow">Socratic Chat</p>
-          <h2>当前阶段：{{ guidanceStageLabel }}</h2>
-        </div>
-        <button class="ghost-button" :disabled="!currentConversationId" @click="toggleResolved">标记已解决</button>
-      </div>
-
       <div ref="chatStreamRef" class="chat-stream">
         <article v-for="(item, index) in messages" :key="index" :class="['bubble', item.role]">
           <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
@@ -1258,9 +1249,10 @@ onMounted(async () => {
         </el-select>
         <el-input
           v-model="form.message"
+          class="chat-message-input"
           :disabled="sending"
           type="textarea"
-          :rows="4"
+          :rows="3"
           resize="none"
           placeholder="输入你的问题，系统会先引导你整理思路"
         />
@@ -1295,6 +1287,7 @@ onMounted(async () => {
           <button class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">
             {{ pendingImageFile ? '从相册替换' : '从相册选择' }}
           </button>
+          <button class="ghost-button" :disabled="!currentConversationId" @click="toggleResolved">标记已解决</button>
           <button class="primary-button" :disabled="sending || !canSend" @click="sendMessage">
             {{ sending ? '生成中...' : '发送问题' }}
           </button>

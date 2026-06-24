@@ -101,7 +101,7 @@ assert.match(chatSubjectSelectRule, /min-width:\s*108px/, 'subject selector shou
 
 assert.match(
   styles,
-  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(72px,\s*1fr\) auto auto/,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?grid-template-rows:\s*auto minmax\(72px,\s*1fr\) auto auto/,
   'tablet chat stream should be allowed to shrink so the composer stays visible',
 )
 
@@ -143,14 +143,26 @@ assert.match(
 
 assert.match(
   styles,
-  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?gap:\s*10px[\s\S]*?padding:\s*14px[\s\S]*?grid-template-rows:\s*auto auto minmax\(40px,\s*1fr\) auto auto/,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.student-page-grid \.chat-panel\s*\{[\s\S]*?gap:\s*10px[\s\S]*?padding:\s*14px[\s\S]*?grid-template-rows:\s*auto minmax\(40px,\s*1fr\) auto auto/,
   'low-height landscape chat panels should compact fixed chrome before clipping action buttons',
 )
 
 assert.match(
   styles,
-  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.chat-controls \.el-textarea__inner\s*\{[\s\S]*?height:\s*62px/,
+  /@media \(min-width:\s*641px\) and \(max-width:\s*1080px\) and \(max-height:\s*620px\)[\s\S]*?\.chat-controls \.chat-message-input \.el-textarea__inner\s*\{[\s\S]*?height:\s*50px/,
   'low-height landscape composer should use a shorter text area',
+)
+
+assert.doesNotMatch(
+  studentChatSource,
+  /当前阶段：/,
+  'main chat panel should hide the current guidance stage header',
+)
+
+assert.match(
+  studentChatSource,
+  /class="ghost-button" :disabled="!currentConversationId" @click="toggleResolved">标记已解决/,
+  'resolved toggle should remain available after removing the stage header',
 )
 
 assert.match(

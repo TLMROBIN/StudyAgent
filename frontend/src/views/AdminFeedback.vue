@@ -139,15 +139,27 @@ async function saveReply(item: AdminFeedbackItem) {
     return
   }
   savingId.value = item.id
+  let saved = false
   try {
-    await replyAdminFeedback(item.id, { reply_content: reply })
+    const updated = await replyAdminFeedback(item.id, { reply_content: reply })
+    Object.assign(item, updated)
+    replyDrafts[item.id] = updated.reply_content || reply
     ElMessage.success('回复已保存')
-    await loadFeedback()
+    saved = true
   } catch (error) {
     console.error(error)
     ElMessage.error(responseDetail(error, '回复保存失败'))
   } finally {
     savingId.value = null
+  }
+  if (!saved) {
+    return
+  }
+  try {
+    await loadFeedback()
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning('回复已保存，但反馈列表刷新失败')
   }
 }
 

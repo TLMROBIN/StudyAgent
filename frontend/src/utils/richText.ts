@@ -290,6 +290,72 @@ function renderListItem(lines: string[], mathHtml: string[], options: RenderRich
   return `<li>${renderInlineMarkdown(lines.join('\n'), mathHtml, options).replace(/\n/g, '<br>')}</li>`
 }
 
+function splitTableCells(line: string): string[] {
+  const trimmed = line.trim()
+  const withoutLeading = trimmed.startsWith('|') ? trimmed.slice(1) : trimmed
+  const withoutEdges = withoutLeading.endsWith('|') ? withoutLeading.slice(0, -1) : withoutLeading
+  return withoutEdges.split('|').map((cell) => cell.trim())
+}
+
+function isTableSeparatorCells(cells: string[]): boolean {
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.startsWith('|') && trimmed.endsWith('|') && splitTableCells(trimmed).length > 1
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  return isTableSeparatorCells(splitTableCells(line))
+}
+
+function normalizeCompactTables(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('|') || !trimmed.endsWith('|') || !trimmed.includes('| |')) {
+        return line
+      }
+
+      const compactCells = splitTableCells(trimmed).filter((cell) => cell)
+      let separatorStart = -1
+      let separatorEnd = -1
+      for (let index = 0; index < compactCells.length; index += 1) {
+        if (!/^:?-{3,}:?$/.test(compactCells[index])) {
+          continue
+        }
+        let cursor = index
+        while (cursor < compactCells.length && /^:?-{3,}:?$/.test(compactCells[cursor])) {
+          cursor += 1
+        }
+        if (cursor - index > 1) {
+          separatorStart = index
+          separatorEnd = cursor
+          break
+        }
+      }
+
+      if (separatorStart <= 0 || separatorEnd <= separatorStart) {
+        return line
+      }
+
+      const columnCount = separatorEnd - separatorStart
+      if (separatorStart !== columnCount || compactCells.length % columnCount !== 0) {
+        return line
+      }
+
+      const rows: string[] = []
+      for (let index = 0; index < compactCells.length; index += columnCount) {
+        const rowCells = compactCells.slice(index, index + columnCount)
+        rows.push(`| ${rowCells.join(' | ')} |`)
+      }
+      return rows.join('\n')
+    })
+    .join('\n')
+}
+
 function matchHeading(line: string): RegExpMatchArray | null {
   return line.match(/^\s{0,3}(#{1,6})\s+(.*)$/)
 }
@@ -316,7 +382,8 @@ function isSpecialBlockStart(line: string): boolean {
     || matchUnorderedList(line)
     || matchOrderedList(line)
     || isHorizontalRule(line)
-    || isBlockquote(line),
+    || isBlockquote(line)
+    || isMarkdownTableRow(line),
   )
 }
 
@@ -414,6 +481,28 @@ function renderMarkdownBlocks(text: string, mathHtml: string[], options: RenderR
       continue
     }
 
+    if (isMarkdownTableRow(line) && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1])) {
+      const headerCells = splitTableCells(line)
+      index += 2
+      const bodyRows: string[][] = []
+      while (index < lines.length && isMarkdownTableRow(lines[index])) {
+        bodyRows.push(splitTableCells(lines[index]).slice(0, headerCells.length))
+        index += 1
+      }
+
+      const header = headerCells
+        .map((cell) => `<th>${renderInlineMarkdown(cell, mathHtml, options)}</th>`)
+        .join('')
+      const body = bodyRows
+        .map((row) => {
+          const cells = headerCells.map((_, cellIndex) => row[cellIndex] || '')
+          return `<tr>${cells.map((cell) => `<td>${renderInlineMarkdown(cell, mathHtml, options)}</td>`).join('')}</tr>`
+        })
+        .join('')
+      blocks.push(`<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`)
+      continue
+    }
+
     const unordered = matchUnorderedList(line)
     const ordered = matchOrderedList(line)
     if (unordered || ordered) {
@@ -466,7 +555,7 @@ function renderMarkdownBlocks(text: string, mathHtml: string[], options: RenderR
 }
 
 export function renderRichText(content: string, options: RenderRichTextOptions = {}): string {
-  const normalized = collapseSoftLineBreaks(content.replace(/\r\n?/g, '\n'))
+  const normalized = collapseSoftLineBreaks(normalizeCompactTables(content.replace(/\r\n?/g, '\n')))
   return splitCodeSegments(normalized)
     .map((segment) => {
       if (segment.type === 'code') {
