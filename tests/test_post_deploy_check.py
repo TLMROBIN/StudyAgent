@@ -19,6 +19,18 @@ def test_frontend_publish_script_rebuilds_nginx_and_runs_post_deploy_check() -> 
     assert "scripts/post_deploy_check.sh" in script
 
 
+def test_start_script_publishes_frontend_bundle_when_frontend_files_changed() -> None:
+    script = Path("start-studyagent.sh").read_text(encoding="utf-8")
+
+    assert "FRONTEND_BUNDLE_STAMP" in script
+    assert "frontend_bundle_fingerprint" in script
+    assert "frontend_changes_detected" in script
+    assert "git status --porcelain -- frontend nginx" in script
+    assert "write_frontend_bundle_stamp" in script
+    assert "scripts/publish_frontend_bundle.sh" in script
+    assert "RUN_POST_DEPLOY_CHECK=0" in script
+
+
 def test_studyagent_deploy_verify_wraps_runtime_and_route_checks() -> None:
     script = Path("scripts/studyagent_deploy_verify.sh").read_text(encoding="utf-8")
 
