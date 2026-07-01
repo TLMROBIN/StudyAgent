@@ -11,10 +11,12 @@ import {
   replyAdminFeedback,
   restoreAdminFeedback,
   type AdminFeedbackItem,
+  type FeedbackAttachment,
   type ReleaseNoteItem,
   unbanStudentFeedback,
   updateAdminReleaseNote,
 } from '../utils/api'
+import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 
 const loading = ref(false)
 const releaseNotesLoading = ref(false)
@@ -30,6 +32,7 @@ const releaseNoteForm = reactive({
   content: '',
   is_published: true,
 })
+const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 
 const unrepliedCount = computed(() => items.value.filter((item) => !item.reply_content).length)
 const archivedCount = computed(() => items.value.filter((item) => item.is_archived).length)
@@ -56,6 +59,7 @@ async function loadFeedback() {
   loading.value = true
   try {
     items.value = await fetchAdminFeedback(includeArchivedFeedback.value)
+    await preloadAssets(items.value.flatMap((item) => item.attachments || []))
     for (const item of items.value) {
       replyDrafts[item.id] = item.reply_content || ''
     }
@@ -65,6 +69,13 @@ async function loadFeedback() {
   } finally {
     loading.value = false
   }
+}
+
+function openFeedbackAttachment(attachment: FeedbackAttachment) {
+  void openAsset(attachment).catch((error) => {
+    console.error(error)
+    ElMessage.error('图片打开失败，请稍后重试')
+  })
 }
 
 async function toggleArchivedFeedback() {
@@ -280,6 +291,20 @@ onMounted(() => {
         </div>
         <div class="feedback-admin-content">
           <p>{{ item.content }}</p>
+          <div v-if="item.attachments?.length" class="feedback-image-grid">
+            <a
+              v-for="attachment in item.attachments"
+              :key="attachment.attachment_id"
+              class="feedback-image-thumb"
+              :href="assetUrl(attachment) || undefined"
+              target="_blank"
+              rel="noreferrer"
+              @click.prevent="openFeedbackAttachment(attachment)"
+            >
+              <img v-if="assetUrl(attachment)" :src="assetUrl(attachment)" :alt="attachment.filename" loading="lazy" />
+              <span v-else>图片加载中...</span>
+            </a>
+          </div>
           <span>
             提交 {{ formatTime(item.created_at) }}
             <template v-if="item.archived_at"> · 归档 {{ formatTime(item.archived_at) }}</template>
@@ -444,6 +469,40 @@ onMounted(() => {
 .feedback-admin-content p {
   margin: 0;
   white-space: pre-wrap;
+}
+
+.feedback-image-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 140px));
+}
+
+.feedback-image-thumb {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.feedback-image-thumb img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.feedback-image-thumb span {
+  overflow: hidden;
+  font-size: 12px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .release-note-admin-panel {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import {
@@ -10,16 +10,28 @@ import {
   markFeedbackRead,
   markReleaseNoteRead,
   type FeedbackUnreadSummary,
+  type FeedbackAttachment,
   type ReleaseNoteItem,
   type StudentFeedbackItem,
 } from '../utils/api'
+import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 
 type FeedbackSection = 'feedback' | 'release-notes'
+type PendingFeedbackImage = {
+  id: string
+  file: File
+  url: string
+}
+
+const MAX_FEEDBACK_IMAGES = 6
 
 const loading = ref(false)
 const releaseNotesLoading = ref(false)
 const saving = ref(false)
 const content = ref('')
+const cameraInputRef = ref<HTMLInputElement | null>(null)
+const galleryInputRef = ref<HTMLInputElement | null>(null)
+const selectedImages = ref<PendingFeedbackImage[]>([])
 const activeSection = ref<FeedbackSection>('feedback')
 const items = ref<StudentFeedbackItem[]>([])
 const releaseNotes = ref<ReleaseNoteItem[]>([])
@@ -34,6 +46,7 @@ const unreadSummary = ref<FeedbackUnreadSummary>({
 
 const hasUnreadFeedbackReplies = computed(() => unreadSummary.value.unread_feedback_replies > 0)
 const hasUnreadReleaseNotes = computed(() => unreadSummary.value.unread_release_notes > 0)
+const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 
 function formatTime(value?: string | null) {
   if (!value) {
@@ -58,6 +71,7 @@ async function loadFeedback() {
   try {
     const data = await fetchMyFeedback()
     items.value = data.items
+    await preloadAssets(items.value.flatMap((item) => item.attachments || []))
     dailyLimit.value = data.daily_limit
     dailyRemaining.value = data.daily_remaining
     feedbackBanned.value = data.feedback_banned
@@ -137,8 +151,9 @@ async function submitFeedback() {
   }
   saving.value = true
   try {
-    await createFeedback({ content: text })
+    await createFeedback({ content: text, images: selectedImages.value.map((item) => item.file) })
     content.value = ''
+    clearSelectedImages()
     ElMessage.success('反馈已提交')
     await loadFeedback()
   } catch (error) {
@@ -148,6 +163,68 @@ async function submitFeedback() {
     saving.value = false
   }
 }
+
+function resetImageInputs() {
+  if (cameraInputRef.value) {
+    cameraInputRef.value.value = ''
+  }
+  if (galleryInputRef.value) {
+    galleryInputRef.value.value = ''
+  }
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name)
+}
+
+function addSelectedImages(event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const files = Array.from(input?.files || [])
+  if (!files.length) {
+    return
+  }
+  const availableSlots = MAX_FEEDBACK_IMAGES - selectedImages.value.length
+  if (availableSlots <= 0) {
+    ElMessage.info(`每次最多上传 ${MAX_FEEDBACK_IMAGES} 张图片`)
+    resetImageInputs()
+    return
+  }
+  const imageFiles = files.filter(isImageFile).slice(0, availableSlots)
+  if (imageFiles.length < files.length) {
+    ElMessage.warning(`已忽略非图片文件或超过 ${MAX_FEEDBACK_IMAGES} 张的部分`)
+  }
+  selectedImages.value.push(...imageFiles.map((file) => ({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    file,
+    url: URL.createObjectURL(file),
+  })))
+  resetImageInputs()
+}
+
+function removeSelectedImage(id: string) {
+  const target = selectedImages.value.find((item) => item.id === id)
+  if (target) {
+    URL.revokeObjectURL(target.url)
+  }
+  selectedImages.value = selectedImages.value.filter((item) => item.id !== id)
+}
+
+function clearSelectedImages() {
+  selectedImages.value.forEach((item) => URL.revokeObjectURL(item.url))
+  selectedImages.value = []
+  resetImageInputs()
+}
+
+function openFeedbackAttachment(attachment: FeedbackAttachment) {
+  void openAsset(attachment).catch((error) => {
+    console.error(error)
+    ElMessage.error('图片打开失败，请稍后重试')
+  })
+}
+
+onBeforeUnmount(() => {
+  clearSelectedImages()
+})
 
 onMounted(() => {
   void loadFeedback()
@@ -189,6 +266,23 @@ onMounted(() => {
         </span>
       </div>
       <form v-if="activeSection === 'feedback'" class="feedback-form" @submit.prevent="submitFeedback">
+        <input
+          ref="cameraInputRef"
+          type="file"
+          accept="image/*"
+          capture="environment"
+          multiple
+          style="display: none"
+          @change="addSelectedImages"
+        />
+        <input
+          ref="galleryInputRef"
+          type="file"
+          accept="image/*"
+          multiple
+          style="display: none"
+          @change="addSelectedImages"
+        />
         <textarea
           v-model="content"
           class="textarea"
@@ -197,6 +291,37 @@ onMounted(() => {
           :disabled="saving || feedbackBanned || dailyRemaining <= 0"
           placeholder="请描述你遇到的问题、建议或希望改进的地方"
         ></textarea>
+        <div class="feedback-upload-row">
+          <button
+            class="ghost-button"
+            type="button"
+            :disabled="saving || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES"
+            @click="galleryInputRef?.click()"
+          >
+            相册
+          </button>
+          <button
+            class="ghost-button"
+            type="button"
+            :disabled="saving || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES"
+            @click="cameraInputRef?.click()"
+          >
+            拍照
+          </button>
+          <span class="panel-subcopy">已选 {{ selectedImages.length }} / {{ MAX_FEEDBACK_IMAGES }} 张</span>
+        </div>
+        <div v-if="selectedImages.length" class="feedback-image-grid">
+          <button
+            v-for="image in selectedImages"
+            :key="image.id"
+            class="feedback-image-thumb feedback-image-thumb--pending"
+            type="button"
+            @click="removeSelectedImage(image.id)"
+          >
+            <img :src="image.url" :alt="image.file.name" />
+            <span>移除</span>
+          </button>
+        </div>
         <div class="row-actions">
           <span class="panel-subcopy">{{ content.trim().length }}/1000</span>
           <button
@@ -225,6 +350,20 @@ onMounted(() => {
               {{ item.content }}
             </strong>
             <span>提交 {{ formatTime(item.created_at) }}</span>
+          </div>
+          <div v-if="item.attachments?.length" class="feedback-image-grid">
+            <a
+              v-for="attachment in item.attachments"
+              :key="attachment.attachment_id"
+              class="feedback-image-thumb"
+              :href="assetUrl(attachment) || undefined"
+              target="_blank"
+              rel="noreferrer"
+              @click.prevent="openFeedbackAttachment(attachment)"
+            >
+              <img v-if="assetUrl(attachment)" :src="assetUrl(attachment)" :alt="attachment.filename" loading="lazy" />
+              <span v-else>图片加载中...</span>
+            </a>
           </div>
           <div v-if="item.reply_content" class="feedback-reply">
             <strong>管理员回复</strong>
@@ -276,6 +415,52 @@ onMounted(() => {
 
 .feedback-quota {
   margin-top: 12px;
+}
+
+.feedback-upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.feedback-image-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 140px));
+}
+
+.feedback-image-thumb {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--muted);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.feedback-image-thumb img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.feedback-image-thumb span {
+  overflow: hidden;
+  font-size: 12px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feedback-image-thumb--pending {
+  font: inherit;
 }
 
 .feedback-list {

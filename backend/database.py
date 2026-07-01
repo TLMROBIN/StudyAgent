@@ -64,6 +64,28 @@ def apply_runtime_schema_updates() -> None:
         table_names.add("student_feedback_read_states")
         planned_new_tables.add("student_feedback_read_states")
 
+    if "student_feedback" in table_names and "student_feedback_attachments" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE student_feedback_attachments (
+                id INTEGER NOT NULL PRIMARY KEY,
+                feedback_id INTEGER NOT NULL,
+                student_id INTEGER NOT NULL,
+                storage_key VARCHAR(500) NOT NULL,
+                original_filename VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(100) NOT NULL,
+                file_size INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(feedback_id) REFERENCES student_feedback (id) ON DELETE CASCADE,
+                FOREIGN KEY(student_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+            """
+        )
+        table_names.add("student_feedback_attachments")
+        planned_new_tables.add("student_feedback_attachments")
+
     if "release_notes" not in table_names:
         statements.append(
             """
@@ -107,6 +129,11 @@ def apply_runtime_schema_updates() -> None:
             ("ix_student_feedback_read_states_student_id", "student_id"),
             ("ix_student_feedback_read_states_feedback_id", "feedback_id"),
             ("ix_student_feedback_read_states_read_at", "read_at"),
+        ],
+        "student_feedback_attachments": [
+            ("ix_student_feedback_attachments_feedback_id", "feedback_id"),
+            ("ix_student_feedback_attachments_student_id", "student_id"),
+            ("ix_student_feedback_attachments_sha256", "sha256"),
         ],
         "release_notes": [
             ("ix_release_notes_is_published", "is_published"),

@@ -455,9 +455,19 @@ class FeedbackBanWrite(BaseModel):
     reason: str | None = Field(default=None, max_length=255)
 
 
+class FeedbackAttachmentRead(BaseModel):
+    asset_id: str
+    attachment_id: str
+    filename: str
+    content_type: str
+    url: str
+    size_bytes: int
+
+
 class StudentFeedbackRead(BaseModel):
     id: int
     content: str
+    attachments: list[FeedbackAttachmentRead] = Field(default_factory=list)
     reply_content: str | None = None
     replied_by_name: str | None = None
     replied_at: datetime | None = None

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -23,10 +23,55 @@ class StudentFeedback(TimestampMixin, Base):
 
     student: Mapped["User"] = relationship(foreign_keys=[student_id], back_populates="feedback_items")
     replier: Mapped["User | None"] = relationship(foreign_keys=[replied_by])
+    attachments: Mapped[list["StudentFeedbackAttachment"]] = relationship(
+        back_populates="feedback",
+        cascade="all, delete-orphan",
+        order_by="StudentFeedbackAttachment.id",
+    )
 
     @property
     def is_archived(self) -> bool:
         return self.archived_at is not None
+
+
+class StudentFeedbackAttachment(TimestampMixin, Base):
+    __tablename__ = "student_feedback_attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    feedback_id: Mapped[int] = mapped_column(ForeignKey("student_feedback.id", ondelete="CASCADE"), index=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    storage_key: Mapped[str] = mapped_column(String(500))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(100))
+    file_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+
+    feedback: Mapped[StudentFeedback] = relationship(back_populates="attachments")
+    student: Mapped["User"] = relationship(foreign_keys=[student_id])
+
+    @property
+    def asset_id(self) -> str:
+        return f"feedback-attachment-{self.id}"
+
+    @property
+    def attachment_id(self) -> str:
+        return self.asset_id
+
+    @property
+    def filename(self) -> str:
+        return self.original_filename
+
+    @property
+    def content_type(self) -> str:
+        return self.mime_type
+
+    @property
+    def size_bytes(self) -> int:
+        return self.file_size
+
+    @property
+    def url(self) -> str:
+        return f"/api/feedback/attachments/{self.id}"
 
 
 class StudentFeedbackBan(TimestampMixin, Base):
@@ -80,6 +125,13 @@ class ReleaseNoteReadState(TimestampMixin, Base):
 
     student: Mapped["User"] = relationship(foreign_keys=[student_id])
     release_note: Mapped[ReleaseNote] = relationship()
+
+
+@event.listens_for(StudentFeedbackAttachment, "after_delete")
+def _cleanup_feedback_attachment_file(_mapper, _connection, target: StudentFeedbackAttachment) -> None:
+    from backend.services.feedback_attachment_service import feedback_attachment_service
+
+    feedback_attachment_service.delete(target.storage_key)
 
 
 if TYPE_CHECKING:

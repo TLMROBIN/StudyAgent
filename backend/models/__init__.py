@@ -1,7 +1,14 @@
 from backend.models.agent_config import AgentConfig
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
-from backend.models.feedback import ReleaseNote, ReleaseNoteReadState, StudentFeedback, StudentFeedbackBan, StudentFeedbackReadState
+from backend.models.feedback import (
+    ReleaseNote,
+    ReleaseNoteReadState,
+    StudentFeedback,
+    StudentFeedbackAttachment,
+    StudentFeedbackBan,
+    StudentFeedbackReadState,
+)
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeChunk, KnowledgeDocument
 from backend.models.learning_profile import StudentErrorEvent, StudentSkillProfile
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
@@ -20,6 +27,7 @@ __all__ = [
     "Conversation",
     "DocumentStatus",
     "StudentFeedback",
+    "StudentFeedbackAttachment",
     "StudentFeedbackBan",
     "StudentFeedbackReadState",
     "ReleaseNote",

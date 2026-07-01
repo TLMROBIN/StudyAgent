@@ -1,4 +1,7 @@
+from io import BytesIO
+
 from fastapi import FastAPI
+from PIL import Image
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -68,6 +71,7 @@ def test_runtime_schema_updates_repair_feedback_tables_for_existing_sqlite(monke
 
     feedback_columns = {column["name"] for column in inspector.get_columns("student_feedback")}
     assert "archived_at" in feedback_columns
+    assert inspector.has_table("student_feedback_attachments")
 
     release_note_indexes = {index["name"] for index in inspector.get_indexes("release_notes")}
     assert "ix_release_notes_is_published" in release_note_indexes
@@ -76,6 +80,10 @@ def test_runtime_schema_updates_repair_feedback_tables_for_existing_sqlite(monke
     feedback_read_indexes = {index["name"] for index in inspector.get_indexes("student_feedback_read_states")}
     assert "ix_student_feedback_read_states_feedback_id" in feedback_read_indexes
     assert "ix_student_feedback_read_states_read_at" in feedback_read_indexes
+
+    feedback_attachment_indexes = {index["name"] for index in inspector.get_indexes("student_feedback_attachments")}
+    assert "ix_student_feedback_attachments_feedback_id" in feedback_attachment_indexes
+    assert "ix_student_feedback_attachments_student_id" in feedback_attachment_indexes
 
     note_read_indexes = {index["name"] for index in inspector.get_indexes("release_note_read_states")}
     assert "ix_release_note_read_states_release_note_id" in note_read_indexes
@@ -136,6 +144,12 @@ def create_student_with_classroom(session_factory) -> User:
     return create_user(session_factory, UserRole.STUDENT, full_name="张三", classroom=classroom)
 
 
+def build_png_bytes() -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (2, 2), color=(255, 255, 255)).save(output, format="PNG")
+    return output.getvalue()
+
+
 def test_student_feedback_limit_admin_reply_and_student_readback():
     session_factory = build_session()
     admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
@@ -174,6 +188,52 @@ def test_student_feedback_limit_admin_reply_and_student_readback():
     assert own_items.json()["daily_remaining"] == 0
     first_item = next(item for item in own_items.json()["items"] if item["id"] == feedback_id)
     assert first_item["reply_content"] == "已收到，我们会排进优化清单。"
+
+
+def test_student_can_upload_feedback_images_and_admin_can_view_them(tmp_path, monkeypatch):
+    png_bytes = build_png_bytes()
+    monkeypatch.setattr(feedback_router.feedback_attachment_service, "base_dir", tmp_path)
+    session_factory = build_session()
+    admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
+    student = create_student_with_classroom(session_factory)
+    other_student = create_user(session_factory, UserRole.STUDENT, full_name="李四")
+    student_client = build_client(session_factory, student)
+    admin_client = build_client(session_factory, admin)
+    other_student_client = build_client(session_factory, other_student)
+
+    created = student_client.post(
+        "/api/feedback",
+        data={"content": "拍照反馈：按钮遮住了题目图片"},
+        files=[
+            ("images", ("screen.png", png_bytes, "image/png")),
+            ("images", ("camera.png", png_bytes, "image/png")),
+        ],
+    )
+    assert created.status_code == 201
+    created_payload = created.json()
+    assert created_payload["content"] == "拍照反馈：按钮遮住了题目图片"
+    assert [item["filename"] for item in created_payload["attachments"]] == ["screen.png", "camera.png"]
+
+    own_items = student_client.get("/api/feedback")
+    assert own_items.status_code == 200
+    own_attachment = own_items.json()["items"][0]["attachments"][0]
+    assert own_attachment["content_type"] == "image/png"
+    assert own_attachment["url"].startswith("/api/feedback/attachments/")
+
+    admin_items = admin_client.get("/api/admin/feedback")
+    assert admin_items.status_code == 200
+    assert len(admin_items.json()[0]["attachments"]) == 2
+
+    student_image = student_client.get(own_attachment["url"])
+    assert student_image.status_code == 200
+    assert student_image.headers["content-type"] == "image/png"
+
+    admin_image = admin_client.get(own_attachment["url"])
+    assert admin_image.status_code == 200
+    assert admin_image.content == png_bytes
+
+    forbidden_image = other_student_client.get(own_attachment["url"])
+    assert forbidden_image.status_code == 404
 
 
 def test_admin_feedback_reply_sets_student_unread_until_marked_read():

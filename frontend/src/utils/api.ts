@@ -174,7 +174,7 @@ export interface LLMUsageSummary {
   total_tokens: number
 }
 
-export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment
+export type AuthorizedAssetResource = KnowledgeAsset | ChatMessageAttachment | FeedbackAttachment
 
 export interface QuestionRecommendationRequest {
   subject: string
@@ -224,6 +224,7 @@ export interface NotificationPayload {
 export interface StudentFeedbackItem {
   id: number
   content: string
+  attachments: FeedbackAttachment[]
   reply_content?: string | null
   replied_by_name?: string | null
   replied_at?: string | null
@@ -255,6 +256,16 @@ export interface AdminFeedbackItem extends StudentFeedbackItem {
 
 export interface FeedbackPayload {
   content: string
+  images?: File[]
+}
+
+export interface FeedbackAttachment {
+  asset_id: string
+  attachment_id: string
+  filename: string
+  content_type: string
+  url: string
+  size_bytes: number
 }
 
 export interface FeedbackReplyPayload {
@@ -433,7 +444,16 @@ export async function fetchMyFeedback(): Promise<StudentFeedbackList> {
 }
 
 export async function createFeedback(payload: FeedbackPayload): Promise<StudentFeedbackItem> {
-  const { data } = await api.post<StudentFeedbackItem>('/feedback', payload)
+  if (payload.images?.length) {
+    const formData = new FormData()
+    formData.append('content', payload.content)
+    payload.images.forEach((image) => {
+      formData.append('images', image)
+    })
+    const { data } = await api.post<StudentFeedbackItem>('/feedback', formData)
+    return data
+  }
+  const { data } = await api.post<StudentFeedbackItem>('/feedback', { content: payload.content })
   return data
 }
 
