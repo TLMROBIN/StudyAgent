@@ -41,7 +41,7 @@ from backend.services.account_service import build_default_password, build_gener
 from backend.services.audit_service import audit_service
 from backend.services.auth_service import auth_service
 from backend.services.student_grade_service import student_grade_service
-from backend.routers.feedback import feedback_reply_is_unread
+from backend.routers.feedback import _feedback_attachment_read, feedback_reply_is_unread
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 MANAGED_USER_ROLES = {UserRole.STUDENT, UserRole.TEACHER}
@@ -129,6 +129,7 @@ def _admin_feedback_read(db: DbSession, item: StudentFeedback) -> AdminFeedbackR
         classroom_label=student.classroom_label if student else None,
         student_feedback_banned=student.feedback_ban is not None if student else False,
         content=item.content,
+        attachments=[_feedback_attachment_read(attachment) for attachment in item.attachments],
         reply_content=item.reply_content,
         replied_by_name=item.replier.full_name if item.replier else None,
         replied_at=item.replied_at,
@@ -329,6 +330,7 @@ def list_feedback(db: DbSession, current_user: CurrentAdmin, include_archived: b
             selectinload(StudentFeedback.student).selectinload(User.classroom),
             selectinload(StudentFeedback.student).selectinload(User.feedback_ban),
             selectinload(StudentFeedback.replier),
+            selectinload(StudentFeedback.attachments),
         )
         .order_by(StudentFeedback.created_at.desc(), StudentFeedback.id.desc())
     )
@@ -358,6 +360,7 @@ def reply_feedback(
             selectinload(StudentFeedback.student).selectinload(User.classroom),
             selectinload(StudentFeedback.student).selectinload(User.feedback_ban),
             selectinload(StudentFeedback.replier),
+            selectinload(StudentFeedback.attachments),
         )
         .where(StudentFeedback.id == feedback_id)
     ).one()
