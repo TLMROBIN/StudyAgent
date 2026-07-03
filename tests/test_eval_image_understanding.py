@@ -74,6 +74,7 @@ def test_eval_image_understanding_reads_failed_rows_without_updating_db(monkeypa
     _create_eval_db(db_path)
 
     seen: list[dict] = []
+    stopped = []
 
     async def fake_understand(**kwargs):
         seen.append(kwargs)
@@ -87,6 +88,7 @@ def test_eval_image_understanding_reads_failed_rows_without_updating_db(monkeypa
         )
 
     monkeypatch.setattr(eval_image_understanding.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(eval_image_understanding, "stop_paddleocr_worker", lambda: stopped.append(True))
     out_path = tmp_path / "eval_results.csv"
 
     exit_code = eval_image_understanding.main(
@@ -113,6 +115,7 @@ def test_eval_image_understanding_reads_failed_rows_without_updating_db(monkeypa
     assert "multimodal: 1" in captured
     assert seen[0]["image_bytes"] == b"png-bytes"
     assert seen[0]["subject"] == "物理"
+    assert stopped == [True]
 
     rows = list(csv.DictReader(out_path.open()))
     assert rows[0]["attachment_id"] == "1"

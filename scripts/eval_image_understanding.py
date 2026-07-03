@@ -31,7 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from backend.services.chat_image_understanding_service import chat_image_understanding_service  # noqa: E402
+from backend.services.chat_image_understanding_service import (  # noqa: E402
+    chat_image_understanding_service,
+    stop_paddleocr_worker,
+)
 
 
 DETAIL_FIELDS = [
@@ -535,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
 
     write_csv(out_path, detail_rows)
     print_summary(total_rows=len(rows), missing_files=missing_files, detail_rows=detail_rows, out_path=out_path)
+    stop_paddleocr_worker()
     return 0
 
 
