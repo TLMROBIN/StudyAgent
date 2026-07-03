@@ -266,7 +266,7 @@ class LLMService:
             "stream": False,
             "max_completion_tokens": 8,
         }
-        url = provider.base_url.rstrip("/") + "/chat/completions"
+        url = self._chat_completions_url(provider.base_url)
         timeout = httpx.Timeout(float(self.settings.llm_request_timeout_seconds))
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -648,7 +648,7 @@ class LLMService:
         }
         if max_completion_tokens:
             payload["max_completion_tokens"] = max_completion_tokens
-        url = provider.base_url.rstrip("/") + "/chat/completions"
+        url = self._chat_completions_url(provider.base_url)
         timeout = httpx.Timeout(self.settings.llm_request_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -811,7 +811,7 @@ class LLMService:
             "temperature": 0.1,
             "stream": False,
         }
-        url = provider.base_url.rstrip("/") + "/chat/completions"
+        url = self._chat_completions_url(provider.base_url)
         timeout = httpx.Timeout(self.settings.llm_vision_request_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
@@ -819,6 +819,15 @@ class LLMService:
             body = response.json()
         message = body.get("choices", [{}])[0].get("message", {})
         return _content_text(message.get("content", ""))
+
+    @staticmethod
+    def _chat_completions_url(base_url: str) -> str:
+        normalized = base_url.rstrip("/")
+        if normalized.endswith("/chat/completions"):
+            return normalized
+        if normalized.endswith("/v1"):
+            return f"{normalized}/chat/completions"
+        return f"{normalized}/v1/chat/completions"
 
     @staticmethod
     def _image_data_url(*, image_bytes: bytes, mime_type: str) -> str:
