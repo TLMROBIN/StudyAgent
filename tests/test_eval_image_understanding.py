@@ -159,6 +159,11 @@ def test_eval_image_understanding_matrix_mode_compares_models_without_leaking_ap
         )
         if payload["model"] == "bad-model":
             raise RuntimeError("upstream refused secret-302-key")
+        if payload["model"] == "gemini-2.5-flash-lite":
+            return {
+                "choices": [{"message": {"content": "啊" * 20}}],
+                "usage": {"prompt_tokens": 13, "completion_tokens": 5},
+            }
         return {
             "choices": [{"message": {"content": "题干：如图所示，物块受到水平力。"}}],
             "usage": {"prompt_tokens": 11, "completion_tokens": 7},
@@ -172,6 +177,18 @@ def test_eval_image_understanding_matrix_mode_compares_models_without_leaking_ap
         eval_image_understanding.chat_completions_url("https://api.302ai.cn/v1")
         == "https://api.302ai.cn/v1/chat/completions"
     )
+    assert eval_image_understanding.DEFAULT_MATRIX_MODELS == [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen2.5-VL-32B-Instruct",
+        "doubao-1.5-vision-pro-32k",
+    ]
+    assert "printed_answer" in eval_image_understanding.prompt_for_model("gemini-2.5-flash")
+    assert eval_image_understanding.is_garbage_output("啊" * 20)
+    assert eval_image_understanding.is_garbage_output("||||||||")
+    assert not eval_image_understanding.is_garbage_output("题干：如图所示，物块受到水平力。")
 
     exit_code = eval_image_understanding.main(
         [
@@ -189,7 +206,7 @@ def test_eval_image_understanding_matrix_mode_compares_models_without_leaking_ap
             "--provider",
             "302ai",
             "--models",
-            "Qwen/Qwen3-VL-32B-Instruct,deepseek-ai/DeepSeek-OCR,bad-model",
+            "gemini-2.5-flash,gemini-2.5-flash-lite,bad-model",
             "--out",
             str(out_path),
             "--score-template",
@@ -200,7 +217,8 @@ def test_eval_image_understanding_matrix_mode_compares_models_without_leaking_ap
     captured = capsys.readouterr().out
     assert exit_code == 0
     assert "Matrix evaluated rows: 3" in captured
-    assert "Qwen/Qwen3-VL-32B-Instruct: success_rate=100.0%" in captured
+    assert "gemini-2.5-flash: success_rate=100.0% garbage=0" in captured
+    assert "gemini-2.5-flash-lite: success_rate=0.0% garbage=1" in captured
     assert "bad-model: success_rate=0.0%" in captured
     assert "secret-302-key" not in captured
 
@@ -210,22 +228,27 @@ def test_eval_image_understanding_matrix_mode_compares_models_without_leaking_ap
     assert requests[0]["image_url"].startswith("data:image/png;base64,")
     assert "题干" in requests[0]["prompt"]
     assert "不解答" in requests[0]["prompt"]
-    assert requests[1]["prompt"] == "Free OCR."
+    assert "printed_answer" in requests[0]["prompt"]
 
     rows = list(csv.DictReader(out_path.open()))
     assert [row["model"] for row in rows] == [
-        "Qwen/Qwen3-VL-32B-Instruct",
-        "deepseek-ai/DeepSeek-OCR",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
         "bad-model",
     ]
     assert rows[0]["success"] == "True"
+    assert rows[0]["garbage"] == "False"
     assert rows[0]["prompt_tokens"] == "11"
     assert rows[0]["completion_tokens"] == "7"
     assert rows[0]["output_preview"] == "题干：如图所示，物块受到水平力。"
+    assert rows[1]["success"] == "False"
+    assert rows[1]["garbage"] == "True"
     assert rows[2]["success"] == "False"
+    assert rows[2]["garbage"] == "False"
     assert "secret-302-key" not in rows[2]["output_preview"]
 
     score_rows = list(csv.DictReader(score_path.open()))
+    assert score_rows[1]["garbage"] == "True"
     assert score_rows[0]["stem_completeness_score"] == ""
     assert score_rows[0]["formula_correctness_score"] == ""
     assert score_rows[0]["diagram_description_score"] == ""

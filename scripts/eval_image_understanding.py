@@ -49,16 +49,17 @@ DETAIL_FIELDS = [
     "elapsed_seconds",
 ]
 DEFAULT_MATRIX_MODELS = [
-    "Qwen/Qwen3-VL-32B-Instruct",
-    "Qwen/Qwen3-VL-8B-Thinking",
     "gemini-2.5-flash",
-    "doubao-1.5-vision-pro-250328",
-    "THUDM/GLM-4.1V-9B-Thinking",
-    "deepseek-ai/DeepSeek-OCR",
+    "gemini-2.5-flash-lite",
+    "Qwen/Qwen3-VL-8B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen2.5-VL-32B-Instruct",
+    "doubao-1.5-vision-pro-32k",
 ]
 DEFAULT_MATRIX_MODELS_TEXT = ",".join(DEFAULT_MATRIX_MODELS)
 VLM_EXTRACTION_PROMPT = (
     "你正在评测高中题目图片识别质量。请只做题目结构化提取，不解答，不给最终答案，不编造看不清的内容。\n"
+    "若图片中印有参考答案或解析，将其放入单独的『printed_answer』小节，不要混入题干与已知条件。\n"
     "请按 Markdown 输出：\n"
     "1. 题干：完整抄录能看清的题干文字。\n"
     "2. 已知条件：列出数字、单位、公式、变量关系，公式使用 LaTeX。\n"
@@ -75,6 +76,7 @@ MATRIX_FIELDS = [
     "subject",
     "model",
     "success",
+    "garbage",
     "output_length",
     "elapsed_seconds",
     "prompt_tokens",
@@ -262,6 +264,27 @@ def parse_completion(body: dict[str, Any]) -> tuple[str, int | None, int | None]
     return text, prompt_tokens, completion_tokens
 
 
+def is_effective_matrix_char(char: str) -> bool:
+    return ("\u4e00" <= char <= "\u9fff") or (char.isascii() and char.isalnum())
+
+
+def garbage_output_metrics(text: str) -> tuple[bool, float, float]:
+    chars = [char for char in text if not char.isspace()]
+    if not chars:
+        return False, 0.0, 0.0
+    counts: dict[str, int] = {}
+    for char in chars:
+        counts[char] = counts.get(char, 0) + 1
+    max_single_char_ratio = max(counts.values()) / len(chars)
+    effective_char_ratio = sum(1 for char in chars if is_effective_matrix_char(char)) / len(chars)
+    return max_single_char_ratio > 0.40 or effective_char_ratio < 0.30, max_single_char_ratio, effective_char_ratio
+
+
+def is_garbage_output(text: str) -> bool:
+    garbage, _, _ = garbage_output_metrics(text)
+    return garbage
+
+
 async def evaluate_row(row: sqlite3.Row, *, image_path: Path) -> dict[str, Any]:
     image_bytes = image_path.read_bytes()
     mime_type = row["mime_type"] or mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
@@ -388,12 +411,14 @@ async def evaluate_matrix_cell(
         )
         elapsed = perf_counter() - started_at
         text, prompt_tokens, completion_tokens = parse_completion(body)
+        garbage = is_garbage_output(text)
         return {
             "attachment_id": row["attachment_id"],
             "storage_key": row["storage_key"],
             "subject": row["subject"] or "",
             "model": model,
-            "success": bool(text.strip()),
+            "success": bool(text.strip()) and not garbage,
+            "garbage": garbage,
             "output_length": len(text),
             "elapsed_seconds": f"{elapsed:.3f}",
             "prompt_tokens": "" if prompt_tokens is None else prompt_tokens,
@@ -408,6 +433,7 @@ async def evaluate_matrix_cell(
             "subject": row["subject"] or "",
             "model": model,
             "success": False,
+            "garbage": False,
             "output_length": 0,
             "elapsed_seconds": f"{elapsed:.3f}",
             "prompt_tokens": "",
@@ -434,9 +460,12 @@ def print_matrix_summary(
         model_rows = [row for row in matrix_rows if row["model"] == model]
         latencies = [float(row["elapsed_seconds"]) for row in model_rows]
         successes = sum(1 for row in model_rows if str(row["success"]) == "True")
+        garbage_count = sum(1 for row in model_rows if str(row.get("garbage")) == "True")
         rate = successes / len(model_rows) * 100 if model_rows else 0.0
+        garbage_rate = garbage_count / len(model_rows) * 100 if model_rows else 0.0
         print(
             f"  {model}: success_rate={rate:.1f}% "
+            f"garbage={garbage_count} garbage_rate={garbage_rate:.1f}% "
             f"p50={format_seconds(percentile(latencies, 0.50))} "
             f"p95={format_seconds(percentile(latencies, 0.95))}"
         )
