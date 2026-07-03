@@ -238,6 +238,90 @@ def test_paddleocr_backend_reports_missing_dependency(monkeypatch, tmp_path):
     assert service._try_paddleocr_sync(image_path=str(image_path)) is None
 
 
+def test_paddleocr_worker_restarts_after_task_timeout():
+    started_processes: list[FakeProcess] = []
+
+    class FakeQueue:
+        def __init__(self, responses=None):
+            self.responses = list(responses or [])
+            self.items = []
+            self.closed = False
+
+        def put(self, item, timeout=None):
+            self.items.append(item)
+
+        def get(self, timeout=None):
+            if not self.responses:
+                raise image_service_module.queue.Empty
+            return self.responses.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        def __init__(self, *, target, args):
+            self.target = target
+            self.args = args
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+
+        def start(self):
+            started_processes.append(self)
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+    class FakeContext:
+        def __init__(self):
+            self.queue_calls = 0
+
+        def Queue(self, maxsize=0):
+            self.queue_calls += 1
+            if self.queue_calls == 2:
+                return FakeQueue()
+            if self.queue_calls == 4:
+                return FakeQueue([("2", "ok", "如图，空间存在匀强电场，求正确说法。")])
+            return FakeQueue()
+
+        def Process(self, *, target, args):
+            return FakeProcess(target=target, args=args)
+
+    worker = image_service_module._PaddleOCRWorker(context=FakeContext())
+
+    assert worker.run("first.png", timeout_seconds=0.01) is None
+    assert started_processes[0].terminated is True
+
+    assert worker.run("second.png", timeout_seconds=0.01) == "如图，空间存在匀强电场，求正确说法。"
+    assert len(started_processes) == 2
+
+
+def test_test_injected_paddleocr_bypasses_worker(monkeypatch, tmp_path):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
+    service = ChatImageUnderstandingService(settings=settings)
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(_make_png_bytes())
+
+    def fail_worker():
+        raise AssertionError("test-injected PaddleOCR should bypass singleton worker")
+
+    monkeypatch.setattr(image_service_module, "_get_paddleocr_worker", fail_worker, raising=False)
+    monkeypatch.setattr(service, "_run_paddleocr", lambda path: "已知函数图像经过点 A，求单调区间。")
+
+    assert service._run_paddleocr_safely(str(image_path)) == "已知函数图像经过点 A，求单调区间。"
+
+
 def test_paddleocr_backend_times_out_hung_worker(monkeypatch, tmp_path):
     settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr", CHAT_IMAGE_OCR_TIMEOUT_SECONDS=0)
     service = ChatImageUnderstandingService(settings=settings)

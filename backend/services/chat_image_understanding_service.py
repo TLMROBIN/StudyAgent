@@ -4,11 +4,13 @@ import asyncio
 from dataclasses import dataclass
 from functools import cached_property
 from io import BytesIO
+from itertools import count
 import logging
 import multiprocessing as mp
 import os
 import queue
 import re
+from threading import Lock
 from typing import Any
 
 from backend.config import Settings, get_settings
@@ -22,6 +24,7 @@ _PADDLEOCR_THREAD_ENV_DEFAULTS = {
     "MKL_NUM_THREADS": "2",
     "PADDLE_NUM_THREADS": "2",
 }
+_PADDLEOCR_STOP = "__studyagent_paddleocr_stop__"
 
 
 @dataclass
@@ -308,6 +311,11 @@ class ChatImageUnderstandingService:
     def _run_paddleocr_in_subprocess(self, *, image_path: str, timeout_seconds: float) -> str | None:
         if timeout_seconds <= 0:
             return None
+        return _get_paddleocr_worker().run(image_path, timeout_seconds=timeout_seconds)
+
+    def _run_paddleocr_once_in_subprocess(self, *, image_path: str, timeout_seconds: float) -> str | None:
+        if timeout_seconds <= 0:
+            return None
 
         ctx = mp.get_context("spawn")
         output_queue = ctx.Queue(maxsize=1)
@@ -543,6 +551,145 @@ class ChatImageUnderstandingService:
 
         resampling = getattr(Image, "Resampling", Image).LANCZOS
         return image.resize((max(1, round(width * scale)), max(1, round(height * scale))), resampling)
+
+
+class _PaddleOCRWorker:
+    def __init__(self, *, context=None, worker_target=None) -> None:
+        self._context = context or mp.get_context("spawn")
+        self._worker_target = worker_target or _paddleocr_worker_loop
+        self._process = None
+        self._task_queue = None
+        self._result_queue = None
+        self._request_lock = Lock()
+        self._task_ids = count(1)
+
+    def start(self) -> None:
+        with self._request_lock:
+            self._ensure_started()
+
+    def run(self, image_path: str, *, timeout_seconds: float) -> str | None:
+        if timeout_seconds <= 0:
+            return None
+        with self._request_lock:
+            self._ensure_started()
+            if self._process is None or self._task_queue is None or self._result_queue is None:
+                return None
+            task_id = str(next(self._task_ids))
+            try:
+                self._task_queue.put((task_id, image_path), timeout=1)
+                result_task_id, status, payload = self._result_queue.get(timeout=timeout_seconds)
+            except queue.Empty:
+                logger.warning("chat_image_paddleocr_worker_timeout timeout_seconds=%s", timeout_seconds)
+                self._stop_locked(force=True)
+                return None
+            except Exception as exc:
+                logger.warning("chat_image_paddleocr_worker_failed error=%s", str(exc)[:300])
+                self._stop_locked(force=True)
+                return None
+
+            if result_task_id != task_id:
+                logger.warning(
+                    "chat_image_paddleocr_worker_stale_result expected_task_id=%s actual_task_id=%s",
+                    task_id,
+                    result_task_id,
+                )
+                self._stop_locked(force=True)
+                return None
+            if status == "ok":
+                return str(payload or "")
+            logger.warning("chat_image_paddleocr_worker_task_failed error=%s", str(payload)[:300])
+            if self._process is not None and not self._process.is_alive():
+                self._stop_locked(force=True)
+            return None
+
+    def stop(self) -> None:
+        with self._request_lock:
+            self._stop_locked(force=True)
+
+    def _ensure_started(self) -> None:
+        if self._process is not None and self._process.is_alive():
+            return
+        self._close_queues_locked()
+        self._task_queue = self._context.Queue(maxsize=1)
+        self._result_queue = self._context.Queue(maxsize=1)
+        self._process = self._context.Process(
+            target=self._worker_target,
+            args=(self._task_queue, self._result_queue),
+        )
+        self._process.start()
+
+    def _stop_locked(self, *, force: bool) -> None:
+        process = self._process
+        if process is not None and process.is_alive():
+            if not force and self._task_queue is not None:
+                try:
+                    self._task_queue.put(_PADDLEOCR_STOP, timeout=0.2)
+                except Exception:
+                    pass
+                process.join(timeout=2)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+        self._process = None
+        self._close_queues_locked()
+
+    def _close_queues_locked(self) -> None:
+        for worker_queue in (self._task_queue, self._result_queue):
+            if worker_queue is None:
+                continue
+            try:
+                worker_queue.close()
+            except Exception:
+                pass
+        self._task_queue = None
+        self._result_queue = None
+
+
+_paddleocr_worker: _PaddleOCRWorker | None = None
+_paddleocr_worker_lock = Lock()
+
+
+def _get_paddleocr_worker() -> _PaddleOCRWorker:
+    global _paddleocr_worker
+    with _paddleocr_worker_lock:
+        if _paddleocr_worker is None:
+            _paddleocr_worker = _PaddleOCRWorker()
+        return _paddleocr_worker
+
+
+def warmup_paddleocr_worker() -> None:
+    _get_paddleocr_worker().start()
+
+
+def stop_paddleocr_worker() -> None:
+    global _paddleocr_worker
+    with _paddleocr_worker_lock:
+        worker = _paddleocr_worker
+        _paddleocr_worker = None
+    if worker is not None:
+        worker.stop()
+
+
+def _paddleocr_worker_loop(task_queue, result_queue) -> None:
+    for name, value in _PADDLEOCR_THREAD_ENV_DEFAULTS.items():
+        os.environ.setdefault(name, value)
+    service = ChatImageUnderstandingService(settings=Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr"))
+    try:
+        service._cached_paddleocr
+    except BaseException as exc:
+        logger.warning("chat_image_paddleocr_worker_warmup_failed error=%s", str(exc)[:300])
+    while True:
+        task = task_queue.get()
+        if task == _PADDLEOCR_STOP:
+            return
+        task_id, image_path = task
+        try:
+            result_queue.put((task_id, "ok", service._run_paddleocr(image_path)))
+        except BaseException as exc:
+            result_queue.put((task_id, "error", f"{type(exc).__name__}: {exc}"))
 
 
 def _paddleocr_subprocess_worker(image_path: str, output_queue) -> None:

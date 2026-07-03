@@ -98,7 +98,7 @@ class Settings(BaseSettings):
         alias="CHAT_ALLOWED_IMAGE_MIME_TYPES",
     )
     chat_image_ocr_backend: str = Field(default="hybrid", alias="CHAT_IMAGE_OCR_BACKEND")
-    chat_image_ocr_timeout_seconds: int = Field(default=20, alias="CHAT_IMAGE_OCR_TIMEOUT_SECONDS")
+    chat_image_ocr_timeout_seconds: int = Field(default=45, alias="CHAT_IMAGE_OCR_TIMEOUT_SECONDS")
     chat_image_preprocess_min_long_edge: int = Field(default=1200, alias="CHAT_IMAGE_PREPROCESS_MIN_LONG_EDGE")
     chat_image_preprocess_max_long_edge: int = Field(default=2400, alias="CHAT_IMAGE_PREPROCESS_MAX_LONG_EDGE")
     chat_image_preprocess_jpeg_quality: int = Field(default=92, alias="CHAT_IMAGE_PREPROCESS_JPEG_QUALITY")
