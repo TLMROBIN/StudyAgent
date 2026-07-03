@@ -235,9 +235,14 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         session.close()
 
 
-def test_student_can_list_builtin_chat_models():
+def test_student_can_list_builtin_chat_models(monkeypatch):
     session_factory = _build_session_factory()
     client = _build_chat_test_client(session_factory, _create_student(session_factory))
+    monkeypatch.setattr(
+        chat_router.llm_service,
+        "chat_model_options",
+        lambda: [{"key": "minimax-m27", "name": "MiniMax-M2.7", "description": "highspeed"}],
+    )
 
     response = client.get("/api/chat/models")
 
