@@ -847,6 +847,169 @@ def test_chat_stream_records_multimodal_status_for_image_turn(monkeypatch):
         session.close()
 
 
+def test_chat_stream_persists_understanding_json_for_image_turn(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    understanding_payload = {
+        "is_academic": True,
+        "subject_guess": "physics",
+        "question_text": "如图所示，求电流表示数。",
+        "known_conditions": ["R=10Ω"],
+        "options": {},
+        "formulas_latex": [],
+        "diagrams": [{"type": "circuit", "description": "含滑动变阻器"}],
+        "handwriting": "",
+        "printed_answer": "参考答案：变小",
+        "uncertainties": ["电源电压看不清"],
+        "quality_issues": [],
+    }
+    captured_messages: list[dict[str, str]] = []
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        captured_messages.extend(messages)
+        yield "先看电路总电阻如何变化。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="如图所示，求电流表示数。",
+            prompt_summary="题干：如图所示，求电流表示数。不确定处：电源电压看不清",
+            ocr_raw_text="",
+            confidence_level="medium",
+            source="multimodal",
+            must_short_circuit=False,
+            understanding_json=understanding_payload,
+            question_text="如图所示，求电流表示数。",
+            printed_answer="参考答案：变小",
+            uncertainties=["电源电压看不清"],
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "物理", "message": ""},
+        files={"image": ("question.png", _make_test_image_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert "参考答案" not in "\n".join(message["content"] for message in captured_messages)
+    session = session_factory()
+    try:
+        attachment = session.scalar(select(ChatMessageAttachment))
+        assert attachment is not None
+        assert json.loads(attachment.understanding_json) == understanding_payload
+    finally:
+        session.close()
+
+
+def test_chat_stream_routes_image_only_off_topic_without_llm(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    llm_called = {"value": 0}
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        llm_called["value"] += 1
+        yield "不应该被调用"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="",
+            prompt_summary="",
+            ocr_raw_text="",
+            confidence_level="low",
+            source="off_topic",
+            must_short_circuit=True,
+            understanding_json={"is_academic": False, "quality_issues": []},
+            is_academic=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "生物", "message": ""},
+        files={"image": ("landscape.png", _make_test_image_bytes("green"), "image/png")},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert [event for event, _ in events] == ["meta", "done"]
+    assert "只能帮你分析题目" in events[-1][1]["content"]
+    assert "上传" in events[-1][1]["content"]
+    assert llm_called["value"] == 0
+
+    session = session_factory()
+    try:
+        attachment = session.scalar(select(ChatMessageAttachment))
+        assert attachment is not None
+        assert attachment.ocr_status == "off_topic"
+    finally:
+        session.close()
+
+
+def test_chat_stream_off_topic_image_with_academic_text_still_uses_text_flow(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    llm_called = {"value": 0}
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        llm_called["value"] += 1
+        yield "先看函数的定义域。"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="",
+            prompt_summary="",
+            ocr_raw_text="",
+            confidence_level="low",
+            source="off_topic",
+            must_short_circuit=True,
+            understanding_json={"is_academic": False, "quality_issues": []},
+            is_academic=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "函数单调性怎么判断"},
+        files={"image": ("cat.png", _make_test_image_bytes("green"), "image/png")},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert [event for event, _ in events] == ["meta", "chunk", "done"]
+    assert events[-1][1]["content"] == "先看函数的定义域。"
+    assert llm_called["value"] == 1
+
+    session = session_factory()
+    try:
+        attachment = session.scalar(select(ChatMessageAttachment))
+        assert attachment is not None
+        assert attachment.ocr_status == "off_topic"
+    finally:
+        session.close()
+
+
 def test_chat_stream_records_paddleocr_status_for_image_turn(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
@@ -964,6 +1127,46 @@ def test_chat_stream_short_circuits_low_confidence_images(monkeypatch):
     assert [event for event, _ in events] == ["meta", "done"]
     assert "识别失败" in events[-1][1]["content"]
     assert "重新上传" in events[-1][1]["content"]
+    assert llm_called["value"] == 0
+
+
+def test_chat_stream_low_confidence_image_uses_quality_specific_retake_advice(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    llm_called = {"value": 0}
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        llm_called["value"] += 1
+        yield "不应该被调用"
+
+    async def fake_understand(**kwargs):
+        return ImageUnderstandingResult(
+            filter_text="",
+            prompt_summary="",
+            ocr_raw_text="",
+            confidence_level="low",
+            source="multimodal",
+            must_short_circuit=True,
+            quality_issues=["blur", "incomplete"],
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, "understand", fake_understand)
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.post(
+        "/api/chat/stream",
+        data={"subject": "物理", "message": ""},
+        files={"image": ("blur.png", _make_test_image_bytes("gray"), "image/png")},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    content = events[-1][1]["content"]
+    assert "模糊" in content
+    assert "没拍全" in content
+    assert "识别失败" not in content
     assert llm_called["value"] == 0
 
 

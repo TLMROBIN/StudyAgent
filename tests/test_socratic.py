@@ -64,6 +64,25 @@ def test_build_prompt_requires_grounding_on_image_summary():
     assert "匀强电场、匀强磁场、带电微粒沿直线运动" in system_text
 
 
+def test_medium_confidence_image_prompt_requires_uncertainty_confirmation():
+    prompt = socratic_service.build_prompt(
+        question="请看图",
+        subject="数学",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+        image_summary="题干：求函数单调区间。不确定处：第2问条件可能是 a≥1",
+        image_confidence="medium",
+        image_related=True,
+        image_uncertainties=["第2问条件可能是 a≥1"],
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "先用1-2句复述识别到的题干要点" in system_text
+    assert "向学生确认" in system_text
+    assert "第2问条件可能是 a≥1" in system_text
+
+
 def test_basic_concept_question_uses_explanation_mode():
     prompt = socratic_service.build_prompt(
         question="什么是函数单调性",

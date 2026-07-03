@@ -24,7 +24,7 @@ schema（包含后续迁移才应新增的表和列），而不是 2026-04-01 �
 | `20260621_0012` | table `student_error_events` / `student_skill_profiles` already exists |
 | `20260621_0013` | table `release_notes` / `release_note_read_states` already exists |
 
-`20260621_0014`、`20260622_0015`、`20260701_0016` 因带 inspector 守卫（先检查表/列是否存在）可正常通过。
+`20260621_0014`、`20260622_0015`、`20260701_0016`、`20260703_0017` 因带 inspector 守卫（先检查表/列是否存在）可正常通过。
 
 **影响**：新环境部署无法用 alembic 初始化数据库；目前实际依赖 `backend/main.py` 启动时的
 `Base.metadata.create_all + apply_runtime_schema_updates()` 兜底，alembic 版本表与真实 schema
