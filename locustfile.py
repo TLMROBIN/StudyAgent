@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from random import choice
+from uuid import uuid4
 
 from locust import HttpUser, between, task
 from locust.exception import StopUser
@@ -132,9 +133,13 @@ class StudentChatUser(StudyAgentUser):
         if not self.enable_stream:
             return
 
+        message = choice(self.messages)
+        if _env_flag("LOCUST_UNIQUE_NONCE"):
+            # 附加随机后缀绕过幂等重放缓存，压测真实 LLM 链路（会产生真实调用费用）
+            message = f"{message}（练习编号 {uuid4().hex[:8]}）"
         payload = {
             "subject": self.subject,
-            "message": choice(self.messages),
+            "message": message,
         }
 
         with self.client.post(
