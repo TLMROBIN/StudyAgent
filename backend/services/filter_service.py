@@ -1,54 +1,22 @@
+"""三层过滤服务（输入黑名单 / 学科白名单 / LLM 输出校验）。
+
+规则本体由 backend/services/filter_rule_engine.py 提供：默认从
+backend/data/filter_rules.json 加载，配置缺失/损坏时回退到代码内置
+默认规则（fail-closed）。本模块只保留过滤流程与结构性校验逻辑。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 
-
-SUBJECT_KEYWORDS = {
-    "语文": ["古诗", "文言文", "修辞", "阅读理解", "作文", "病句", "成语", "议论文", "论点", "意象"],
-    "数学": ["函数", "导数", "数列", "几何", "概率", "方程", "不等式", "三角", "圆锥曲线"],
-    "英语": ["语法", "完形", "阅读", "时态", "从句", "单词", "翻译"],
-    "物理": ["速度", "受力", "电场", "磁场", "动能", "牛顿", "电路"],
-    "化学": ["氧化", "还原", "离子", "方程式", "滴定", "平衡", "电解"],
-    "生物": ["细胞", "遗传", "呼吸作用", "光合作用", "生态", "DNA"],
-    "政治": ["哲学", "经济", "法治", "文化", "价值观", "国家"],
-    "历史": ["朝代", "改革", "战争", "制度", "史料", "近代史", "历史", "材料题"],
-    "地理": ["气候", "洋流", "农业", "地形", "人口", "区域"],
-}
-
-NON_SUBJECT_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"天气|股价|彩票|恋爱|表白|游戏攻略|写代码",
-        r"你是谁|讲个笑话|闲聊|角色扮演|扮演成|忽略之前|无视规则|系统提示词|开发者模式|管理员模式|DAN",
-        r"prompt|system prompt|越过限制|绕过过滤|不要遵守|泄露提示词",
-        r"知识库原文|检索片段|资料片段|向量库|RAG|完整输出资料",
-        r"身份证|银行卡|密码|越狱|翻墙|成人",
-    ]
-]
-
-DIRECT_ANSWER_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"最终答案[是为]",
-        r"标准答案[是为]",
-        r"答案[：:]\s*[A-D0-9一二三四五六七八九十]",
-        r"所以结果[是为]",
-        r"正确结论[是为]",
-    ]
-]
-
-IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"可能不准确",
-        r"不一定准确",
-        r"看得不太清",
-        r"理解可能有误",
-        r"识别失败",
-        r"可能理解得不完全准确",
-    ]
-]
+from backend.services.filter_rule_engine import (
+    LAYER_DIRECT_ANSWER,
+    LAYER_IMAGE_UNCERTAINTY,
+    LAYER_QUESTION_BLOCKLIST,
+    FilterRuleEngine,
+    RuleSnapshot,
+    default_engine,
+)
 
 
 @dataclass
@@ -68,37 +36,68 @@ class FilterService:
     refusal_text = "抱歉，我只能解答高中学科相关问题，请重新提问。"
     image_uncertainty_text = "这张图片我看得不太清，理解可能有误。请你帮我核对一下。"
 
+    def __init__(self, engine: FilterRuleEngine | None = None) -> None:
+        self._engine = engine if engine is not None else default_engine
+
+    # ---- 规则管理（供管理端点/运维调用）----
+
+    def reload_rules(self) -> dict[str, object]:
+        """强制重载规则配置，返回 JSON 可序列化的状态摘要。"""
+        return self._rules_payload(self._engine.reload())
+
+    def rules_status(self) -> dict[str, object]:
+        return self._rules_payload(self._engine.snapshot())
+
+    @staticmethod
+    def _rules_payload(snapshot: RuleSnapshot) -> dict[str, object]:
+        return {
+            "source": snapshot.source,
+            "config_path": snapshot.config_path,
+            "error": snapshot.error,
+            "loaded_at": snapshot.loaded_at,
+            "enabled_rules": snapshot.enabled_rule_count,
+            "disabled_rule_ids": list(snapshot.disabled_rule_ids),
+        }
+
+    # ---- 输入过滤（黑名单 + 学科白名单）----
+
     def check_question(self, question: str, declared_subject: str | None = None) -> FilterDecision:
+        snapshot = self._engine.snapshot()
         normalized = question.strip()
         if not normalized:
             return FilterDecision(False, "empty_question")
-        for pattern in NON_SUBJECT_PATTERNS:
-            if pattern.search(normalized):
+        for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST):
+            if rule.pattern.search(normalized):
                 return FilterDecision(False, "blocked_non_subject")
 
-        if declared_subject and declared_subject in SUBJECT_KEYWORDS:
+        if declared_subject and declared_subject in snapshot.subjects:
             return FilterDecision(True, "declared_subject", declared_subject)
 
-        for subject, keywords in SUBJECT_KEYWORDS.items():
+        for subject, keywords in snapshot.subjects.items():
             if any(keyword in normalized for keyword in keywords):
                 return FilterDecision(True, "keyword_match", subject)
 
-        if len(normalized) >= 6 and any(token in normalized for token in ["为什么", "如何", "怎么", "求", "分析", "解释", "评价", "概括"]):
+        if len(normalized) >= snapshot.generic_min_length and any(token in normalized for token in snapshot.generic_tokens):
             return FilterDecision(True, "generic_academic_pattern", declared_subject)
 
         return FilterDecision(False, "subject_not_recognized")
 
+    # ---- LLM 输出校验 ----
+
     def validate_answer(self, answer: str) -> OutputValidation:
+        snapshot = self._engine.snapshot()
         issues: list[str] = []
-        if any(pattern.search(answer) for pattern in DIRECT_ANSWER_PATTERNS):
+        if any(rule.pattern.search(answer) for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER)):
             issues.append("direct_answer_detected")
+        # 结构性校验（拒答文案与正文混排），依赖长度组合判断，保留在代码内
         if "抱歉，我只能解答高中学科相关问题" in answer and len(answer) > 30:
             issues.append("mixed_refusal")
         return OutputValidation(allowed=not issues, issues=issues)
 
     def validate_image_answer(self, answer: str) -> OutputValidation:
+        snapshot = self._engine.snapshot()
         issues = list(self.validate_answer(answer).issues)
-        if not any(pattern.search(answer) for pattern in IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS):
+        if not any(rule.pattern.search(answer) for rule in snapshot.layer_rules(LAYER_IMAGE_UNCERTAINTY)):
             issues.append("missing_image_uncertainty_disclaimer")
         return OutputValidation(allowed=not issues, issues=issues)
 

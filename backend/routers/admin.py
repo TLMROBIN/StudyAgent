@@ -40,6 +40,7 @@ from backend.security import get_password_hash
 from backend.services.account_service import build_default_password, build_generated_username
 from backend.services.audit_service import audit_service
 from backend.services.auth_service import auth_service
+from backend.services.filter_service import filter_service
 from backend.services.student_grade_service import student_grade_service
 from backend.routers.feedback import _feedback_attachment_read, feedback_reply_is_unread
 
@@ -1044,6 +1045,33 @@ def export_conversation_archive(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="conversation-archive.csv"'},
     )
+
+
+@router.get("/filter-rules/status")
+def filter_rules_status(current_user: CurrentAdmin) -> dict[str, object]:
+    """查看过滤规则引擎当前状态（规则来源、启用数量、错误信息）。"""
+    return filter_service.rules_status()
+
+
+@router.post("/filter-rules/reload")
+def reload_filter_rules(db: DbSession, current_user: CurrentAdmin, request: Request) -> dict[str, object]:
+    """强制重载过滤规则配置文件（backend/data/filter_rules.json）。
+
+    配置缺失/损坏时引擎会回退到内置默认规则（fail-closed），
+    返回体中的 source/error 字段可用于判断实际生效的规则来源。
+    """
+    payload = filter_service.reload_rules()
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="reload_filter_rules",
+        target_type="filter_rules",
+        target_id=None,
+        result="success" if payload.get("error") is None else "fallback_builtin",
+        ip_address=request.client.host if request.client else None,
+        detail=payload,
+    )
+    return payload
 
 
 @router.get("/audit-logs", response_model=list[AuditLogRead])
