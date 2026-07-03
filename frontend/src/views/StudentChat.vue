@@ -26,6 +26,10 @@ import {
   previewRectToNaturalRect,
   type CropRect,
 } from '../utils/imageCrop'
+import {
+  isSupportedChatImageFile,
+  prepareChatImageUpload,
+} from '../utils/chatImageUpload'
 import { collectInlineAssetIds, renderRichText, type InlineRichTextAsset } from '../utils/richText'
 
 interface ConversationSummary {
@@ -488,18 +492,27 @@ function triggerGalleryPicker() {
   }
 }
 
-function handleImageSelection(event: Event) {
+async function handleImageSelection(event: Event) {
   const input = event.target as HTMLInputElement | null
   const file = input?.files?.[0]
   if (!file) {
     return
   }
-  if (!file.type.startsWith('image/')) {
+  if (!isSupportedChatImageFile(file)) {
     resetPendingImage()
     ElMessage.error('只支持上传 1 张图片')
     return
   }
-  updatePendingImage(file)
+  try {
+    const prepared = await prepareChatImageUpload(file)
+    updatePendingImage(prepared.file)
+    prepared.qualityWarnings.forEach((qualityWarning) => {
+      ElMessage.warning(qualityWarning)
+    })
+  } catch (error) {
+    resetPendingImage()
+    ElMessage.error(error instanceof Error ? error.message : '图片处理失败，请重试')
+  }
 }
 
 function removePendingImage() {
