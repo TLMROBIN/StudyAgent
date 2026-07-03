@@ -69,7 +69,8 @@ class Settings(BaseSettings):
 
     llm_max_qps: int = Field(default=10, alias="LLM_MAX_QPS")
     llm_request_timeout_seconds: int = Field(default=30, alias="LLM_REQUEST_TIMEOUT_SECONDS")
-    llm_vision_request_timeout_seconds: int = Field(default=60, alias="LLM_VISION_REQUEST_TIMEOUT_SECONDS")
+    chat_image_vision_timeout_seconds: int = Field(default=60, alias="CHAT_IMAGE_VISION_TIMEOUT_SECONDS")
+    llm_vision_request_timeout_seconds: int | None = Field(default=None, alias="LLM_VISION_REQUEST_TIMEOUT_SECONDS")
     llm_circuit_breaker_threshold: int = Field(default=3, alias="LLM_CIRCUIT_BREAKER_THRESHOLD")
     llm_circuit_breaker_seconds: int = Field(default=60, alias="LLM_CIRCUIT_BREAKER_SECONDS")
     hot_question_cache_ttl_seconds: int = Field(default=1800, alias="HOT_QUESTION_CACHE_TTL_SECONDS")
@@ -156,6 +157,14 @@ class Settings(BaseSettings):
     @property
     def chat_image_mime_type_list(self) -> list[str]:
         return [item.strip().lower() for item in self.chat_allowed_image_mime_types.split(",") if item.strip()]
+
+    @property
+    def effective_chat_image_vision_timeout_seconds(self) -> int:
+        if "chat_image_vision_timeout_seconds" in self.model_fields_set:
+            return self.chat_image_vision_timeout_seconds
+        if self.llm_vision_request_timeout_seconds is not None:
+            return self.llm_vision_request_timeout_seconds
+        return self.chat_image_vision_timeout_seconds
 
     def ensure_storage(self) -> None:
         base_paths = [

@@ -1,5 +1,6 @@
 import asyncio
 from io import BytesIO
+import json
 import time
 
 from PIL import Image
@@ -204,6 +205,145 @@ def test_low_confidence_partial_understanding_keeps_summary_for_user_correction(
     assert result.confidence_level == "low"
     assert result.must_short_circuit is True
     assert result.prompt_summary == "像是电路图"
+
+
+def test_structured_summary_renders_safe_fields_and_isolates_printed_answer(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="llm")
+    service = ChatImageUnderstandingService(settings=settings)
+    payload = {
+        "is_academic": True,
+        "subject_guess": "physics",
+        "question_text": "如图所示，电路中电源电压恒定，求电流表示数变化。",
+        "known_conditions": ["R1=10Ω", "滑片向右移动"],
+        "options": {"A": "变大", "B": "变小"},
+        "formulas_latex": ["I=\\frac{U}{R}"],
+        "diagrams": [{"type": "circuit", "description": "串联电路含滑动变阻器"}],
+        "handwriting": "学生圈出了 A",
+        "printed_answer": "参考答案：B",
+        "uncertainties": ["右侧电阻标注不清"],
+        "quality_issues": ["glare"],
+    }
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        return "模糊"
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="物理",
+            user_text="",
+        )
+    )
+
+    assert result.is_academic is True
+    assert result.question_text == payload["question_text"]
+    assert result.printed_answer == "参考答案：B"
+    assert result.understanding_json == payload
+    assert result.confidence_level in {"medium", "high"}
+    assert result.must_short_circuit is False
+    assert "参考答案" not in result.prompt_summary
+    assert "参考答案" not in result.filter_text
+    assert "电流表示数变化" in result.prompt_summary
+    assert "R1=10Ω" in result.prompt_summary
+    assert "A. 变大" in result.prompt_summary
+    assert "B. 变小" in result.filter_text
+    assert "I=\\frac{U}{R}" in result.prompt_summary
+    assert "右侧电阻标注不清" in result.prompt_summary
+
+
+def test_structured_summary_parses_markdown_fenced_json(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="llm")
+    service = ChatImageUnderstandingService(settings=settings)
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        return ""
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        return """```json
+{"is_academic": true, "subject_guess": "math", "question_text": "求函数单调区间", "known_conditions": [], "options": {}, "formulas_latex": [], "diagrams": [], "handwriting": "", "printed_answer": "答案略", "uncertainties": [], "quality_issues": []}
+```"""
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="数学",
+            user_text="",
+        )
+    )
+
+    assert result.question_text == "求函数单调区间"
+    assert result.understanding_json["printed_answer"] == "答案略"
+    assert "答案略" not in result.prompt_summary
+    assert result.confidence_level in {"medium", "high"}
+
+
+def test_structured_question_text_floors_confidence_at_medium(monkeypatch):
+    service = ChatImageUnderstandingService(settings=Settings())
+    monkeypatch.setattr(service, "_assess_multimodal_confidence", lambda text: "low")
+
+    result = service._structured_result_from_summary(
+        summary_text=json.dumps(
+            {
+                "is_academic": True,
+                "subject_guess": "math",
+                "question_text": "如图",
+                "known_conditions": [],
+                "options": {},
+                "formulas_latex": [],
+                "diagrams": [],
+                "handwriting": "",
+                "printed_answer": "",
+                "uncertainties": [],
+                "quality_issues": [],
+            },
+            ensure_ascii=False,
+        ),
+        fallback_filter_text="",
+        ocr_raw_text="",
+        source="multimodal",
+    )
+
+    assert result is not None
+    assert result.confidence_level == "medium"
+    assert result.must_short_circuit is False
+
+
+def test_structured_summary_invalid_json_falls_back_to_free_text(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="llm")
+    service = ChatImageUnderstandingService(settings=settings)
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        return "模糊"
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        return "像是一道电路图题，右侧公式不清。"
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="物理",
+            user_text="",
+        )
+    )
+
+    assert result.understanding_json is None
+    assert result.prompt_summary == "像是一道电路图题，右侧公式不清。"
+    assert result.filter_text == "模糊"
 
 
 def test_paddleocr_backend_flattens_common_result_shapes(monkeypatch, tmp_path):

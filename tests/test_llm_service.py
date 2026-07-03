@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend.config import Settings
 from backend.database import Base
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig
@@ -398,6 +399,48 @@ def test_image_completion_logs_and_counts_http_failure(monkeypatch):
     assert "http_status=401" in log_text
 
 
+def test_summarize_academic_image_requests_structured_json(monkeypatch):
+    service = LLMService()
+    captured: dict[str, object] = {}
+
+    async def fake_generate_image_completion(**kwargs) -> str:
+        captured.update(kwargs)
+        return "{}"
+
+    monkeypatch.setattr(service, "_generate_image_completion", fake_generate_image_completion)
+
+    result = asyncio.run(
+        service.summarize_academic_image(
+            image_bytes=b"fake-image",
+            mime_type="image/png",
+            subject="物理",
+            user_text="帮我看看",
+            ocr_text="R=10Ω",
+            model_key="vision-model",
+        )
+    )
+
+    assert result == "{}"
+    prompt = str(captured["prompt"])
+    assert "输出 JSON" in prompt
+    assert "无 markdown 围栏" in prompt
+    for field in [
+        "is_academic",
+        "subject_guess",
+        "question_text",
+        "known_conditions",
+        "options",
+        "formulas_latex",
+        "diagrams",
+        "handwriting",
+        "printed_answer",
+        "uncertainties",
+        "quality_issues",
+    ]:
+        assert field in prompt
+    assert "不要直接给最终答案" in prompt
+
+
 def test_image_completion_uses_vision_specific_timeout(monkeypatch):
     service = LLMService()
     provider = ProviderState(
@@ -438,3 +481,43 @@ def test_image_completion_uses_vision_specific_timeout(monkeypatch):
     assert captured["url"] == "https://vision.example/v1/chat/completions"
     assert captured["timeout"].connect == 60
     assert captured["timeout"].read == 60
+
+
+def test_image_completion_uses_chat_image_vision_timeout_setting(monkeypatch):
+    service = LLMService()
+    service.settings = Settings(CHAT_IMAGE_VISION_TIMEOUT_SECONDS=77)
+    provider = ProviderState(
+        name="vision",
+        base_url="https://vision.example",
+        api_key="vision-secret",
+        model="vision-upstream",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "题干：如图所示。"}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(service._complete_openai_compatible(provider, [{"role": "user", "content": "识别图片"}]))
+
+    assert result == "题干：如图所示。"
+    assert captured["timeout"].connect == 77
+    assert captured["timeout"].read == 77

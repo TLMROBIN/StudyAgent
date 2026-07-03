@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from dataclasses import field
 from functools import cached_property
 from io import BytesIO
 from itertools import count
+import json
 import logging
 import multiprocessing as mp
 import os
@@ -36,6 +38,18 @@ class ImageUnderstandingResult:
     confidence_level: str
     source: str
     must_short_circuit: bool
+    understanding_json: dict[str, Any] | None = None
+    is_academic: bool = True
+    subject_guess: str = ""
+    question_text: str = ""
+    known_conditions: list[str] = field(default_factory=list)
+    options: dict[str, str] = field(default_factory=dict)
+    formulas_latex: list[str] = field(default_factory=list)
+    diagrams: list[dict[str, str]] = field(default_factory=list)
+    handwriting: str = ""
+    printed_answer: str = ""
+    uncertainties: list[str] = field(default_factory=list)
+    quality_issues: list[str] = field(default_factory=list)
 
     @property
     def ocr_confidence_value(self) -> float:
@@ -134,16 +148,24 @@ class ChatImageUnderstandingService:
                 )
             )
 
-        multimodal_summary = self.normalize_text(
-            await llm_service.summarize_academic_image(
-                image_bytes=llm_image_bytes,
-                mime_type=llm_mime_type,
-                subject=subject,
-                user_text=user_text,
-                ocr_text=normalized_ocr,
-                model_key=model_key,
-            )
+        multimodal_raw = await llm_service.summarize_academic_image(
+            image_bytes=llm_image_bytes,
+            mime_type=llm_mime_type,
+            subject=subject,
+            user_text=user_text,
+            ocr_text=normalized_ocr,
+            model_key=model_key,
         )
+        structured = self._structured_result_from_summary(
+            summary_text=multimodal_raw,
+            fallback_filter_text=normalized_ocr,
+            ocr_raw_text=ocr_raw_text,
+            source="multimodal",
+        )
+        if structured is not None:
+            return self._record_understanding_result(structured)
+
+        multimodal_summary = self.normalize_text(multimodal_raw)
         multimodal_confidence = self._assess_multimodal_confidence(multimodal_summary)
         if multimodal_confidence in {"high", "medium"}:
             filter_text = normalized_ocr or multimodal_summary
@@ -196,16 +218,21 @@ class ChatImageUnderstandingService:
         model_key: str | None,
         image_path: str | None,
     ) -> ImageUnderstandingResult | None:
-        multimodal_summary = self.normalize_text(
-            await llm_service.summarize_academic_image(
-                image_bytes=image_bytes,
-                mime_type=mime_type,
-                subject=subject,
-                user_text=user_text,
-                ocr_text="",
-                model_key=model_key,
-            )
+        multimodal_raw = await llm_service.summarize_academic_image(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            subject=subject,
+            user_text=user_text,
+            ocr_text="",
+            model_key=model_key,
         )
+        structured = self._structured_result_from_summary(
+            summary_text=multimodal_raw,
+            fallback_filter_text="",
+            ocr_raw_text="",
+            source="multimodal",
+        )
+        multimodal_summary = structured.prompt_summary if structured is not None else self.normalize_text(multimodal_raw)
         ocr_raw_text = await self._extract_ocr_supplement(
             image_bytes=image_bytes,
             mime_type=mime_type,
@@ -214,6 +241,11 @@ class ChatImageUnderstandingService:
             image_path=image_path,
         )
         normalized_ocr = self.normalize_text(ocr_raw_text)
+        if structured is not None:
+            structured.ocr_raw_text = ocr_raw_text
+            if not structured.filter_text:
+                structured.filter_text = normalized_ocr
+            return structured
         prompt_summary = self._combine_vision_summary_and_ocr(multimodal_summary, normalized_ocr)
         multimodal_confidence = self._assess_multimodal_confidence(multimodal_summary)
         if multimodal_confidence in {"high", "medium"}:
@@ -277,6 +309,160 @@ class ChatImageUnderstandingService:
         if summary and ocr_text and ocr_text not in summary:
             return f"{summary} OCR补充：{ocr_text}"
         return summary or ocr_text
+
+    def _structured_result_from_summary(
+        self,
+        *,
+        summary_text: str,
+        fallback_filter_text: str,
+        ocr_raw_text: str,
+        source: str,
+    ) -> ImageUnderstandingResult | None:
+        data = self._parse_structured_understanding(summary_text)
+        if data is None:
+            return None
+
+        is_academic = bool(data.get("is_academic", True))
+        question_text = self.normalize_text(str(data.get("question_text") or ""))
+        known_conditions = self._string_list(data.get("known_conditions"))
+        options = self._string_dict(data.get("options"))
+        formulas_latex = self._string_list(data.get("formulas_latex"))
+        diagrams = self._diagram_list(data.get("diagrams"))
+        handwriting = self.normalize_text(str(data.get("handwriting") or ""))
+        printed_answer = self.normalize_text(str(data.get("printed_answer") or ""))
+        uncertainties = self._string_list(data.get("uncertainties"))
+        quality_issues = self._quality_issue_list(data.get("quality_issues"))
+        prompt_summary = self._render_structured_prompt_summary(
+            question_text=question_text,
+            known_conditions=known_conditions,
+            options=options,
+            formulas_latex=formulas_latex,
+            diagrams=diagrams,
+            handwriting=handwriting,
+            uncertainties=uncertainties,
+        )
+        filter_text = self._render_structured_filter_text(question_text=question_text, options=options)
+        confidence_level = self._assess_multimodal_confidence(prompt_summary)
+        if question_text and confidence_level == "low":
+            confidence_level = "medium"
+        if not is_academic:
+            confidence_level = "low"
+        return ImageUnderstandingResult(
+            filter_text=filter_text or self.normalize_text(fallback_filter_text),
+            prompt_summary=prompt_summary,
+            ocr_raw_text=ocr_raw_text,
+            confidence_level=confidence_level,
+            source="off_topic" if not is_academic else source,
+            must_short_circuit=not is_academic or confidence_level == "low",
+            understanding_json=data,
+            is_academic=is_academic,
+            subject_guess=self.normalize_text(str(data.get("subject_guess") or "")),
+            question_text=question_text,
+            known_conditions=known_conditions,
+            options=options,
+            formulas_latex=formulas_latex,
+            diagrams=diagrams,
+            handwriting=handwriting,
+            printed_answer=printed_answer,
+            uncertainties=uncertainties,
+            quality_issues=quality_issues,
+        )
+
+    def _parse_structured_understanding(self, text: str) -> dict[str, Any] | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        for candidate in (raw, self._strip_json_fence(raw)):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    @staticmethod
+    def _strip_json_fence(text: str) -> str:
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return stripped
+        lines = stripped.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    def _render_structured_prompt_summary(
+        self,
+        *,
+        question_text: str,
+        known_conditions: list[str],
+        options: dict[str, str],
+        formulas_latex: list[str],
+        diagrams: list[dict[str, str]],
+        handwriting: str,
+        uncertainties: list[str],
+    ) -> str:
+        parts: list[str] = []
+        if question_text:
+            parts.append(f"题干：{question_text}")
+        if known_conditions:
+            parts.append(f"已知条件：{'；'.join(known_conditions)}")
+        if options:
+            option_text = "；".join(f"{key}. {value}" for key, value in options.items())
+            parts.append(f"选项：{option_text}")
+        if formulas_latex:
+            parts.append(f"公式：{'；'.join(formulas_latex)}")
+        if diagrams:
+            diagram_text = "；".join(
+                item.get("description") or item.get("type") or "" for item in diagrams if item.get("description") or item.get("type")
+            )
+            if diagram_text:
+                parts.append(f"图示：{diagram_text}")
+        if handwriting:
+            parts.append(f"手写内容：{handwriting}")
+        if uncertainties:
+            parts.append(f"不确定处：{'；'.join(uncertainties)}")
+        return self.normalize_text(" ".join(parts))
+
+    def _render_structured_filter_text(self, *, question_text: str, options: dict[str, str]) -> str:
+        parts = [question_text] if question_text else []
+        if options:
+            parts.extend(f"{key}. {value}" for key, value in options.items())
+        return self.normalize_text(" ".join(parts))
+
+    def _string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [self.normalize_text(str(item)) for item in value if self.normalize_text(str(item))]
+
+    def _string_dict(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        items: dict[str, str] = {}
+        for key, item in value.items():
+            text = self.normalize_text(str(item))
+            if text:
+                items[self.normalize_text(str(key))] = text
+        return items
+
+    def _diagram_list(self, value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        diagrams: list[dict[str, str]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            diagram_type = self.normalize_text(str(item.get("type") or ""))
+            description = self.normalize_text(str(item.get("description") or ""))
+            if diagram_type or description:
+                diagrams.append({"type": diagram_type, "description": description})
+        return diagrams
+
+    def _quality_issue_list(self, value: Any) -> list[str]:
+        allowed = {"blur", "dark", "incomplete", "glare"}
+        return [item for item in self._string_list(value) if item in allowed]
 
     async def _try_paddleocr_ocr(self, *, image_path: str | None) -> ImageUnderstandingResult | None:
         backend = self._ocr_backend()
