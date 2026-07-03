@@ -603,8 +603,21 @@ class LLMService:
     ) -> str:
         prompt = (
             f"你在辅助理解一张高中{subject}题目图片。"
-            "请用简洁中文概括图片里能可靠确认的题干、已知条件、图形/电路/实验装置、关键公式或数据。"
+            "请只输出 JSON 单对象，UTF-8，无 markdown 围栏。"
             "不要直接给最终答案，不要编造看不清的内容。"
+            "JSON 字段必须包含："
+            '"is_academic" (boolean), '
+            '"subject_guess" (string), '
+            '"question_text" (string), '
+            '"known_conditions" (string array), '
+            '"options" (object，键为 A/B/C/D 等选项号), '
+            '"formulas_latex" (string array), '
+            '"diagrams" (array of objects，每项含 type 和 description), '
+            '"handwriting" (string), '
+            '"printed_answer" (string，图中印刷的参考答案/解析，无则空), '
+            '"uncertainties" (string array), '
+            '"quality_issues" (array，只能使用 blur/dark/incomplete/glare)。'
+            "如果图片不是高中学科题目，is_academic=false，其余字段尽量留空，并在 uncertainties 说明原因。"
             f"学生补充文字：{user_text or '（无）'}。"
             f"OCR 提取：{ocr_text or '（无）'}。"
         )
@@ -812,7 +825,7 @@ class LLMService:
             "stream": False,
         }
         url = self._chat_completions_url(provider.base_url)
-        timeout = httpx.Timeout(self.settings.llm_vision_request_timeout_seconds)
+        timeout = httpx.Timeout(self.settings.effective_chat_image_vision_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
