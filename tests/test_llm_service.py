@@ -358,7 +358,7 @@ def test_image_completion_logs_and_counts_http_failure(monkeypatch):
     service = LLMService()
     provider = ProviderState(
         name="vision",
-        base_url="https://vision.example/v1",
+        base_url="https://vision.example",
         api_key="vision-secret",
         model="vision-upstream",
     )
@@ -402,7 +402,7 @@ def test_image_completion_uses_vision_specific_timeout(monkeypatch):
     service = LLMService()
     provider = ProviderState(
         name="vision",
-        base_url="https://vision.example/v1",
+        base_url="https://vision.example",
         api_key="vision-secret",
         model="vision-upstream",
     )
