@@ -69,6 +69,7 @@ class Settings(BaseSettings):
 
     llm_max_qps: int = Field(default=10, alias="LLM_MAX_QPS")
     llm_request_timeout_seconds: int = Field(default=30, alias="LLM_REQUEST_TIMEOUT_SECONDS")
+    llm_vision_request_timeout_seconds: int = Field(default=60, alias="LLM_VISION_REQUEST_TIMEOUT_SECONDS")
     llm_circuit_breaker_threshold: int = Field(default=3, alias="LLM_CIRCUIT_BREAKER_THRESHOLD")
     llm_circuit_breaker_seconds: int = Field(default=60, alias="LLM_CIRCUIT_BREAKER_SECONDS")
     hot_question_cache_ttl_seconds: int = Field(default=1800, alias="HOT_QUESTION_CACHE_TTL_SECONDS")

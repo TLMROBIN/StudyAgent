@@ -812,7 +812,7 @@ class LLMService:
             "stream": False,
         }
         url = provider.base_url.rstrip("/") + "/chat/completions"
-        timeout = httpx.Timeout(self.settings.llm_request_timeout_seconds)
+        timeout = httpx.Timeout(self.settings.llm_vision_request_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
