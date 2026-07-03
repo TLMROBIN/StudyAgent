@@ -1,0 +1,305 @@
+{
+  "version": 1,
+  "description": "StudyAgent 三层过滤规则配置（输入黑名单 question_blocklist / 学科白名单 subjects / LLM 输出校验 direct_answer、image_uncertainty）。本文件缺失或损坏时，服务自动回退到代码内置默认规则（fail-closed），见 backend/services/filter_rule_engine.py 的 DEFAULT_CONFIG。",
+  "subjects": {
+    "语文": [
+      "古诗",
+      "文言文",
+      "修辞",
+      "阅读理解",
+      "作文",
+      "病句",
+      "成语",
+      "议论文",
+      "论点",
+      "意象"
+    ],
+    "数学": [
+      "函数",
+      "导数",
+      "数列",
+      "几何",
+      "概率",
+      "方程",
+      "不等式",
+      "三角",
+      "圆锥曲线"
+    ],
+    "英语": [
+      "语法",
+      "完形",
+      "阅读",
+      "时态",
+      "从句",
+      "单词",
+      "翻译"
+    ],
+    "物理": [
+      "速度",
+      "受力",
+      "电场",
+      "磁场",
+      "动能",
+      "牛顿",
+      "电路"
+    ],
+    "化学": [
+      "氧化",
+      "还原",
+      "离子",
+      "方程式",
+      "滴定",
+      "平衡",
+      "电解"
+    ],
+    "生物": [
+      "细胞",
+      "遗传",
+      "呼吸作用",
+      "光合作用",
+      "生态",
+      "DNA"
+    ],
+    "政治": [
+      "哲学",
+      "经济",
+      "法治",
+      "文化",
+      "价值观",
+      "国家"
+    ],
+    "历史": [
+      "朝代",
+      "改革",
+      "战争",
+      "制度",
+      "史料",
+      "近代史",
+      "历史",
+      "材料题"
+    ],
+    "地理": [
+      "气候",
+      "洋流",
+      "农业",
+      "地形",
+      "人口",
+      "区域"
+    ]
+  },
+  "generic_academic": {
+    "min_length": 6,
+    "tokens": [
+      "为什么",
+      "如何",
+      "怎么",
+      "求",
+      "分析",
+      "解释",
+      "评价",
+      "概括"
+    ]
+  },
+  "rules": [
+    {
+      "id": "input.offtopic.daily_life",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "天气|股价|彩票|恋爱|表白|游戏攻略|写代码",
+      "enabled": true,
+      "description": "非学科日常话题（迁移自硬编码规则）"
+    },
+    {
+      "id": "input.jailbreak.persona_zh",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "你是谁|讲个笑话|闲聊|角色扮演|扮演成|忽略之前|无视规则|系统提示词|开发者模式|管理员模式|DAN",
+      "enabled": true,
+      "description": "中文越狱/角色扮演/闲聊（迁移自硬编码规则）"
+    },
+    {
+      "id": "input.jailbreak.prompt_leak",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "prompt|system prompt|越过限制|绕过过滤|不要遵守|泄露提示词",
+      "enabled": true,
+      "description": "提示词泄露/绕过过滤（迁移自硬编码规则）"
+    },
+    {
+      "id": "input.rag_leak.retrieval_dump",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "知识库原文|检索片段|资料片段|向量库|RAG|完整输出资料",
+      "enabled": true,
+      "description": "套取 RAG 检索原文（迁移自硬编码规则）"
+    },
+    {
+      "id": "input.safety.sensitive",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "身份证|银行卡|密码|越狱|翻墙|成人",
+      "enabled": true,
+      "description": "敏感/违规内容（迁移自硬编码规则）"
+    },
+    {
+      "id": "input.jailbreak.ignore_variants",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "(忽略|无视)(之前|以上|上面|前面)",
+      "enabled": true,
+      "description": "“忽略以上/无视上面”类指令覆盖变体（原规则只覆盖“忽略之前/无视规则”）。故意不匹配“忽略空气阻力/忽略所有摩擦”等物理表述"
+    },
+    {
+      "id": "input.jailbreak.english_injection",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions?|rules?)|disregard\\s+(all\\s+)?(the\\s+)?(previous|above)|developer\\s+mode|do\\s+anything\\s+now|jailbreak",
+      "enabled": true,
+      "description": "英文 prompt injection（ignore previous instructions / developer mode / DAN 全称等）"
+    },
+    {
+      "id": "input.jailbreak.unrestricted_persona",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "你(现在)?(没有|不受)任何限制|(没有|解除|摆脱)(任何|规则|道德|安全)?(限制|约束)的\\s*(模型|AI|助手|老师|机器人)|解除.{0,6}安全(策略|限制)|无限制模式",
+      "enabled": true,
+      "description": "“无限制人格”类越狱（假装成没有规则限制的 AI 等）。刻意收窄以避免误伤政治学科“权力不受限制”类正常提问"
+    },
+    {
+      "id": "input.prompt_leak.variants",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "初始指令|原始指令|第一条消息|收到的(全部|所有)?指令|原样输出|一字不差|initial\\s+instructions?",
+      "enabled": true,
+      "description": "提示词/指令泄露变体（要求复述系统收到的指令或原样输出内部内容）"
+    },
+    {
+      "id": "input.injection.markers",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "<<\\s*/?\\s*sys\\s*>>|\\[/?system\\]|\\[/?inst\\]|<\\|im_start\\|>|base64|解码后(执行|运行)",
+      "enabled": true,
+      "description": "注入标记（模型特殊分隔符、base64 编码绕过等）"
+    },
+    {
+      "id": "input.bypass.skip_guidance",
+      "layer": "question_blocklist",
+      "type": "regex",
+      "pattern": "不[用要需]引导|跳过引导|直接(告诉我|给我?|说)(标准|最终|正确)?答案|答题机器",
+      "enabled": true,
+      "description": "绕过苏格拉底式引导、索要直接答案"
+    },
+    {
+      "id": "output.direct.final_answer",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "最终答案[是为]",
+      "enabled": true,
+      "description": "直接给出最终答案（迁移自硬编码规则）"
+    },
+    {
+      "id": "output.direct.standard_answer",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "标准答案[是为]",
+      "enabled": true,
+      "description": "直接给出标准答案（迁移自硬编码规则）"
+    },
+    {
+      "id": "output.direct.answer_colon_option",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "答案[：:]\\s*[A-D0-9一二三四五六七八九十]",
+      "enabled": true,
+      "description": "“答案：A/42”形式（迁移自硬编码规则）"
+    },
+    {
+      "id": "output.direct.conclusion_result",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "所以结果[是为]",
+      "enabled": true,
+      "description": "“所以结果是”形式（迁移自硬编码规则）"
+    },
+    {
+      "id": "output.direct.correct_conclusion",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "正确结论[是为]",
+      "enabled": true,
+      "description": "“正确结论是”形式（迁移自硬编码规则）"
+    },
+    {
+      "id": "output.direct.numeric_answer",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "答案(?:就)?[是为][:：]?\\s*[-+]?\\d+(?:\\.\\d+)?",
+      "enabled": true,
+      "description": "数学计算直接给出最终数值答案，如“答案是 42”。可关闭：设 enabled=false"
+    },
+    {
+      "id": "output.direct.final_numeric_equation",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "(?:所以|因此|故|综上|最终)[^\\n。；;]{0,15}[=≈]\\s*[-+]?\\d+(?:\\.\\d+)?",
+      "enabled": true,
+      "description": "结论句直接给出数值结果，如“所以 W = 42”。可关闭：设 enabled=false"
+    },
+    {
+      "id": "output.direct.trailing_numeric_result",
+      "layer": "direct_answer",
+      "type": "regex",
+      "pattern": "[=≈]\\s*[-+]?\\d+(?:\\.\\d+)?\\s*[a-zA-Zμ°Ω%][a-zA-Z0-9/·^²³]*\\s*[。.!！]?\\s*$",
+      "enabled": true,
+      "description": "答案末尾裸数值等式兜底，如“= 42 J”。兜底模式，可能误伤“已知 g = 9.8 m/s²”这类常量声明结尾，误报偏高时可设 enabled=false 关闭"
+    },
+    {
+      "id": "image.uncertainty.maybe_inaccurate",
+      "layer": "image_uncertainty",
+      "type": "keyword",
+      "pattern": "可能不准确",
+      "enabled": true,
+      "description": "图片理解不确定性声明（迁移自硬编码规则）"
+    },
+    {
+      "id": "image.uncertainty.not_necessarily_accurate",
+      "layer": "image_uncertainty",
+      "type": "keyword",
+      "pattern": "不一定准确",
+      "enabled": true,
+      "description": "图片理解不确定性声明（迁移自硬编码规则）"
+    },
+    {
+      "id": "image.uncertainty.hard_to_see",
+      "layer": "image_uncertainty",
+      "type": "keyword",
+      "pattern": "看得不太清",
+      "enabled": true,
+      "description": "图片理解不确定性声明（迁移自硬编码规则）"
+    },
+    {
+      "id": "image.uncertainty.maybe_misread",
+      "layer": "image_uncertainty",
+      "type": "keyword",
+      "pattern": "理解可能有误",
+      "enabled": true,
+      "description": "图片理解不确定性声明（迁移自硬编码规则）"
+    },
+    {
+      "id": "image.uncertainty.recognition_failed",
+      "layer": "image_uncertainty",
+      "type": "keyword",
+      "pattern": "识别失败",
+      "enabled": true,
+      "description": "图片理解不确定性声明（迁移自硬编码规则）"
+    },
+    {
+      "id": "image.uncertainty.maybe_not_fully_accurate",
+      "layer": "image_uncertainty",
+      "type": "keyword",
+      "pattern": "可能理解得不完全准确",
+      "enabled": true,
+      "description": "图片理解不确定性声明（迁移自硬编码规则）"
+    }
+  ]
+}
