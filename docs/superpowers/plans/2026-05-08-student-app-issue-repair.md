@@ -449,7 +449,7 @@ Expected: concept mode works without weakening answer-safety tests.
 ### Task 6: Deployment and Real-Device Acceptance
 
 **Files:**
-- Modify if useful: `/Users/binyu/Projects/StudyAgent/P0_端到端联调与真机平板测试手把手指南.md`
+- Modify if useful: `/Users/binyu/Projects/StudyAgent/docs/archived/P0_端到端联调与真机平板测试手把手指南.md`（已归档）
 
 - [ ] **Step 1: Run backend/frontend checks**
 

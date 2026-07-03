@@ -10,7 +10,7 @@
 
 ## SLO 目标
 
-当前按 `DEVELOPMENT_PLAN.md` 的试运行口径，先定义以下核心 SLO：
+当前按 `docs/archived/DEVELOPMENT_PLAN.md`（已归档）的试运行口径，先定义以下核心 SLO：
 
 | 指标 | 目标 |
 |------|------|

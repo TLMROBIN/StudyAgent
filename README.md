@@ -1,13 +1,28 @@
 # StudyAgent
 
-局域网内高中学科 AI 答疑助手骨架工程，按 `DEVELOPMENT_PLAN.md` 已落下第一轮可运行基线：
+局域网内高中学科 AI 答疑助手骨架工程，按 `docs/archived/DEVELOPMENT_PLAN.md`（已归档）已落下第一轮可运行基线，当前真实进度见 `docs/ROADMAP.md`：
 
 - FastAPI 后端：认证、聊天、知识库、统计、智能体配置、用户管理
 - Vue 3 前端：学生答疑界面、管理端看板、知识库、智能体配置、用户管理
 - 异步任务：Celery + Redis 任务入口，资料导入支持本地回退执行
 - 监控与部署：Prometheus、Nginx、Docker Compose、Locust 压测脚本
 - 测试：话题过滤、苏格拉底引导、RAG 基础检索测试
-- 题库推荐 Phase 1 实施约束与验证口径见 `QUESTION_BANK_RECOMMENDATION_PHASE1.md`
+- 题库推荐 Phase 1 实施约束与验证口径见 `docs/archived/QUESTION_BANK_RECOMMENDATION_PHASE1.md`（已归档）
+
+## 📚 文档导航
+
+| 文档 | 用途 | 状态 |
+|------|------|------|
+| `README.md` | 项目概览与本地启动指南 | ✅ 现行 |
+| `docs/ROADMAP.md` | **当前有效路线图**：阶段状态、超计划交付、下一步排期 | ✅ 现行 |
+| `DEVELOPMENT_WORKFLOW.md` | 日常开发工作流（本地 / 容器热更新 / 完整编排） | ✅ 现行 |
+| `DEPLOYMENT_RUNBOOK.md` | 部署运行手册与验收流程 | ✅ 现行 |
+| `CLAUDE.md` / `AGENTS.md` | AI 协作代理的项目上下文说明 | ✅ 现行 |
+| `monitoring/SLO_BASELINE.md` | SLO 目标定义、压测口径与验收记录 | ✅ 现行 |
+| `docs/superpowers/plans/` | 单功能实施计划（学生端修复、LLM 配额、学生反馈） | ✅ 现行 |
+| `.omx/plans/` | .omx 工具的现行 PRD / 计划 / 测试规格 | ✅ 现行 |
+| `docs/archived/` | 历史规划文档（原开发计划、7 阶段路线图、题库规划、P0 联调指南等） | 📦 已归档，仅供参考 |
+| `docs/archived/omx-plans/` | .omx 规划文件的历史版本（v1/v2/initial） | 📦 已归档 |
 
 ## 当前实现范围
 
@@ -124,7 +139,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d backend wor
 
 - Redis 会话、限流和队列目前提供了本地内存回退，便于单机开发先跑通链路；生产环境应接 Redis。
 - RAG 检索已升级为 ChromaDB 优先，SQL 仅作回退路径。
-- SSE 输出为“先生成后分块发送”的安全实现，优先保证输出校验；若要追求更低首 token 延迟，可以继续扩展成边流式边校验。
+- SSE 已实现真流式输出（LLM 逐 token 接收、按句子边界分块下发），每段下发前经输出安全校验，兼顾首 token 延迟与安全性。
 - Alembic 已补基础目录和初始 revision，后续应按真实演化继续新增细粒度迁移。
 - Embedding 现已支持 `sentence-transformers`，并按 `EMBEDDING_DEVICE` 自动选择 `cuda/cpu`；若当前环境驱动或 CUDA 不可见，会自动回退。
 

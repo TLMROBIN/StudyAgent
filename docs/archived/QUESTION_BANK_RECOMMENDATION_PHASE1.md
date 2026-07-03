@@ -1,3 +1,5 @@
+> 📦 已归档（2026-07-03）。历史规划文档，仅供参考；当前状态见 docs/ROADMAP.md。
+
 # Question-Bank Recommendation Phase 1 Notes
 
 > This file is the implementation-facing source of truth for the Phase 1 rollout defined in `.omx/plans/ralplan-question-bank-recommendation-analysis-v2.md`.

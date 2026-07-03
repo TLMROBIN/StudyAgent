@@ -1,3 +1,5 @@
+> 📦 已归档（2026-07-03）。历史规划文档，仅供参考；当前状态见 docs/ROADMAP.md。
+
 # QUESTION_CHUNK_RECONCILIATION_PLAN (Approval-Ready Revision)
 
 ## 1. Scope / Non-goals
