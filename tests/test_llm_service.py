@@ -1,3 +1,7 @@
+import asyncio
+import logging
+
+import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -5,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from backend.database import Base
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig
+from backend.services.metrics_service import chat_image_vision_call_failures_total
 from backend.services.llm_service import ThinkingContentFilter
 from backend.services import llm_service as llm_service_module
 from backend.services.llm_service import LLMService, ProviderState
@@ -348,3 +353,41 @@ def test_image_completion_provider_chain_is_empty_without_enabled_vision_models(
 
     assert service._image_completion_providers("minimax-m27") == []
     assert service._image_completion_providers(None) == []
+
+
+def test_image_completion_logs_and_counts_http_failure(monkeypatch, caplog):
+    service = LLMService()
+    provider = ProviderState(
+        name="vision",
+        base_url="https://vision.example/v1",
+        api_key="vision-secret",
+        model="vision-upstream",
+    )
+    monkeypatch.setattr(service, "_image_completion_providers", lambda model_key: [provider])
+
+    async def fail_complete(provider, messages):
+        request = httpx.Request("POST", "https://vision.example/v1/chat/completions")
+        response = httpx.Response(401, request=request)
+        raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+    monkeypatch.setattr(service, "_complete_openai_compatible", fail_complete)
+    counter = chat_image_vision_call_failures_total.labels(reason="http_4xx")
+    before = counter._value.get()
+
+    with caplog.at_level(logging.WARNING, logger="backend.services.llm_service"):
+        result = asyncio.run(
+            service._generate_image_completion(
+                prompt="识别图片",
+                image_bytes=b"fake-image",
+                mime_type="image/png",
+                model_key="minimax-m27",
+            )
+        )
+
+    assert result == ""
+    assert counter._value.get() == before + 1
+    assert "chat_image_vision_call_failure" in caplog.text
+    assert "provider=vision" in caplog.text
+    assert "model=vision-upstream" in caplog.text
+    assert "error_type=HTTPStatusError" in caplog.text
+    assert "http_status=401" in caplog.text

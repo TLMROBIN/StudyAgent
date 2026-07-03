@@ -38,6 +38,16 @@ llm_usage_recorded_total = Counter(
     "LLM usage events persisted",
     ["model_key", "billing_mode", "source"],
 )
+chat_image_understanding_total = Counter(
+    "chat_image_understanding_total",
+    "Chat image understanding results",
+    ["source", "confidence"],
+)
+chat_image_vision_call_failures_total = Counter(
+    "chat_image_vision_call_failures_total",
+    "Vision model calls failed during chat image understanding",
+    ["reason"],
+)
 sse_active_connections = Gauge("sse_active_connections", "Active SSE connections")
 llm_queue_depth = Gauge("llm_queue_depth", "Current chat waiting queue depth")
 filter_blocked_total = Counter("filter_blocked_total", "Blocked non-subject requests")
