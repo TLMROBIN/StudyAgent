@@ -15,6 +15,7 @@ from backend.observability import setup_logging
 from backend.routers import admin, agent_config as agent_config_router, auth, chat, feedback as feedback_router, knowledge as knowledge_router, llm_provider as llm_provider_router, llm_usage as llm_usage_router, notifications as notifications_router, release_notes as release_notes_router, stats
 from backend.security import get_password_hash
 from backend.services.auth_service import auth_service
+from backend.services.chat_image_understanding_service import stop_paddleocr_worker, warmup_paddleocr_worker
 from backend.services.gpu_runtime import log_gpu_runtime_status
 from backend.services.metrics_service import render_metrics
 from backend.services.rag_service import rag_service
@@ -56,6 +57,16 @@ def warmup_embedding_model() -> None:
         logger.warning("Embedding warmup failed: %s", exc)
 
 
+def warmup_chat_image_ocr_worker() -> None:
+    backend = str(settings.chat_image_ocr_backend or "hybrid").strip().lower()
+    if backend not in {"hybrid", "paddleocr"} or settings.chat_image_ocr_timeout_seconds <= 0:
+        return
+    try:
+        warmup_paddleocr_worker()
+    except Exception as exc:
+        logger.warning("PaddleOCR worker warmup failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -70,8 +81,11 @@ async def lifespan(_: FastAPI):
     if settings.pdf_parser_backend == "mineru":
         log_gpu_runtime_status("backend", requested_device=settings.mineru_device, python_bin=settings.mineru_python_bin)
     warmup_task = asyncio.create_task(asyncio.to_thread(warmup_embedding_model))
+    ocr_warmup_task = asyncio.create_task(asyncio.to_thread(warmup_chat_image_ocr_worker))
     yield
     warmup_task.cancel()
+    ocr_warmup_task.cancel()
+    stop_paddleocr_worker()
 
 
 settings = get_settings()
