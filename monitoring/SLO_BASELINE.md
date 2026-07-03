@@ -94,6 +94,23 @@ locust -f locustfile.py --host http://127.0.0.1:8001 --headless -u 10 -r 2 -t 1m
 
 ## 当前阶段验收记录
 
+### 2026-07-03（真实环境，10.50.151.230）
+
+- 部署版本：`31e3fba`（含 rag_service 拆分、可配置过滤引擎、e2e 测试、备份脚本）
+- 部署验收：`scripts/post_deploy_check.sh` 13/14 pass（alembic 版本表漂移已 `stamp head` 修复；admin 登录项因未提供密码 skip）
+- **教师/管理端**（nginx 入口，10 并发 60s）：58 请求 0 失败
+  - 登录 med 170ms / 审计日志 med 22ms ✅
+  - ⚠️ `/api/stats/overview|classes|portraits` med 19-26s——统计聚合无缓存，待优化
+- **学生聊天**（backend 直连 8002 绕过 nginx limit_conn，3 并发 60s，`LOCUST_UNIQUE_NONCE=true`）：
+  - `/api/chat/stream` 12 次 0 失败，完整回答 med 9.4s / p95 12s（SLO < 30s ✅）
+  - 错误率 0%（SLO < 3% ✅）
+- **首 token 单测**（3 次独立提问）：5.5-6.5s——❌ 未达 SLO < 3s。已确认为真流式（44-59 chunk 持续推送），瓶颈在上游 LLM 首响 + 句子边界缓冲；优化方向：首块提前 flush / 前端检索占位提示
+- **压测方法论备注**：
+  - 单账号 + 固定题池会命中幂等重放缓存（meta+done 无 chunk），务必 `LOCUST_UNIQUE_NONCE=true`
+  - nginx `limit_conn perip 2` 会使单机压测大量 503，走 8002 直连或多源发压
+  - 经 nginx 入口 5 并发混测：183 次命中重放缓存 + 10 次 503（限流生效），两机制均符合预期
+- ChromaDB 备份：生产为 `CHROMADB_MODE=persistent`（数据在 `data/chromadb`，独立 chromadb 容器实为闲置），备份需 `CHROMA_DATA_DIR` 模式；首备 19MB/1s，已装每日 03:30 cron
+
 ### 2026-04-02
 
 - 已完成：
