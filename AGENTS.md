@@ -370,12 +370,13 @@ SLO 基线与口径见 `monitoring/SLO_BASELINE.md`。
 
 | 文档 | 内容 |
 |---|---|
-| `DEVELOPMENT_PLAN.md` | 原始规划与功能边界 |
-| `IMPLEMENTATION_ROADMAP.md` | 7 个推进阶段与验收标准 |
+| `docs/ROADMAP.md` | **当前有效路线图**（阶段状态 / 超计划交付 / 下一步排期） |
+| `docs/archived/DEVELOPMENT_PLAN.md` | 原始规划与功能边界（已归档） |
+| `docs/archived/IMPLEMENTATION_ROADMAP.md` | 原推进阶段与验收标准（已归档，被 docs/ROADMAP.md 取代） |
 | `DEPLOYMENT_RUNBOOK.md` | 部署运行手册（启动/验收/巡检/回滚） |
 | `DEVELOPMENT_WORKFLOW.md` | 日常开发工作流 |
-| `QUESTION_BANK_PLAN.md` | 题库功能扩展规划 |
-| `QUESTION_BANK_RECOMMENDATION_PHASE1.md` | 题目推荐 Phase 1 PRD 与验证口径 |
-| `P0_端到端联调与真机平板测试手把手指南.md` | 真机平板联调指南 |
+| `docs/archived/QUESTION_BANK_PLAN.md` | 题库功能扩展规划（已归档） |
+| `docs/archived/QUESTION_BANK_RECOMMENDATION_PHASE1.md` | 题目推荐 Phase 1 PRD 与验证口径（已归档） |
+| `docs/archived/P0_端到端联调与真机平板测试手把手指南.md` | 真机平板联调指南（已归档） |
 | `monitoring/SLO_BASELINE.md` | 压测 SLO 基线 |
 | `.omx/plans/` | OMX 规划文档（**只读**） |
