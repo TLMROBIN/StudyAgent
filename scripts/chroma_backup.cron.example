@@ -1,0 +1,17 @@
+# ChromaDB 备份 cron 模板
+# 安装：crontab -e 后粘贴（按实际路径修改），或放入 /etc/cron.d/（需加运行用户列）
+#
+# 说明：
+# - 每天 03:30（凌晨低峰）执行冷备，停机窗口秒级
+# - KEEP_BACKUPS=14 保留两周
+# - cron 的 PATH 很精简，显式声明以确保找得到 docker
+# - 运行用户需在 docker 组
+
+PATH=/usr/local/bin:/usr/bin:/bin
+SHELL=/bin/bash
+
+# m h dom mon dow command
+30 3 * * * cd /path/to/StudyAgent && BACKUP_DIR=/data/backups/chroma KEEP_BACKUPS=14 ./scripts/chroma_backup.sh >> /var/log/chroma_backup.cron.log 2>&1
+
+# 可选：业务高峰前再做一份热备（有不一致风险，仅作补充，见 docs/CHROMA_BACKUP.md）
+# 0 12 * * * cd /path/to/StudyAgent && BACKUP_DIR=/data/backups/chroma ./scripts/chroma_backup.sh --hot >> /var/log/chroma_backup.cron.log 2>&1
