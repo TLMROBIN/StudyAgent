@@ -1,5 +1,4 @@
 import asyncio
-import logging
 
 import httpx
 from sqlalchemy import create_engine
@@ -355,7 +354,7 @@ def test_image_completion_provider_chain_is_empty_without_enabled_vision_models(
     assert service._image_completion_providers(None) == []
 
 
-def test_image_completion_logs_and_counts_http_failure(monkeypatch, caplog):
+def test_image_completion_logs_and_counts_http_failure(monkeypatch):
     service = LLMService()
     provider = ProviderState(
         name="vision",
@@ -363,6 +362,7 @@ def test_image_completion_logs_and_counts_http_failure(monkeypatch, caplog):
         api_key="vision-secret",
         model="vision-upstream",
     )
+    warnings: list[str] = []
     monkeypatch.setattr(service, "_image_completion_providers", lambda model_key: [provider])
 
     async def fail_complete(provider, messages):
@@ -371,23 +371,28 @@ def test_image_completion_logs_and_counts_http_failure(monkeypatch, caplog):
         raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
 
     monkeypatch.setattr(service, "_complete_openai_compatible", fail_complete)
+    monkeypatch.setattr(
+        llm_service_module.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append(message % args),
+    )
     counter = chat_image_vision_call_failures_total.labels(reason="http_4xx")
     before = counter._value.get()
 
-    with caplog.at_level(logging.WARNING, logger="backend.services.llm_service"):
-        result = asyncio.run(
-            service._generate_image_completion(
-                prompt="识别图片",
-                image_bytes=b"fake-image",
-                mime_type="image/png",
-                model_key="minimax-m27",
-            )
+    result = asyncio.run(
+        service._generate_image_completion(
+            prompt="识别图片",
+            image_bytes=b"fake-image",
+            mime_type="image/png",
+            model_key="minimax-m27",
         )
+    )
 
     assert result == ""
     assert counter._value.get() == before + 1
-    assert "chat_image_vision_call_failure" in caplog.text
-    assert "provider=vision" in caplog.text
-    assert "model=vision-upstream" in caplog.text
-    assert "error_type=HTTPStatusError" in caplog.text
-    assert "http_status=401" in caplog.text
+    log_text = "\n".join(warnings)
+    assert "chat_image_vision_call_failure" in log_text
+    assert "provider=vision" in log_text
+    assert "model=vision-upstream" in log_text
+    assert "error_type=HTTPStatusError" in log_text
+    assert "http_status=401" in log_text

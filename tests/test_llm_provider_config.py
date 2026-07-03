@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator
 import asyncio
-import logging
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,6 +18,7 @@ from backend.models.llm_provider import LLMProviderConfig
 from backend.models.llm_usage import LLMUsageEvent
 from backend.models.user import User, UserRole
 from backend.routers import llm_provider
+from backend.services import llm_service as llm_service_module
 from backend.services.llm_service import LLMService
 
 
@@ -501,25 +501,30 @@ def test_llm_service_rejects_stopped_builtin_local_vl_model():
         service.normalize_chat_model_key("qwen2.5-vl")
 
 
-def test_llm_service_logs_empty_stream_fallback(monkeypatch, caplog):
+def test_llm_service_logs_empty_stream_fallback(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "test-key"
+    warnings: list[str] = []
 
     async def fake_stream(provider, messages) -> AsyncIterator[str]:
         if False:
             yield ""
 
     monkeypatch.setattr(service, "_stream_openai_compatible", fake_stream)
+    monkeypatch.setattr(
+        llm_service_module.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append(message % args),
+    )
 
     async def collect_chunks() -> list[str]:
         return [chunk async for chunk in service.stream_response([{"role": "user", "content": "看图"}], "兜底")]
 
-    with caplog.at_level(logging.WARNING, logger="backend.services.llm_service"):
-        chunks = asyncio.run(collect_chunks())
+    chunks = asyncio.run(collect_chunks())
 
     assert chunks == ["兜底"]
-    assert "empty_stream" in caplog.text
-    assert "MiniMax-M2.7-highspeed" in caplog.text
+    assert any("empty_stream" in item for item in warnings)
+    assert any("MiniMax-M2.7-highspeed" in item for item in warnings)
 
 
 def test_llm_service_requires_configured_vision_model_for_image_completion(monkeypatch):
