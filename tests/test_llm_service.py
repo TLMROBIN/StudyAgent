@@ -396,3 +396,45 @@ def test_image_completion_logs_and_counts_http_failure(monkeypatch):
     assert "model=vision-upstream" in log_text
     assert "error_type=HTTPStatusError" in log_text
     assert "http_status=401" in log_text
+
+
+def test_image_completion_uses_vision_specific_timeout(monkeypatch):
+    service = LLMService()
+    provider = ProviderState(
+        name="vision",
+        base_url="https://vision.example/v1",
+        api_key="vision-secret",
+        model="vision-upstream",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "题干：如图所示。"}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["payload"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(service._complete_openai_compatible(provider, [{"role": "user", "content": "识别图片"}]))
+
+    assert result == "题干：如图所示。"
+    assert captured["url"] == "https://vision.example/v1/chat/completions"
+    assert captured["timeout"].connect == 60
+    assert captured["timeout"].read == 60
