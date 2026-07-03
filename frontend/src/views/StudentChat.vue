@@ -499,7 +499,7 @@ function handleImageSelection(event: Event) {
     ElMessage.error('只支持上传 1 张图片')
     return
   }
-  openCropDialog(file)
+  updatePendingImage(file)
 }
 
 function removePendingImage() {
@@ -520,10 +520,10 @@ function initializeCropSelection() {
   }
   const width = image.clientWidth
   const height = image.clientHeight
-  cropSelection.width = Math.max(1, Math.round(width * 0.82))
-  cropSelection.height = Math.max(1, Math.round(height * 0.82))
-  cropSelection.x = Math.round((width - cropSelection.width) / 2)
-  cropSelection.y = Math.round((height - cropSelection.height) / 2)
+  cropSelection.width = Math.max(1, Math.round(width))
+  cropSelection.height = Math.max(1, Math.round(height))
+  cropSelection.x = 0
+  cropSelection.y = 0
 }
 
 function cropSelectionStyle() {
@@ -1275,6 +1275,7 @@ onMounted(async () => {
           <div class="row-actions">
             <button class="ghost-button" :disabled="sending" @click="triggerCameraCapture">重新拍照</button>
             <button class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">从相册替换</button>
+            <button class="ghost-button" :disabled="sending || !pendingImageFile" @click="pendingImageFile && openCropDialog(pendingImageFile)">裁剪</button>
             <button class="ghost-button" :disabled="sending" @click="removePendingImage">移除图片</button>
           </div>
         </div>
