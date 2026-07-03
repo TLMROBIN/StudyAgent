@@ -677,10 +677,25 @@ def _build_prompt_question(*, payload_message: str, subject: str, understanding:
 
 
 def _build_short_circuit_reply(subject: str, understanding: ImageUnderstandingResult | None = None) -> str:
+    if understanding and not understanding.is_academic:
+        return socratic_service.image_off_topic_text()
     return socratic_service.image_low_confidence_text(
         subject,
         image_summary=understanding.prompt_summary if understanding else None,
+        quality_issues=understanding.quality_issues if understanding else None,
     )
+
+
+def _should_short_circuit_image_turn(
+    *,
+    payload_message: str,
+    understanding: ImageUnderstandingResult | None,
+) -> bool:
+    if not understanding or not understanding.must_short_circuit:
+        return False
+    if understanding.is_academic:
+        return True
+    return not (payload_message or "").strip()
 
 
 def _build_image_grounded_fallback(
@@ -1013,14 +1028,23 @@ async def stream_chat(
             "paddleocr": "paddleocr",
             "ocr": "llm_ocr",
             "multimodal": "multimodal_fallback",
+            "off_topic": "off_topic",
             "failed": "failed",
         }.get(image_understanding.source, "pending")
         attachment_record.ocr_confidence = image_understanding.ocr_confidence_value
+        attachment_record.understanding_json = (
+            json.dumps(image_understanding.understanding_json, ensure_ascii=False)
+            if image_understanding.understanding_json is not None
+            else None
+        )
         db.add(attachment_record)
         db.commit()
 
     filter_question = _build_filter_question(payload_message=payload.message, understanding=image_understanding)
-    if has_image_turn and image_understanding and image_understanding.must_short_circuit:
+    if has_image_turn and _should_short_circuit_image_turn(
+        payload_message=payload.message,
+        understanding=image_understanding,
+    ):
         short_circuit_text = _build_short_circuit_reply(payload.subject, image_understanding)
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if not existing_assistant:
@@ -1113,6 +1137,7 @@ async def stream_chat(
         student_grade=current_user.grade,
         image_summary=image_understanding.prompt_summary if image_understanding else None,
         image_confidence=image_understanding.confidence_level if image_understanding else None,
+        image_uncertainties=image_understanding.uncertainties if image_understanding else None,
         image_related=has_image_turn,
     )
     if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):

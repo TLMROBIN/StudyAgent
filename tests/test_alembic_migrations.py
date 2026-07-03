@@ -144,6 +144,14 @@ def _table_names(db_path: Path) -> set[str]:
         engine.dispose()
 
 
+def _column_names(db_path: Path, table_name: str) -> set[str]:
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        return {column["name"] for column in inspect(engine).get_columns(table_name)}
+    finally:
+        engine.dispose()
+
+
 def _stepwise_upgrade_to_head(cfg: Config) -> tuple[list[str], dict[str, str]]:
     """从当前状态逐个 revision upgrade 到 head。
 
@@ -245,6 +253,7 @@ def test_upgrade_head(alembic_ctx) -> None:
 
     missing = KEY_TABLES - _table_names(db_path)
     assert not missing, f"head 状态缺少关键表：{sorted(missing)}"
+    assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
 
     assert set(failures) == KNOWN_BROKEN_UPGRADES_ON_FRESH_DB, (
         "全新库上失败的迁移与已知风险清单不一致。\n"
@@ -292,16 +301,16 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
     head = order[-1]
     prev = order[-2]
 
-    assert "student_feedback_attachments" in _table_names(db_path)
+    assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
 
     command.downgrade(cfg, "-1")
     assert _current_revision(db_path) == prev
-    assert "student_feedback_attachments" not in _table_names(db_path), (
-        "回退一步后 student_feedback_attachments 应被删除"
+    assert "understanding_json" not in _column_names(db_path, "chat_message_attachments"), (
+        "回退一步后 chat_message_attachments.understanding_json 应被删除"
     )
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
-    assert "student_feedback_attachments" in _table_names(db_path), (
-        "重新 upgrade 后 student_feedback_attachments 应被重建"
+    assert "understanding_json" in _column_names(db_path, "chat_message_attachments"), (
+        "重新 upgrade 后 chat_message_attachments.understanding_json 应被重建"
     )

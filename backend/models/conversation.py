@@ -129,6 +129,7 @@ class ChatMessageAttachment(TimestampMixin, Base):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     ocr_status: Mapped[str] = mapped_column(String(32), default="pending")
     ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    understanding_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     message: Mapped[Message] = relationship(back_populates="attachment")
 

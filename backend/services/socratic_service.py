@@ -71,6 +71,7 @@ class SocraticService:
         image_summary: str | None = None,
         image_confidence: str | None = None,
         image_related: bool = False,
+        image_uncertainties: list[str] | None = None,
     ) -> PromptPackage:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
@@ -112,8 +113,15 @@ class SocraticService:
                     "本轮图片理解置信度较低。回复时先说明图片看得不太清、理解可能有误，"
                     "再说出你当前对图片的理解，并请学生纠正或补充。"
                 )
+            elif image_confidence == "medium":
+                system_sections.append(
+                    "本轮图片理解置信度为 medium。回复开头必须先用1-2句复述识别到的题干要点，"
+                    "并向学生确认不确定信息，再开始苏格拉底式引导。"
+                )
             else:
                 system_sections.append("本轮依赖图片理解作答。如果图片信息不充分，必须直说看不准，并先引导学生补充更清晰图片或文字。")
+        if image_uncertainties:
+            system_sections.append(f"图片理解不确定处：{'；'.join(image_uncertainties)}")
         if student_grade is not None:
             system_sections.append(f"当前学生年级：{format_grade_label(student_grade) or f'{student_grade}年级'}")
         if image_summary:
@@ -199,7 +207,21 @@ class SocraticService:
             subject_strategy=subject_strategy,
         )
 
-    def image_low_confidence_text(self, subject: str, image_summary: str | None = None) -> str:
+    def image_low_confidence_text(
+        self,
+        subject: str,
+        image_summary: str | None = None,
+        quality_issues: list[str] | None = None,
+    ) -> str:
+        issue_messages = {
+            "blur": "照片有些模糊，请对焦后重拍",
+            "incomplete": "题目似乎没拍全，请把完整题干和选项拍进来",
+            "dark": "光线偏暗，请在更明亮的地方重拍",
+            "glare": "照片有反光，请换个角度避开反光后重拍",
+        }
+        suggestions = [issue_messages[item] for item in quality_issues or [] if item in issue_messages]
+        if suggestions:
+            return "；".join(suggestions) + "。"
         summary = " ".join((image_summary or "").split())
         if summary:
             return (
@@ -211,6 +233,10 @@ class SocraticService:
             f"这张{subject}题目的图片关键条件识别失败。"
             "请尝试重新上传一张更清晰、光线充足、题干完整的图片，或者直接把题干文字发给我。"
         )
+
+    @staticmethod
+    def image_off_topic_text() -> str:
+        return "我是学科答疑助手，只能帮你分析题目～请拍一道你正在做的题目上传。"
 
     @staticmethod
     def placeholder_question(subject: str) -> str:
