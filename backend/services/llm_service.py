@@ -412,8 +412,6 @@ class LLMService:
             return False
 
     def _database_image_provider_for_model(self, model_key: str | None) -> list[ProviderState]:
-        if not model_key:
-            return []
         try:
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
@@ -422,26 +420,56 @@ class LLMService:
 
             session = self._session_factory()
             try:
-                selected = session.scalar(
+                selected = None
+                if model_key:
+                    try:
+                        selected = session.scalar(
+                            select(LLMModelConfig)
+                            .options(selectinload(LLMModelConfig.provider_account))
+                            .where(
+                                LLMModelConfig.model_key == model_key,
+                                LLMModelConfig.is_enabled.is_(True),
+                                LLMModelConfig.capability_vision.is_(True),
+                            )
+                        )
+                    except Exception:
+                        selected = None
+                providers: list[ProviderState] = []
+                if selected and selected.provider_account and selected.provider_account.is_enabled:
+                    account = selected.provider_account
+                    self._append_unique_provider(
+                        providers,
+                        ProviderState(
+                            name=account.provider_name,
+                            base_url=account.base_url,
+                            api_key=account.api_key,
+                            model=selected.provider_model,
+                        ),
+                    )
+
+                vision_rows = session.scalars(
                     select(LLMModelConfig)
                     .options(selectinload(LLMModelConfig.provider_account))
                     .where(
-                        LLMModelConfig.model_key == model_key,
                         LLMModelConfig.is_enabled.is_(True),
                         LLMModelConfig.capability_vision.is_(True),
                     )
-                )
-                if not selected or not selected.provider_account or not selected.provider_account.is_enabled:
-                    return []
-                account = selected.provider_account
-                return [
-                    ProviderState(
-                        name=account.provider_name,
-                        base_url=account.base_url,
-                        api_key=account.api_key,
-                        model=selected.provider_model,
+                    .order_by(LLMModelConfig.sort_order.asc(), LLMModelConfig.id.asc())
+                ).all()
+                for item in vision_rows:
+                    account = item.provider_account
+                    if not account or not account.is_enabled:
+                        continue
+                    self._append_unique_provider(
+                        providers,
+                        ProviderState(
+                            name=account.provider_name,
+                            base_url=account.base_url,
+                            api_key=account.api_key,
+                            model=item.provider_model,
+                        ),
                     )
-                ]
+                return providers
             finally:
                 session.close()
         except Exception:

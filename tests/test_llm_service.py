@@ -1,6 +1,38 @@
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from backend.database import Base
+from backend.models.llm_account import AccountBillingType, LLMProviderAccount
+from backend.models.llm_model import LLMModelConfig
 from backend.services.llm_service import ThinkingContentFilter
 from backend.services import llm_service as llm_service_module
 from backend.services.llm_service import LLMService, ProviderState
+
+
+def _build_session_factory():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    testing_session_local = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    return testing_session_local
+
+
+def _add_account(session, *, provider_name: str, enabled: bool = True) -> LLMProviderAccount:
+    account = LLMProviderAccount(
+        provider_name=provider_name,
+        display_name=provider_name.title(),
+        base_url=f"https://{provider_name}.example/v1",
+        api_key=f"{provider_name}-secret",
+        account_billing_type=AccountBillingType.PAY_AS_YOU_GO,
+        is_enabled=enabled,
+    )
+    session.add(account)
+    session.flush()
+    return account
 
 
 def test_thinking_filter_strips_complete_think_block():
@@ -204,3 +236,115 @@ def test_builtin_chat_models_do_not_include_stopped_local_vl_model(monkeypatch):
 
     assert [item["key"] for item in options] == ["minimax-m27"]
     assert all("qwen2.5-vl" not in item["key"] for item in options)
+
+
+def test_text_model_uses_enabled_vision_models_as_image_fallback_chain(monkeypatch):
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        text_account = _add_account(session, provider_name="text")
+        selected_vision_account = _add_account(session, provider_name="selected-vision")
+        fallback_account = _add_account(session, provider_name="fallback-vision")
+        disabled_account = _add_account(session, provider_name="disabled-vision", enabled=False)
+        session.add_all(
+            [
+                LLMModelConfig(
+                    model_key="minimax-m27",
+                    display_name="Text Model",
+                    provider_account_id=text_account.id,
+                    provider_model="text-upstream",
+                    capability_text=True,
+                    capability_vision=False,
+                    sort_order=1,
+                ),
+                LLMModelConfig(
+                    model_key="vision-selected",
+                    display_name="Selected Vision",
+                    provider_account_id=selected_vision_account.id,
+                    provider_model="vision-selected-upstream",
+                    capability_text=True,
+                    capability_vision=True,
+                    sort_order=30,
+                ),
+                LLMModelConfig(
+                    model_key="vision-fallback",
+                    display_name="Fallback Vision",
+                    provider_account_id=fallback_account.id,
+                    provider_model="vision-fallback-upstream",
+                    capability_text=True,
+                    capability_vision=True,
+                    sort_order=10,
+                ),
+                LLMModelConfig(
+                    model_key="vision-disabled-account",
+                    display_name="Disabled Account Vision",
+                    provider_account_id=disabled_account.id,
+                    provider_model="vision-disabled-upstream",
+                    capability_text=True,
+                    capability_vision=True,
+                    sort_order=5,
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    service = LLMService()
+    monkeypatch.setattr(service, "_session_factory", session_factory)
+
+    text_model_providers = service._image_completion_providers("minimax-m27")
+    selected_vision_providers = service._image_completion_providers("vision-selected")
+    none_model_providers = service._image_completion_providers(None)
+
+    assert [(provider.name, provider.model) for provider in text_model_providers] == [
+        ("fallback-vision", "vision-fallback-upstream"),
+        ("selected-vision", "vision-selected-upstream"),
+    ]
+    assert [(provider.name, provider.model) for provider in selected_vision_providers] == [
+        ("selected-vision", "vision-selected-upstream"),
+        ("fallback-vision", "vision-fallback-upstream"),
+    ]
+    assert [(provider.name, provider.model) for provider in none_model_providers] == [
+        ("fallback-vision", "vision-fallback-upstream"),
+        ("selected-vision", "vision-selected-upstream"),
+    ]
+
+
+def test_image_completion_provider_chain_is_empty_without_enabled_vision_models(monkeypatch):
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        text_account = _add_account(session, provider_name="text")
+        disabled_account = _add_account(session, provider_name="disabled-account", enabled=False)
+        session.add_all(
+            [
+                LLMModelConfig(
+                    model_key="minimax-m27",
+                    display_name="Text Model",
+                    provider_account_id=text_account.id,
+                    provider_model="text-upstream",
+                    capability_text=True,
+                    capability_vision=False,
+                    sort_order=1,
+                ),
+                LLMModelConfig(
+                    model_key="disabled-vision",
+                    display_name="Disabled Vision",
+                    provider_account_id=disabled_account.id,
+                    provider_model="disabled-upstream",
+                    capability_text=True,
+                    capability_vision=True,
+                    sort_order=2,
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    service = LLMService()
+    monkeypatch.setattr(service, "_session_factory", session_factory)
+
+    assert service._image_completion_providers("minimax-m27") == []
+    assert service._image_completion_providers(None) == []
