@@ -7,6 +7,7 @@ from PIL import Image
 from backend.config import Settings
 from backend.services import chat_image_understanding_service as image_service_module
 from backend.services.chat_image_understanding_service import ChatImageUnderstandingService, ImageUnderstandingResult
+from backend.services.metrics_service import chat_image_understanding_total
 
 
 def _make_png_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
@@ -44,6 +45,35 @@ def test_understand_upscales_tiny_images_before_llm_ocr(monkeypatch):
     assert result.source == "ocr"
     assert captured["mime_type"] == "image/jpeg"
     assert max(captured["size"]) >= 1200
+
+
+def test_understand_records_result_metric(monkeypatch):
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="llm")
+    service = ChatImageUnderstandingService(settings=settings)
+
+    async def fake_extract_image_text(**kwargs) -> str:
+        return "已知函数 f(x)=x^2 的图像经过原点，求函数单调区间。"
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        raise AssertionError("high-confidence OCR should not need multimodal fallback")
+
+    monkeypatch.setattr(image_service_module.llm_service, "extract_image_text", fake_extract_image_text)
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+
+    counter = chat_image_understanding_total.labels(source="ocr", confidence="high")
+    before = counter._value.get()
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="数学",
+            user_text="",
+        )
+    )
+
+    assert result.source == "ocr"
+    assert counter._value.get() == before + 1
 
 
 def test_understand_uses_paddleocr_backend_before_llm(monkeypatch, tmp_path):

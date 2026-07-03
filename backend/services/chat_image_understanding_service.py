@@ -15,6 +15,7 @@ from typing import Any
 
 from backend.config import Settings, get_settings
 from backend.services.llm_service import llm_service
+from backend.services.metrics_service import chat_image_understanding_total
 
 logger = logging.getLogger(__name__)
 _WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -78,19 +79,21 @@ class ChatImageUnderstandingService:
                 image_path=image_path,
             )
             if vision_result is not None:
-                return vision_result
+                return self._record_understanding_result(vision_result)
 
         paddleocr_result = await self._try_paddleocr_ocr(image_path=image_path)
         if paddleocr_result is not None:
-            return paddleocr_result
+            return self._record_understanding_result(paddleocr_result)
         if self._ocr_backend() == "paddleocr":
-            return ImageUnderstandingResult(
-                filter_text="",
-                prompt_summary="",
-                ocr_raw_text="",
-                confidence_level="low",
-                source="failed",
-                must_short_circuit=True,
+            return self._record_understanding_result(
+                ImageUnderstandingResult(
+                    filter_text="",
+                    prompt_summary="",
+                    ocr_raw_text="",
+                    confidence_level="low",
+                    source="failed",
+                    must_short_circuit=True,
+                )
             )
 
         if llm_image_bytes is None or llm_mime_type is None:
@@ -108,23 +111,27 @@ class ChatImageUnderstandingService:
         confidence_level = self._assess_ocr_confidence(normalized_ocr)
 
         if confidence_level == "high":
-            return ImageUnderstandingResult(
-                filter_text=normalized_ocr,
-                prompt_summary=normalized_ocr,
-                ocr_raw_text=ocr_raw_text,
-                confidence_level="high",
-                source="ocr",
-                must_short_circuit=False,
+            return self._record_understanding_result(
+                ImageUnderstandingResult(
+                    filter_text=normalized_ocr,
+                    prompt_summary=normalized_ocr,
+                    ocr_raw_text=ocr_raw_text,
+                    confidence_level="high",
+                    source="ocr",
+                    must_short_circuit=False,
+                )
             )
 
         if confidence_level == "medium" and self._looks_sufficient_for_direct_use(normalized_ocr):
-            return ImageUnderstandingResult(
-                filter_text=normalized_ocr,
-                prompt_summary=normalized_ocr,
-                ocr_raw_text=ocr_raw_text,
-                confidence_level="medium",
-                source="ocr",
-                must_short_circuit=False,
+            return self._record_understanding_result(
+                ImageUnderstandingResult(
+                    filter_text=normalized_ocr,
+                    prompt_summary=normalized_ocr,
+                    ocr_raw_text=ocr_raw_text,
+                    confidence_level="medium",
+                    source="ocr",
+                    must_short_circuit=False,
+                )
             )
 
         multimodal_summary = self.normalize_text(
@@ -140,34 +147,44 @@ class ChatImageUnderstandingService:
         multimodal_confidence = self._assess_multimodal_confidence(multimodal_summary)
         if multimodal_confidence in {"high", "medium"}:
             filter_text = normalized_ocr or multimodal_summary
-            return ImageUnderstandingResult(
-                filter_text=filter_text,
-                prompt_summary=multimodal_summary,
-                ocr_raw_text=ocr_raw_text,
-                confidence_level=multimodal_confidence,
-                source="multimodal",
-                must_short_circuit=False,
+            return self._record_understanding_result(
+                ImageUnderstandingResult(
+                    filter_text=filter_text,
+                    prompt_summary=multimodal_summary,
+                    ocr_raw_text=ocr_raw_text,
+                    confidence_level=multimodal_confidence,
+                    source="multimodal",
+                    must_short_circuit=False,
+                )
             )
 
         partial_summary = multimodal_summary or normalized_ocr
         if partial_summary:
-            return ImageUnderstandingResult(
-                filter_text=normalized_ocr or partial_summary,
-                prompt_summary=partial_summary,
-                ocr_raw_text=ocr_raw_text,
-                confidence_level="low",
-                source="multimodal" if multimodal_summary else "ocr",
-                must_short_circuit=True,
+            return self._record_understanding_result(
+                ImageUnderstandingResult(
+                    filter_text=normalized_ocr or partial_summary,
+                    prompt_summary=partial_summary,
+                    ocr_raw_text=ocr_raw_text,
+                    confidence_level="low",
+                    source="multimodal" if multimodal_summary else "ocr",
+                    must_short_circuit=True,
+                )
             )
 
-        return ImageUnderstandingResult(
-            filter_text="",
-            prompt_summary="",
-            ocr_raw_text=ocr_raw_text,
-            confidence_level="low",
-            source="failed",
-            must_short_circuit=True,
+        return self._record_understanding_result(
+            ImageUnderstandingResult(
+                filter_text="",
+                prompt_summary="",
+                ocr_raw_text=ocr_raw_text,
+                confidence_level="low",
+                source="failed",
+                must_short_circuit=True,
+            )
         )
+
+    def _record_understanding_result(self, result: ImageUnderstandingResult) -> ImageUnderstandingResult:
+        chat_image_understanding_total.labels(source=result.source, confidence=result.confidence_level).inc()
+        return result
 
     async def _understand_vision_first(
         self,

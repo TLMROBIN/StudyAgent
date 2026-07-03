@@ -6,13 +6,18 @@ from base64 import b64encode
 import json
 import logging
 import re
+from time import monotonic
 from typing import AsyncIterator, Literal
 
 import httpx
 
 from backend.config import get_settings
 from backend.database import SessionLocal
-from backend.services.metrics_service import llm_stream_fallback_total, llm_stream_provider_failure_total
+from backend.services.metrics_service import (
+    chat_image_vision_call_failures_total,
+    llm_stream_fallback_total,
+    llm_stream_provider_failure_total,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -739,11 +744,23 @@ class LLMService:
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:
+                started_at = monotonic()
                 text = await self._complete_openai_compatible(provider, messages)
                 if text and not self._looks_like_no_image_received(text):
                     self._reset_provider(provider)
                     return text.strip()
-            except Exception:
+            except Exception as exc:
+                duration_seconds = monotonic() - started_at
+                reason = self._image_call_failure_reason(exc)
+                chat_image_vision_call_failures_total.labels(reason=reason).inc()
+                logger.warning(
+                    "chat_image_vision_call_failure provider=%s model=%s error_type=%s http_status=%s duration_seconds=%.3f",
+                    provider.name,
+                    provider.model,
+                    type(exc).__name__,
+                    self._http_status_code(exc),
+                    duration_seconds,
+                )
                 self._mark_provider_failure(provider)
         return ""
 
@@ -764,6 +781,27 @@ class LLMService:
     def _looks_like_no_image_received(text: str) -> bool:
         normalized = re.sub(r"\s+", "", (text or "").strip())
         return bool(normalized) and any(pattern.search(normalized) for pattern in NO_IMAGE_RECEIVED_PATTERNS)
+
+    @staticmethod
+    def _http_status_code(exc: Exception) -> int | None:
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            return exc.response.status_code
+        return None
+
+    @classmethod
+    def _image_call_failure_reason(cls, exc: Exception) -> str:
+        status_code = cls._http_status_code(exc)
+        if status_code is not None:
+            if 400 <= status_code < 500:
+                return "http_4xx"
+            if status_code >= 500:
+                return "http_5xx"
+            return "other"
+        if isinstance(exc, httpx.TimeoutException):
+            return "timeout"
+        if isinstance(exc, httpx.RequestError):
+            return "network"
+        return "other"
 
     async def _complete_openai_compatible(self, provider: ProviderState, messages: list[dict[str, object]]) -> str:
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
