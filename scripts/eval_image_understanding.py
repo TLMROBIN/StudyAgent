@@ -55,6 +55,7 @@ DEFAULT_MATRIX_MODELS = [
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "Qwen/Qwen2.5-VL-32B-Instruct",
     "doubao-1.5-vision-pro-32k",
+    "minimax-m3",
 ]
 DEFAULT_MATRIX_MODELS_TEXT = ",".join(DEFAULT_MATRIX_MODELS)
 VLM_EXTRACTION_PROMPT = (
