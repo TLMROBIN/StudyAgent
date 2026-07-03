@@ -257,8 +257,8 @@ check_auth_me() {
 
 check_alembic_head() {
   local current heads current_rev heads_rev
-  current="$($COMPOSE exec -T backend alembic -c "$ALEMBIC_INI_IN_CONTAINER" current 2>/dev/null | grep -Eo '^[0-9a-z_]+' | tail -n1)" || true
-  heads="$($COMPOSE exec -T backend alembic -c "$ALEMBIC_INI_IN_CONTAINER" heads 2>/dev/null | grep -Eo '^[0-9a-z_]+' | tail -n1)" || true
+  current="$($COMPOSE exec -T -e PYTHONPATH=/app backend alembic -c "$ALEMBIC_INI_IN_CONTAINER" current 2>/dev/null | grep -Eo '^[0-9a-z_]+' | tail -n1)" || true
+  heads="$($COMPOSE exec -T -e PYTHONPATH=/app backend alembic -c "$ALEMBIC_INI_IN_CONTAINER" heads 2>/dev/null | grep -Eo '^[0-9a-z_]+' | tail -n1)" || true
   current_rev="${current:-<none>}"
   heads_rev="${heads:-<none>}"
   if [[ -z "$heads" ]]; then
