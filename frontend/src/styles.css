@@ -141,6 +141,13 @@ textarea {
   transition: padding-left 0.24s ease;
 }
 
+.app-root--shell .app-main--student-chat {
+  height: var(--app-viewport-height, 100vh);
+  max-height: var(--app-viewport-height, 100vh);
+  min-height: 0;
+  overflow: hidden;
+}
+
 .app-main--plain {
   min-height: var(--app-viewport-height, 100vh);
   padding: 0;
