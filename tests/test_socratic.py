@@ -2,6 +2,7 @@ from pathlib import Path
 
 from backend.models.conversation import GuidanceStage
 from backend.services.socratic_service import socratic_service
+from backend.services.subject_guidance_service import subject_guidance_service
 
 
 def test_guidance_stage_progression():
@@ -325,3 +326,183 @@ def test_mode_instruction_only_injected_when_eligible():
     assert fact_prompt.fact_mode_offered is True
     assert "<mode>" not in guide_prompt.messages[0]["content"]
     assert guide_prompt.fact_mode_offered is False
+
+
+# --- 新增 5 科专项引导策略 ---
+
+
+def test_chemistry_equation_and_experiment_modes():
+    equation = socratic_service.build_prompt(
+        "帮我配平这个化学方程式", "化学", [], "", ""
+    )
+    experiment = socratic_service.build_prompt(
+        "这个实验加碱后出现沉淀是什么现象", "化学", [], "", ""
+    )
+
+    assert "守恒" in equation.messages[0]["content"]
+    assert "现象" in experiment.messages[0]["content"]
+
+
+def test_chemistry_falls_back_to_representation_mode():
+    prompt = socratic_service.build_prompt("这道化学题不会", "化学", [], "", "")
+
+    assert "三重表征" in prompt.messages[0]["content"]
+
+
+def test_biology_experiment_and_process_modes():
+    experiment = socratic_service.build_prompt(
+        "怎么设计对照实验找自变量", "生物", [], "", ""
+    )
+    process = socratic_service.build_prompt(
+        "光合作用的过程是怎样的", "生物", [], "", ""
+    )
+
+    assert "单一变量" in experiment.messages[0]["content"]
+    assert "输入→环节→输出" in process.messages[0]["content"]
+
+
+def test_history_source_and_causation_modes():
+    source = socratic_service.build_prompt(
+        "根据材料分析这段史料说明了什么", "历史", [], "", ""
+    )
+    causation = socratic_service.build_prompt(
+        "分析安史之乱的原因和影响", "历史", [], "", ""
+    )
+
+    assert "论从史出" in source.messages[0]["content"]
+    assert "多角度" in causation.messages[0]["content"]
+
+
+def test_geography_chart_and_location_modes():
+    chart = socratic_service.build_prompt(
+        "如何判读这张等高线图", "地理", [], "", ""
+    )
+    location = socratic_service.build_prompt(
+        "分析这个工业区的区位条件", "地理", [], "", ""
+    )
+
+    assert "图例" in chart.messages[0]["content"]
+    assert "区位" in location.messages[0]["content"]
+
+
+def test_politics_material_and_debate_modes():
+    material = socratic_service.build_prompt(
+        "结合材料说明如何体现哲学原理", "政治", [], "", ""
+    )
+    debate = socratic_service.build_prompt(
+        "辨析这个观点是否正确", "政治", [], "", ""
+    )
+
+    assert "原理" in material.messages[0]["content"]
+    assert "片面" in debate.messages[0]["content"]
+
+
+def test_new_subject_fallback_preserves_no_answer_constraint():
+    for subject, question in [
+        ("化学", "帮我配平方程式"),
+        ("生物", "光合作用过程"),
+        ("历史", "根据材料分析"),
+        ("地理", "判读气候图"),
+        ("政治", "辨析这个观点"),
+    ]:
+        prompt = socratic_service.build_prompt(
+            question, subject, [], "", "", guidance_params=None
+        )
+        text = prompt.fallback_text
+        assert "标准答案" not in text
+        assert "最终答案" not in text
+        # FALLBACK 阶段保留最后一步
+        fallback = subject_guidance_service.analyze(question, subject, GuidanceStage.FALLBACK)
+        assert fallback is not None
+        assert "自己" in fallback.fallback_text
+
+
+def test_unregistered_subject_returns_none():
+    assert subject_guidance_service.analyze("随便问问", "体育", GuidanceStage.INITIAL) is None
+    assert subject_guidance_service.analyze("", "化学", GuidanceStage.INITIAL) is not None
+
+
+# --- 数学/英语增量强化分支 ---
+
+
+def test_math_error_review_and_multi_solution_modes():
+    error_review = socratic_service.build_prompt(
+        "这道题我又错了，为什么错", "数学", [], "", ""
+    )
+    multi_solution = socratic_service.build_prompt(
+        "这道题还有别的方法吗", "数学", [], "", ""
+    )
+
+    assert "错因归类" in error_review.messages[0]["content"]
+    assert "一题多解" in multi_solution.messages[0]["content"]
+
+
+def test_english_reading_mode():
+    prompt = socratic_service.build_prompt(
+        "这道阅读理解的推断题怎么做", "英语", [], "", ""
+    )
+
+    assert "排除法" in prompt.messages[0]["content"]
+
+
+# --- 配置合并语义 ---
+
+
+def test_effective_guidance_params_merge_semantics():
+    fn = socratic_service._effective_guidance_params
+    assert fn(None, "数学") == {}
+    assert fn({"max_questions_per_turn": 2}, "数学") == {"max_questions_per_turn": 2}
+    # 仅 by_subject
+    merged = fn({"by_subject": {"英语": {"max_questions_per_turn": 3}}}, "英语")
+    assert merged["max_questions_per_turn"] == 3
+    # 全局 + by_subject 覆盖，且 by_subject 键不泄漏
+    both = fn(
+        {"max_questions_per_turn": 1, "by_subject": {"英语": {"max_questions_per_turn": 3}}},
+        "英语",
+    )
+    assert both == {"max_questions_per_turn": 3}
+    # 未命中学科退回全局
+    other = fn(
+        {"max_questions_per_turn": 1, "by_subject": {"英语": {"max_questions_per_turn": 3}}},
+        "数学",
+    )
+    assert other == {"max_questions_per_turn": 1}
+
+
+def test_per_subject_max_questions_override_applies():
+    package = socratic_service.build_prompt(
+        "什么是加速度",
+        "物理",
+        [],
+        "",
+        "",
+        guidance_params={"by_subject": {"物理": {"max_questions_per_turn": 1}}},
+    )
+
+    assert "最多提出 1 个引导问题" in package.messages[0]["content"]
+
+
+def test_subject_supplement_injected_after_base_prompt():
+    package = socratic_service.build_prompt(
+        "什么是加速度",
+        "物理",
+        [],
+        "",
+        "全局提示词",
+        subject_supplement="物理科追加提示：优先受力分析。",
+    )
+    system_text = package.messages[0]["content"]
+
+    assert "物理科追加提示：优先受力分析。" in system_text
+    # 硬约束仍在最前
+    assert system_text.index(socratic_service.base_prompt) < system_text.index("物理科追加提示")
+    # 补充段位于当前学科段之前
+    assert system_text.index("物理科追加提示") < system_text.index("当前学科：")
+
+
+def test_chat_router_passes_subject_supplement_and_keeps_guidance_params():
+    source = Path("backend/routers/chat.py").read_text()
+
+    assert "subject_supplement=subject_supplement" in source
+    assert "guidance_params=active_config.guidance_params if active_config else None" in source
+

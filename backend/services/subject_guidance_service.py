@@ -17,6 +17,23 @@ class SubjectTeachingMode(StrEnum):
     CHINESE_WRITING = "chinese_writing"
     CHINESE_CLASSICAL = "chinese_classical"
     CHINESE_MATERIAL = "chinese_material"
+    MATH_ERROR_REVIEW = "math_error_review"
+    MATH_MULTI_SOLUTION = "math_multi_solution"
+    ENGLISH_READING = "english_reading"
+    CHEM_EQUATION = "chem_equation"
+    CHEM_EXPERIMENT = "chem_experiment"
+    CHEM_REPRESENTATION = "chem_representation"
+    BIO_EXPERIMENT_DESIGN = "bio_experiment_design"
+    BIO_PROCESS_CHAIN = "bio_process_chain"
+    BIO_STRUCTURE_FUNCTION = "bio_structure_function"
+    HIST_SOURCE = "hist_source"
+    HIST_SPACETIME = "hist_spacetime"
+    HIST_CAUSATION = "hist_causation"
+    GEO_CHART = "geo_chart"
+    GEO_PROCESS = "geo_process"
+    GEO_LOCATION = "geo_location"
+    POL_MATERIAL_PRINCIPLE = "pol_material_principle"
+    POL_DEBATE = "pol_debate"
 
 
 @dataclass(frozen=True)
@@ -25,6 +42,214 @@ class SubjectGuidanceStrategy:
     teaching_mode: SubjectTeachingMode
     prompt_section: str
     fallback_text: str
+
+
+@dataclass(frozen=True)
+class SubjectRule:
+    """声明式学科引导规则。triggers 为空元组时作为该学科兜底规则（须放末位）。"""
+
+    mode: SubjectTeachingMode
+    triggers: tuple[str, ...]
+    prompt_section: str
+    fallback_by_stage: dict[GuidanceStage, str]
+
+
+# 新增 5 科（化学/生物/历史/地理/政治）走声明式注册表；数学/英语/语文仍走手写分支。
+# 每科最后一条规则 triggers=() 作为兜底，命中失败时仍返回它。
+SUBJECT_STRATEGY_RULES: dict[str, tuple[SubjectRule, ...]] = {
+    "化学": (
+        SubjectRule(
+            mode=SubjectTeachingMode.CHEM_EQUATION,
+            triggers=("配平", "化学方程式", "离子方程式", "系数", "守恒"),
+            prompt_section=(
+                "化学方程式配平模式：引导学生用质量守恒（原子个数守恒）和电荷守恒自查，"
+                "不直接替学生写出或配平方程式；先让学生确认反应物、生成物，再逐元素核对个数。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别急着配系数。你先把反应物和生成物的化学式确认清楚，再数一数等号两边每种原子各有几个。",
+                GuidanceStage.HINT: "抓住最不平衡的那种原子，先给它配上系数，再顺着调整其他物质。你先说说哪种原子两边数量差得最多？",
+                GuidanceStage.FALLBACK: "我们收束一下：逐元素守恒→定最难平的原子→连锁调整→最后查电荷。最后一步的系数核对和检查请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.CHEM_EXPERIMENT,
+            triggers=("实验", "现象", "沉淀", "颜色", "气体", "褪色", "检验"),
+            prompt_section=(
+                "化学实验现象→原理模式：先让学生准确描述观察到的现象，再反推微观层面发生了什么反应；"
+                "不直接给出结论，用追问引导学生把现象和原理对应起来。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先把你观察到的现象一条条说清楚：颜色、状态、有没有气体或沉淀。你先描述最明显的一个现象。",
+                GuidanceStage.HINT: "把每个现象和一种可能的反应对应起来。你先想想这个颜色变化说明生成了什么？",
+                GuidanceStage.FALLBACK: "我们按现象→微观反应→符号表达梳理。最后那步写出反应并解释成因，请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.CHEM_REPRESENTATION,
+            triggers=(),
+            prompt_section=(
+                "化学三重表征模式：引导学生在宏观现象、微观粒子、符号表达三个视角之间切换；"
+                "不直接给答案，先问学生这道题涉及哪个层面，再帮他连通另外两个层面。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先判断这道题问的是宏观现象、微观粒子还是符号表达？你先说说题目落在哪个层面。",
+                GuidanceStage.HINT: "把你熟悉的那个层面写出来，再试着翻译到另外两个层面。你先从最有把握的一个开始。",
+                GuidanceStage.FALLBACK: "我们把宏观、微观、符号三栏都列出来对应。最后的连通和结论请你自己补全。",
+            },
+        ),
+    ),
+    "生物": (
+        SubjectRule(
+            mode=SubjectTeachingMode.BIO_EXPERIMENT_DESIGN,
+            triggers=("实验设计", "对照", "变量", "自变量", "假设"),
+            prompt_section=(
+                "生物对照实验模式：强调单一变量原则，先引导学生找出自变量、因变量和无关变量，"
+                "再设计对照组；不直接给出完整方案，让学生自己补全设计。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别写方案。你先找出这个实验想研究的自变量是什么，因变量又用什么来测量？",
+                GuidanceStage.HINT: "围绕单一变量原则想想：除了自变量，其他条件该怎么控制一致？你先说说需要控制哪些无关变量。",
+                GuidanceStage.FALLBACK: "我们按自变量→因变量→无关变量→对照组梳理。最后一步把完整方案写出来，请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.BIO_PROCESS_CHAIN,
+            triggers=("光合", "呼吸", "遗传", "有丝", "减数", "流程", "传递"),
+            prompt_section=(
+                "生物过程链推理模式：把生命过程拆成“输入→环节→输出”分段追问，"
+                "不直接给出整条流程，让学生逐段说清物质和能量的来龙去脉。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先定位这个过程发生在哪里、分几个阶段。你先说说它的起点输入和终点产物分别是什么？",
+                GuidanceStage.HINT: "把过程拆成几个环节，看每一步的物质和能量怎么变化。你先说清第一个环节发生了什么。",
+                GuidanceStage.FALLBACK: "我们按输入→各环节→输出把链条连起来。最后一步的完整衔接请你自己补全。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.BIO_STRUCTURE_FUNCTION,
+            triggers=(),
+            prompt_section=(
+                "生物结构与功能对应模式：从“结构决定功能”出发追问对应关系，"
+                "不直接给结论，引导学生说明某结构的特点如何支撑其功能。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先看结构：这个结构有什么特点？你先描述它最显著的形态或组成。",
+                GuidanceStage.HINT: "把结构特点和它承担的功能连起来想想。你先说说这个特点对完成功能有什么帮助？",
+                GuidanceStage.FALLBACK: "我们按结构特点→如何适应功能梳理对应关系。最后的结论请你自己得出。",
+            },
+        ),
+    ),
+    "历史": (
+        SubjectRule(
+            mode=SubjectTeachingMode.HIST_SOURCE,
+            triggers=("史料", "材料", "根据材料", "出处"),
+            prompt_section=(
+                "历史史料研读模式：坚持“论从史出”，先引导学生读懂史料说了什么、谁写的、立场如何，"
+                "再据此推论；不直接给出答案或代学生概括观点。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别急着下结论。你先说说这则史料字面上讲了什么，它出自谁、什么立场？",
+                GuidanceStage.HINT: "把史料的关键信息和设问对应起来，注意作者立场会影响可信度。你先提取最关键的一句。",
+                GuidanceStage.FALLBACK: "我们按读懂史料→辨立场→据史推论梳理。最后一步的结论请你结合史料自己得出。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.HIST_SPACETIME,
+            triggers=("时间", "朝代", "时期", "背景", "阶段特征"),
+            prompt_section=(
+                "历史时空定位模式：先引导学生确定事件的时间和空间坐标，再回忆该时期的阶段特征，"
+                "不直接给出背景结论，让学生自己把史事放回时空框架。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先定位时空：这件事发生在什么时期、什么地方？你先说出你能确定的时间坐标。",
+                GuidanceStage.HINT: "回忆这个时期政治、经济、思想上的阶段特征，再看题目落在哪一点。你先说一个该时期的特征。",
+                GuidanceStage.FALLBACK: "我们按时间→空间→阶段特征把坐标建起来。最后的判断请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.HIST_CAUSATION,
+            triggers=(),
+            prompt_section=(
+                "历史因果与评价模式：从政治、经济、文化等多角度追问因果链，"
+                "不直接给出原因或评价，引导学生分层次、多角度自己组织论述。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先搭角度：分析原因或影响时，可以从政治、经济、文化几个方面切入。你先选一个你最有把握的角度。",
+                GuidanceStage.HINT: "把每个角度的因果关系说成一句话，注意区分根本原因和直接原因。你先说出最直接的那个原因。",
+                GuidanceStage.FALLBACK: "我们按多角度→分层次把因果链整理清楚。最后的综合评价请你自己得出。",
+            },
+        ),
+    ),
+    "地理": (
+        SubjectRule(
+            mode=SubjectTeachingMode.GEO_CHART,
+            triggers=("图", "等高线", "气候图", "统计图", "判读", "如图"),
+            prompt_section=(
+                "地理图表判读模式：先引导学生看清图名、图例、坐标和单位，再从图中提取信息，"
+                "不直接替学生读出结论，让学生自己完成从图到结论的推理。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别看结论。你先读一读图名、图例和坐标轴，说说这张图在表达什么？",
+                GuidanceStage.HINT: "从图里提取关键的数值或变化趋势，再和设问对应起来。你先说出一个最明显的信息。",
+                GuidanceStage.FALLBACK: "我们按读图名图例→提取信息→对应设问梳理。最后一步的结论请你自己读出来。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.GEO_PROCESS,
+            triggers=("过程", "成因", "形成", "演变", "循环"),
+            prompt_section=(
+                "地理过程推理模式：把地理过程按时序拆成几个环节分步推理，"
+                "不直接给出成因，引导学生说清每一步的地理要素如何变化。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先理清这是一个什么过程、涉及哪些地理要素。你先说说它大致分几个阶段？",
+                GuidanceStage.HINT: "按时间顺序把每个环节的变化说清楚，注意要素之间的因果。你先说出第一步发生了什么。",
+                GuidanceStage.FALLBACK: "我们按时序把过程各环节串起来。最后一步的成因归纳请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.GEO_LOCATION,
+            triggers=(),
+            prompt_section=(
+                "地理区位分析框架：引导学生从自然要素（地形、气候、水源等）和人文要素"
+                "（市场、交通、政策、劳动力等）两栏分别列举，不直接给出结论，让学生自己筛选主导因素。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先搭框架：区位分析从自然要素和人文要素两方面入手。你先列出你想到的自然要素。",
+                GuidanceStage.HINT: "把自然和人文要素分两栏列全，再判断哪个是主导因素。你先补充人文方面的要素。",
+                GuidanceStage.FALLBACK: "我们把自然、人文两栏列清楚再排主次。最后的主导因素判断请你自己完成。",
+            },
+        ),
+    ),
+    "政治": (
+        SubjectRule(
+            mode=SubjectTeachingMode.POL_MATERIAL_PRINCIPLE,
+            triggers=("材料", "结合材料", "体现", "如何体现"),
+            prompt_section=(
+                "政治材料-原理对应模式：先引导学生从材料中提取关键词和关键句，再匹配对应的学科原理，"
+                "不直接给出原理或答案，让学生自己完成材料与原理的对接。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先读材料：把材料里的关键词和关键句圈出来。你先说说材料主要在讲什么？",
+                GuidanceStage.HINT: "把每个关键词对应到一个你学过的原理上。你先试着为最关键的一句话匹配一个原理。",
+                GuidanceStage.FALLBACK: "我们按提取关键词→匹配原理→回扣材料梳理。最后一步的组织表述请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.POL_DEBATE,
+            triggers=(),
+            prompt_section=(
+                "政治辨析模式：引导学生对观点做“合理处+片面处”双向分析，"
+                "不直接判定对错，让学生自己分层次说明为什么合理、又为什么片面。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "辨析题不能简单说对或错。你先想想这个观点有没有合理的成分？先说合理的一面。",
+                GuidanceStage.HINT: "再找找它片面或不严谨的地方，注意条件和范围。你先指出一个不够全面的点。",
+                GuidanceStage.FALLBACK: "我们按合理处→片面处→修正表述梳理。最后的完整辨析请你自己得出。",
+            },
+        ),
+    ),
+}
 
 
 class SubjectGuidanceService:
@@ -43,6 +268,9 @@ class SubjectGuidanceService:
     )
     concept_signals = ("什么是", "是什么意思", "为什么", "概念", "定义", "原理", "区别")
     math_word_problem_signals = ("应用题", "设x", "设 x", "列方程", "数量关系", "行程", "工程", "浓度", "利润", "相遇")
+    math_error_signals = ("错了", "错因", "又错", "总是错", "老是错", "为什么错", "错哪")
+    math_multi_solution_signals = ("还有别的方法", "另一种解法", "一题多解", "多种解法", "其他方法", "别的解法")
+    english_reading_signals = ("阅读理解", "七选五", "完形", "推断题", "细节题", "主旨题")
     english_writing_signals = ("作文", "写作", "批改", "句式", "邮件", "段落", "改这篇")
     english_vocabulary_signals = ("词汇DNA", "词汇 DNA", "存入词汇", "记单词", "背单词", "复习词汇", "单词")
     chinese_material_signals = ("素材库", "存入素材", "素材", "名言", "事例", "好句")
@@ -57,7 +285,25 @@ class SubjectGuidanceService:
             return self._english_strategy(question, stage)
         if subject == "语文":
             return self._chinese_strategy(question, stage)
-        return None
+        return self._registry_strategy(question, subject, stage)
+
+    def _registry_strategy(
+        self, question: str, subject: str, stage: GuidanceStage
+    ) -> SubjectGuidanceStrategy | None:
+        rules = SUBJECT_STRATEGY_RULES.get(subject)
+        if not rules:
+            return None
+        normalized = question.strip()
+        matched = next((rule for rule in rules if any(kw in normalized for kw in rule.triggers)), None)
+        if matched is None:
+            matched = rules[-1]  # 末位规则作为兜底
+        fallback = matched.fallback_by_stage.get(stage) or matched.fallback_by_stage[GuidanceStage.INITIAL]
+        return SubjectGuidanceStrategy(
+            subject=subject,
+            teaching_mode=matched.mode,
+            prompt_section=matched.prompt_section,
+            fallback_text=fallback,
+        )
 
     def is_math_practice_request(self, question: str) -> bool:
         normalized = question.strip()
@@ -80,6 +326,26 @@ class SubjectGuidanceService:
                     "请按“识别量→说关系→转方程”推进，让学生自己说出数量关系，再把自然语言转成数学语言。"
                 ),
                 fallback_text=fallback,
+            )
+        if any(signal in question for signal in self.math_error_signals):
+            return SubjectGuidanceStrategy(
+                subject="数学",
+                teaching_mode=SubjectTeachingMode.MATH_ERROR_REVIEW,
+                prompt_section=(
+                    "数学错因归类模式：引导学生把错误归到概念错、计算错还是审题错，"
+                    "不直接指出错在哪一步，让学生自己定位并说明错误原因。"
+                ),
+                fallback_text="先别看正确解法。你先回看自己的过程，判断这次是概念没吃透、计算失误，还是审题偏了？把可疑的那一步先圈出来。",
+            )
+        if any(signal in question for signal in self.math_multi_solution_signals):
+            return SubjectGuidanceStrategy(
+                subject="数学",
+                teaching_mode=SubjectTeachingMode.MATH_MULTI_SOLUTION,
+                prompt_section=(
+                    "数学一题多解模式：引导学生比较不同方法的适用条件和优劣，"
+                    "不直接演示第二种解法，让学生自己尝试从另一个知识点切入。"
+                ),
+                fallback_text="先不急着给你另一种解法。你现在这种方法用到了哪个知识点？换一个角度想想，这道题还能不能从函数、几何或方程的另一条路切入？",
             )
         if any(signal in question for signal in self.concept_signals):
             return SubjectGuidanceStrategy(
@@ -121,6 +387,16 @@ class SubjectGuidanceService:
                     "不要代写整篇作文，用追问引导学生自己升级句式。"
                 ),
                 fallback_text="我们先不重写整篇。你先选一句最想提升的句子，我只从语法、用词、逻辑里挑最关键的一点让你自己改。",
+            )
+        if any(signal in question for signal in self.english_reading_signals):
+            return SubjectGuidanceStrategy(
+                subject="英语",
+                teaching_mode=SubjectTeachingMode.ENGLISH_READING,
+                prompt_section=(
+                    "英语阅读理解模式：引导学生先定位题目对应的关键句，再用选项排除法逐项验证，"
+                    "不直接给出正确选项，让学生自己说明每个选项的取舍依据。"
+                ),
+                fallback_text="先别急着选。你先回原文定位到和这题相关的那一句，再看哪个选项和原文意思最贴、哪些明显能排除。你先排掉一个最不可能的选项。",
             )
         return SubjectGuidanceStrategy(
             subject="英语",
