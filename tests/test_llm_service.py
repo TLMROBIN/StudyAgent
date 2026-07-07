@@ -12,7 +12,7 @@ from backend.models.llm_model import LLMModelConfig
 from backend.services.metrics_service import chat_image_vision_call_failures_total
 from backend.services.llm_service import ThinkingContentFilter
 from backend.services import llm_service as llm_service_module
-from backend.services.llm_service import LLMService, ProviderState
+from backend.services.llm_service import LLMService, LLMStreamEvent, LLMUsage, ProviderState
 
 
 def _build_session_factory():
@@ -282,6 +282,34 @@ def test_stream_events_emit_chunks_and_final_usage(monkeypatch):
     assert events[-1].usage.reasoning_tokens == 3
     assert captured_payloads[0]["stream_options"] == {"include_usage": True}
     assert captured_payloads[0]["max_completion_tokens"] == 256
+
+
+def test_stream_response_falls_back_when_provider_only_emits_usage(monkeypatch):
+    service = LLMService()
+    provider = ProviderState(
+        name="openrouter",
+        base_url="https://api.example.test/v1",
+        api_key="secret",
+        model="deepseek/deepseek-v4-flash",
+    )
+
+    async def fake_stream_events(*args, **kwargs):
+        yield LLMStreamEvent(type="usage", usage=LLMUsage(prompt_tokens=12, completion_tokens=0, total_tokens=12))
+
+    monkeypatch.setattr(service, "_providers_for_chat_model", lambda model_key: [provider])
+    monkeypatch.setattr(service, "_stream_openai_compatible_events", fake_stream_events)
+
+    async def collect_chunks() -> list[str]:
+        return [
+            chunk
+            async for chunk in service.stream_response(
+                [{"role": "user", "content": "带电"}],
+                "请继续说说你的想法。",
+                model_key="minimax-m27",
+            )
+        ]
+
+    assert asyncio.run(collect_chunks()) == ["请继续说说你的想法。"]
 
 
 def test_builtin_chat_models_do_not_include_stopped_local_vl_model(monkeypatch):

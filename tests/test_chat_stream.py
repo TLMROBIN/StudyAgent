@@ -246,6 +246,81 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         session.close()
 
 
+def test_short_reply_to_previous_guiding_question_is_reviewed_in_context(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    seen: dict[str, object] = {}
+
+    session = session_factory()
+    try:
+        conversation = Conversation(student_id=current_user.id, subject="物理")
+        session.add(conversation)
+        session.flush()
+        session.add_all(
+            [
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.USER,
+                    content="讲解下库仑定律",
+                    turn_index=1,
+                    guidance_stage=GuidanceStage.INITIAL,
+                ),
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.ASSISTANT,
+                    content="库仑定律描述的是哪两个物体之间的相互作用？这两个物体需要满足什么条件？",
+                    turn_index=1,
+                    guidance_stage=GuidanceStage.INITIAL,
+                ),
+            ]
+        )
+        session.commit()
+        conversation_id = conversation.id
+    finally:
+        session.close()
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        seen["messages"] = messages
+        yield "你的回答抓住了关键：要研究带电物体之间的相互作用。下一步再想想，库仑定律通常还要求它们可看成什么模型？"
+
+    def fake_retrieve(db, subject, question, **kwargs):
+        seen["retrieval_query"] = question
+        return RetrievalResult(context="", chunks=[])
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", fake_retrieve)
+    async def fake_generate_suggested_replies(**kwargs):
+        return []
+
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+    monkeypatch.setattr(chat_router.suggested_reply_service, "generate", fake_generate_suggested_replies)
+
+    session = session_factory()
+    try:
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="带电", conversation_id=conversation_id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+    finally:
+        session.close()
+
+    assert [event for event, _ in events][0] == "meta"
+    assert [event for event, _ in events][-1] == "done"
+    assert "chunk" in [event for event, _ in events]
+    messages = seen["messages"]
+    assert messages[-1]["content"].startswith("学生正在回答上一轮物理概念问题。")
+    assert "上一轮导师问题：库仑定律描述的是哪两个物体之间的相互作用" in messages[-1]["content"]
+    assert "学生回答：带电" in messages[-1]["content"]
+    assert seen["retrieval_query"] != "带电"
+    assert "讲解下库仑定律" in seen["retrieval_query"]
+    assert "带电" in seen["retrieval_query"]
+
+
 def test_student_can_list_builtin_chat_models(monkeypatch):
     session_factory = _build_session_factory()
     client = _build_chat_test_client(session_factory, _create_student(session_factory))
