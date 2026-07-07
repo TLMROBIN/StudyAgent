@@ -699,6 +699,11 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.message-body > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .message-body pre,
 .message-body code,
 .message-body img,
@@ -767,7 +772,8 @@ textarea {
   border: 1px solid rgba(24, 33, 47, 0.14);
   text-align: left;
   vertical-align: top;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .message-body th {
@@ -852,6 +858,14 @@ textarea {
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 4px;
+}
+
+.message-body :not(.katex-display) > .katex {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
 }
 
 .message-code {
