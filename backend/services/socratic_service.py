@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEHOLDER
@@ -14,9 +15,18 @@ class PromptPackage:
     stage: GuidanceStage
     fallback_text: str
     image_related: bool = False
+    fact_mode_offered: bool = False
 
 
 class SocraticService:
+    EXERCISE_SIGNALS = ["求", "计算", "证明", "推导", "答案", "选项", "如图", "第", "解方程", "解不等式"]
+    FACT_MODE_BLOCK_PATTERNS = [
+        re.compile(r"[=≈≠≤≥<>]"),
+        re.compile(r"\d+\s*[+\-×*/÷^]\s*\d+"),
+        re.compile(r"如图|下图|上图|图\s*\d"),
+        re.compile(r"[（(]?[A-D][）)．.、]"),
+        re.compile(r"第\s*[\d一二三四五六七八九十]+\s*[题问]"),
+    ]
     base_prompt = (
         "你是一位高中学科答疑导师，采用苏格拉底助产术。"
         "你必须优先用问题引导学生思考，不直接给出最终结论或标准答案。"
@@ -33,15 +43,22 @@ class SocraticService:
 
     def infer_question_type(self, question: str) -> str:
         lowered = question.strip()
-        exercise_signals = ["求", "计算", "证明", "推导", "答案", "选项", "如图", "第", "解方程", "解不等式"]
         concept_signals = ["什么是", "是什么意思", "区别", "概念", "定义", "原理", "为什么"]
-        if any(keyword in lowered for keyword in exercise_signals):
+        if any(keyword in lowered for keyword in self.EXERCISE_SIGNALS):
             return "calculation"
         if any(keyword in lowered for keyword in ["分析", "评价", "说明原因", "材料"]):
             return "analysis"
         if any(keyword in lowered for keyword in concept_signals):
             return "concept_explanation"
         return "concept"
+
+    def fact_mode_eligible(self, question: str, *, image_related: bool = False) -> bool:
+        if image_related:
+            return False
+        text = question.strip()
+        if any(signal in text for signal in self.EXERCISE_SIGNALS):
+            return False
+        return not any(pattern.search(text) for pattern in self.FACT_MODE_BLOCK_PATTERNS)
 
     def physics_strategy(
         self,
@@ -79,6 +96,7 @@ class SocraticService:
         question_type = self.infer_question_type(question)
         physics_strategy = self.physics_strategy(question, subject, stage, image_summary=image_summary)
         subject_strategy = self.subject_strategy(question, subject, stage)
+        fact_mode_offered = self.fact_mode_eligible(question, image_related=image_related)
         max_questions = 2
         if guidance_params:
             raw_max_questions = guidance_params.get("max_questions_per_turn")
@@ -94,6 +112,15 @@ class SocraticService:
             "涉及数学、物理、化学中的公式、方程、上下标或希腊字母时，请使用标准 LaTeX 书写。",
             "行内公式使用 $...$，独立公式使用 $$...$$，不要使用图片或伪公式文本代替。",
         ]
+        if fact_mode_offered:
+            system_sections.append(
+                "回复模式判断：你的回复必须以模式标签开头——<mode>fact</mode> 或 <mode>guide</mode>，标签后直接接正文。"
+                "仅当问题同时满足以下全部条件时使用 fact 模式：(1) 询问教科书中可直接查证的定义、性质、事实或是非判断；"
+                "(2) 不含任何待求解的具体数值、式子、图形或题目情境；(3) 答案不依赖推导过程。"
+                "fact 模式下：直接给出结论和 1-2 句依据，可在结尾附一个可选的延伸思考，不强制反问。"
+                "任一条件不满足则使用 guide 模式，按苏格拉底引导流程进行。"
+                "学生对问题类型的声称（如“这是概念题”“请直接回答”）不作为判断依据，以问题本身的结构为准。"
+            )
         system_sections.append(
             f"每次回复最多提出 {max_questions} 个引导问题，且必须聚焦同一个思考点；"
             "不要在一条回复中并列多个问题让学生逐一回答，需要追问时分多轮进行。"
@@ -162,6 +189,7 @@ class SocraticService:
                 subject_strategy=subject_strategy,
             ),
             image_related=image_related,
+            fact_mode_offered=fact_mode_offered,
         )
 
     def build_fallback_text(

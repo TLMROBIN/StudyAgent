@@ -806,6 +806,45 @@ def test_chat_stream_replays_disconnected_request_without_second_llm_call(monkey
         session.close()
 
 
+def test_chat_stream_strips_fact_mode_tag_before_emit_and_persist(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "<mode>fact</mode>三溴苯酚微溶于水。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="化学", message="三溴苯酚是否部分溶于水"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        assistant_message = session.scalar(
+            select(Message).where(Message.role == MessageRole.ASSISTANT).order_by(Message.id.desc()).limit(1)
+        )
+    finally:
+        session.close()
+
+    assert [event for event, _ in events] == ["meta", "chunk", "done"]
+    assert events[1][1]["content"] == "三溴苯酚微溶于水。"
+    assert events[-1][1]["content"] == "三溴苯酚微溶于水。"
+    assert assistant_message is not None
+    assert assistant_message.content == "三溴苯酚微溶于水。"
+
+
 def test_chat_stream_supports_image_only_messages_and_persists_attachment(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
