@@ -431,6 +431,8 @@ function collapseSoftLineBreaks(text: string): string {
   }
 
   flushCurrent()
+  while (normalizedLines[0] === '') normalizedLines.shift()
+  while (normalizedLines[normalizedLines.length - 1] === '') normalizedLines.pop()
   return normalizedLines.join('\n')
 }
 

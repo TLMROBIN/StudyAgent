@@ -52,3 +52,32 @@ def test_student_chat_main_uses_resized_viewport_height():
     assert "height: var(--app-viewport-height" in rule
     assert "max-height: var(--app-viewport-height" in rule
     assert "overflow: hidden" in rule
+
+
+def test_rich_text_strips_leading_blank_lines():
+    source = Path("frontend/src/utils/richText.ts").read_text()
+    start = source.index("function collapseSoftLineBreaks")
+    end = source.index("function renderMarkdownBlocks", start)
+    block = source[start:end]
+
+    assert "normalizedLines.shift()" in block
+    assert "normalizedLines.pop()" in block
+
+
+def test_student_chat_trims_first_streaming_chunk():
+    source = Path("frontend/src/views/StudentChat.vue").read_text()
+    start = source.index("if (event === 'chunk')")
+    end = source.index("if (event === 'done')", start)
+    chunk_block = source[start:end]
+
+    assert "data.content.replace(/^\\s+/, '')" in chunk_block
+
+
+def test_user_bubbles_hide_role_label_to_avoid_leading_blank_line():
+    css = Path("frontend/src/styles.css").read_text()
+
+    assert ".bubble.user .bubble-role" in css
+    start = css.index(".bubble.user .bubble-role")
+    end = css.index("}", start)
+    rule = css[start:end]
+    assert "display: none" in rule

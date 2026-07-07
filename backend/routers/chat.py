@@ -1505,6 +1505,7 @@ async def stream_chat(
     async def event_stream():
         nonlocal quota_usage
         emitted_text = ""
+        emitted_visible = False
         pending_buffer = ""
         llm_stream = None
         disconnected = False
@@ -1560,6 +1561,11 @@ async def stream_chat(
                 pending_buffer += provider_chunk
                 segments, pending_buffer = _split_stream_buffer(pending_buffer)
                 for segment in segments:
+                    if not emitted_visible:
+                        segment = segment.lstrip()
+                        if not segment:
+                            continue
+                        emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
                     validation = filter_service.validate_answer(candidate_text)
                     if not validation.allowed:
@@ -1591,6 +1597,11 @@ async def stream_chat(
             if not disconnected and pending_buffer:
                 segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
                 for segment in segments:
+                    if not emitted_visible:
+                        segment = segment.lstrip()
+                        if not segment:
+                            continue
+                        emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
                     validation = filter_service.validate_answer(candidate_text)
                     if not validation.allowed:
@@ -1616,6 +1627,7 @@ async def stream_chat(
             if should_send_done and not emitted_text.strip():
                 emitted_text = fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
             if should_send_done:
+                emitted_text = emitted_text.strip()
                 yield _sse_event("done", {"content": emitted_text})
         finally:
             if llm_stream is not None:
@@ -1631,6 +1643,7 @@ async def stream_chat(
                 conversation.guidance_stage = prompt.stage
                 db.add(conversation)
                 if emitted_text:
+                    emitted_text = emitted_text.strip()
                     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
                     if existing_assistant:
                         emitted_text = existing_assistant.content

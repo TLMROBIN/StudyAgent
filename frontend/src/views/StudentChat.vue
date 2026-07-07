@@ -1046,7 +1046,7 @@ async function sendMessage() {
         if (event === 'chunk') {
           const last = messages.value[messages.value.length - 1]
           if (last && last.role === 'assistant' && typeof data.content === 'string') {
-            last.content += data.content
+            last.content += last.content ? data.content : data.content.replace(/^\s+/, '')
             queueScrollToBottom()
           }
         }
