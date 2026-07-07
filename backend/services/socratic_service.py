@@ -90,6 +90,7 @@ class SocraticService:
         image_related: bool = False,
         image_uncertainties: list[str] | None = None,
         guidance_params: dict | None = None,
+        practice_context: dict | None = None,
     ) -> PromptPackage:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
@@ -159,6 +160,21 @@ class SocraticService:
                 system_sections.append("本轮依赖图片理解作答。如果图片信息不充分，必须直说看不准，并先引导学生补充更清晰图片或文字。")
         if image_uncertainties:
             system_sections.append(f"图片理解不确定处：{'；'.join(image_uncertainties)}")
+        if practice_context:
+            practice_parts = [
+                "判卷模式：学生正在回答上一轮系统发出的练习题。请先判断学生答案是否正确，"
+                "再用参考答案和关键步骤解释原因；此模式下可以明确说明正确答案，但不要代做新的题目。",
+            ]
+            question_text = str(practice_context.get("question_text") or "").strip()
+            answer_text = str(practice_context.get("answer_text") or "").strip()
+            explanation_text = str(practice_context.get("explanation_text") or "").strip()
+            if question_text:
+                practice_parts.append(f"上一轮练习题：{question_text}")
+            if answer_text:
+                practice_parts.append(f"参考答案：{answer_text}")
+            if explanation_text:
+                practice_parts.append(f"参考解析：{explanation_text}")
+            system_sections.append("\n".join(practice_parts))
         if student_grade is not None:
             system_sections.append(f"当前学生年级：{format_grade_label(student_grade) or f'{student_grade}年级'}")
         if image_summary:

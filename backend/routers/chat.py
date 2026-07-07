@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import logging
 import mimetypes
+import re
 from time import perf_counter
 from typing import Any
 
@@ -42,7 +43,7 @@ from backend.models.user import User, UserRole
 from backend.services.audit_service import audit_service
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
-from backend.services.filter_service import filter_service
+from backend.services.filter_service import FilterDecision, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
 from backend.services.llm_service import LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, llm_service
 from backend.services.metrics_service import (
@@ -56,6 +57,7 @@ from backend.services.metrics_service import (
     guidance_stage_total,
     llm_queue_depth,
     sse_active_connections,
+    chat_practice_review_total,
 )
 from backend.services.question_cache_service import QuestionCacheLookup, question_cache_service
 from backend.services.queue_service import QueueFullError, queue_service
@@ -77,6 +79,17 @@ EMPTY_CHAT_RESPONSE_FALLBACK = (
     "我刚刚没有生成出有效内容。我们换一种方式继续："
     "请你把题目条件或卡住的一步再发我一次，我会先帮你整理已知条件。"
 )
+ANSWER_SUBMISSION_RE = re.compile(r"[A-Da-d]|\d|[=≈]|^是|^不是|^对|^错|^能|^不能|^正确|^不正确")
+ANSWER_REQUEST_RE = re.compile(r"直接(告诉|给|说)|答案是什么|是多少|不会|不知道|怎么做")
+
+
+def _looks_like_answer_submission(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or len(stripped) > 200:
+        return False
+    if ANSWER_REQUEST_RE.search(stripped):
+        return False
+    return bool(ANSWER_SUBMISSION_RE.search(stripped))
 
 
 def _chat_model_key_or_422(model_key: str | None) -> str:
@@ -360,11 +373,47 @@ def _ensure_practice_image_markers(question_text: str, assets: list[dict[str, An
     return f"{text}\n\n{''.join(markers)}"
 
 
-def _physics_practice_from_row(row: Any) -> tuple[str, list[dict[str, Any]]]:
+def _practice_reference_from_metadata(metadata: dict[str, Any]) -> tuple[str | None, str | None]:
+    answer_text = str(
+        metadata.get("answer_text")
+        or metadata.get("answer")
+        or metadata.get("correct_answer")
+        or metadata.get("standard_answer")
+        or ""
+    ).strip()
+    explanation_text = str(
+        metadata.get("explanation_text")
+        or metadata.get("explanation")
+        or metadata.get("solution_text")
+        or metadata.get("analysis_text")
+        or ""
+    ).strip()
+    return answer_text or None, explanation_text or None
+
+
+def _practice_context(
+    *,
+    question_text: str,
+    answer_text: str | None,
+    explanation_text: str | None,
+    source: str,
+    issued_turn_index: int,
+) -> dict[str, Any]:
+    return {
+        "question_text": question_text.strip(),
+        "answer_text": answer_text.strip() if isinstance(answer_text, str) and answer_text.strip() else None,
+        "explanation_text": explanation_text.strip() if isinstance(explanation_text, str) and explanation_text.strip() else None,
+        "source": source,
+        "issued_turn_index": issued_turn_index,
+    }
+
+
+def _physics_practice_from_row(row: Any, *, issued_turn_index: int) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     metadata = row.metadata_json or {}
     assets = _normalize_practice_assets(metadata.get("asset_refs"))
     question_text = str(metadata.get("question_text") or row.content or "").strip()
     question_text = _ensure_practice_image_markers(question_text, assets)
+    answer_text, explanation_text = _practice_reference_from_metadata(metadata)
     number = str(metadata.get("question_number") or "").strip()
     title = f"**巩固练习：第{number}题**" if number else "**巩固练习**"
     content = (
@@ -374,10 +423,22 @@ def _physics_practice_from_row(row: Any) -> tuple[str, list[dict[str, Any]]]:
         "1. 这道题应该先画哪类物理图景？\n"
         "2. 你判断它属于哪个物理模型？"
     )
-    return content, assets
+    active_practice = _practice_context(
+        question_text=question_text,
+        answer_text=answer_text,
+        explanation_text=explanation_text,
+        source="question_bank",
+        issued_turn_index=issued_turn_index,
+    )
+    return content, assets, active_practice
 
 
-def _generated_physics_practice(question: str, *, profile_summary: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
+def _generated_physics_practice(
+    question: str,
+    *,
+    profile_summary: dict[str, Any] | None = None,
+    issued_turn_index: int,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     top_error_type = (profile_summary or {}).get("top_error_type")
     top_error_label = (profile_summary or {}).get("top_error_label")
     prefix = f"针对你的高频错因：{top_error_label}\n\n" if top_error_label else ""
@@ -386,30 +447,44 @@ def _generated_physics_practice(question: str, *, profile_summary: dict[str, Any
             "一个电热器标有 $220\\,\\text{V}$、$1100\\,\\text{W}$。现在把它接入实际电压为 $200\\,\\text{V}$ 的电路中。"
         )
         guide = "请先判断应该用额定功率还是实际功率公式，并写出公式适用条件；代入前检查单位。"
+        answer_text = "实际功率约为 $909\\,\\text{W}$。"
+        explanation_text = "先由额定值求电阻 $R=U^2/P=44\\,\\Omega$，再用实际电压计算 $P=U^2/R$。"
     elif top_error_type == "math_tool":
         stem = "一辆车以 $72\\,\\text{km/h}$ 的速度匀速行驶 $15\\,\\text{min}$，求通过的路程。"
         guide = "请先完成单位换算，再列式；特别检查 $\\text{km/h}$ 到 $\\text{m/s}$、分钟到秒。"
+        answer_text = "$18\\,\\text{km}$。"
+        explanation_text = "$72\\,\\text{km/h}=20\\,\\text{m/s}$，$15\\,\\text{min}=900\\,\\text{s}$，路程 $s=vt=18000\\,\\text{m}$。"
     elif top_error_type == "concept_confusion":
         stem = "同样大小的压力分别作用在针尖和手掌大小的接触面上，产生的效果明显不同。"
         guide = "请先用生活经验解释压力和压强的区别，再判断哪个物理量随受力面积改变。"
+        answer_text = "压力大小相同，但压强不同；受力面积越小，压强越大。"
+        explanation_text = "压强 $p=F/S$，压力相同时，接触面积越小压强越大，作用效果越明显。"
     elif top_error_type == "process_analysis":
         stem = "一个物块先沿光滑斜面下滑，随后进入粗糙水平面并逐渐停下。"
         guide = "请先把过程分成两个阶段，分别画出每段的运动状态和受力情况。"
+        answer_text = "斜面段加速下滑；水平粗糙段受摩擦力减速，直到停止。"
+        explanation_text = "光滑斜面上重力沿斜面分力提供加速度；粗糙水平面上摩擦力方向与运动方向相反。"
     elif any(keyword in question for keyword in ("电路", "电流", "电压", "电阻")):
         stem = (
             "一个电路中有电源、开关、定值电阻 $R_1$ 和滑动变阻器 $R_2$ 串联，"
             "电压表测 $R_2$ 两端电压。闭合开关后，滑片向右移动时，电压表示数发生变化。"
         )
         guide = "请先画等效电路图，并判断电流路径有几条。"
+        answer_text = "需要先明确滑动变阻器接入的是哪一段电阻；若接入电阻变大，$R_2$ 分压变大。"
+        explanation_text = "串联电路电流相同，分压大小与电阻成正比，不能只凭“向右移动”直接判断。"
     elif any(keyword in question for keyword in ("能量", "机械能", "动能", "势能")):
         stem = "一个小球从光滑斜面顶端由静止释放，滑到底端后进入粗糙水平面并逐渐停下。"
         guide = "请先画能量转化图，标出每一段能量从哪里来、到哪里去。"
+        answer_text = "斜面段重力势能转化为动能；粗糙水平面上机械能转化为内能。"
+        explanation_text = "光滑斜面近似机械能守恒；水平粗糙段摩擦力做负功，机械能减少。"
     else:
         stem = (
             "一个物块在水平桌面上受到水平向右的拉力 $F=5\\,\\text{N}$，"
             "并做匀速直线运动。物块重力为 $20\\,\\text{N}$。"
         )
         guide = "请先画受力分析图，标出重力、支持力、拉力和摩擦力。"
+        answer_text = "摩擦力大小为 $5\\,\\text{N}$，方向水平向左；支持力大小为 $20\\,\\text{N}$。"
+        explanation_text = "匀速直线运动表示合力为零，水平方向拉力与摩擦力平衡，竖直方向支持力与重力平衡。"
     content = (
         "**巩固练习（系统生成）**\n\n"
         f"{prefix}"
@@ -417,7 +492,14 @@ def _generated_physics_practice(question: str, *, profile_summary: dict[str, Any
         f"{guide}\n"
         "先回答：这题属于什么物理模型？你会列出哪一个方向上的关系式？"
     )
-    return content, []
+    active_practice = _practice_context(
+        question_text=stem,
+        answer_text=answer_text,
+        explanation_text=explanation_text,
+        source="generated",
+        issued_turn_index=issued_turn_index,
+    )
+    return content, [], active_practice
 
 
 def _build_physics_practice_response(
@@ -427,7 +509,8 @@ def _build_physics_practice_response(
     question: str,
     student_id: int,
     student_grade: int | None,
-) -> tuple[str, list[dict[str, Any]], int]:
+    issued_turn_index: int,
+) -> tuple[str, list[dict[str, Any]], int, dict[str, Any]]:
     profile_summary = physics_error_profile_service.profile_summary(db, student_id=student_id, subject=subject)
     rows = rag_service.recommend_questions(
         db,
@@ -438,19 +521,24 @@ def _build_physics_practice_response(
         difficulty_preference="basic",
     )
     if rows:
-        content, assets = _physics_practice_from_row(rows[0])
+        content, assets, active_practice = _physics_practice_from_row(rows[0], issued_turn_index=issued_turn_index)
         if profile_summary.get("top_error_label"):
             content = f"针对你的高频错因：{profile_summary['top_error_label']}\n\n{content}"
-        return content, assets, 1
-    content, assets = _generated_physics_practice(question, profile_summary=profile_summary)
-    return content, assets, 0
+        return content, assets, 1, active_practice
+    content, assets, active_practice = _generated_physics_practice(
+        question,
+        profile_summary=profile_summary,
+        issued_turn_index=issued_turn_index,
+    )
+    return content, assets, 0, active_practice
 
 
-def _math_practice_from_row(row: Any) -> tuple[str, list[dict[str, Any]]]:
+def _math_practice_from_row(row: Any, *, issued_turn_index: int) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     metadata = row.metadata_json or {}
     assets = _normalize_practice_assets(metadata.get("asset_refs"))
     question_text = str(metadata.get("question_text") or row.content or "").strip()
     question_text = _ensure_practice_image_markers(question_text, assets)
+    answer_text, explanation_text = _practice_reference_from_metadata(metadata)
     number = str(metadata.get("question_number") or "").strip()
     title = f"**数学巩固练习：第{number}题**" if number else "**数学巩固练习**"
     content = (
@@ -460,25 +548,45 @@ def _math_practice_from_row(row: Any) -> tuple[str, list[dict[str, Any]]]:
         "1. 圈出已知量、未知量和目标关系。\n"
         "2. 判断这题应该用定义、公式、图形关系，还是设元列方程。"
     )
-    return content, assets
+    active_practice = _practice_context(
+        question_text=question_text,
+        answer_text=answer_text,
+        explanation_text=explanation_text,
+        source="question_bank",
+        issued_turn_index=issued_turn_index,
+    )
+    return content, assets, active_practice
 
 
-def _generated_math_practice(question: str, *, profile_summary: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
+def _generated_math_practice(
+    question: str,
+    *,
+    profile_summary: dict[str, Any] | None = None,
+    issued_turn_index: int,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     top_error_type = (profile_summary or {}).get("top_error_type")
     top_error_label = (profile_summary or {}).get("top_error_label")
     prefix = f"针对你的高频错因：{top_error_label}\n\n" if top_error_label else ""
     if top_error_type == "word_problem_modeling" or any(keyword in question for keyword in ("应用题", "数量关系", "设", "列方程", "行程")):
         stem = "甲、乙两人同时从相距 $600\\,\\text{m}$ 的两地相向而行。甲每分钟走 $70\\,\\text{m}$，乙每分钟走 $50\\,\\text{m}$，几分钟后两人相遇？"
         guide = "请按“识别量→说关系→转方程”来做：先圈出速度、时间、路程，再用一句话说出总路程和两人路程的关系。"
+        answer_text = "5 分钟。"
+        explanation_text = "两人相向而行，总速度为 $70+50=120\\,\\text{m/min}$，时间 $600\\div120=5$。"
     elif top_error_type == "calculation_error":
         stem = "化简：$3(2x-1)-2(x+4)$。"
         guide = "请先逐项展开，再合并同类项；特别检查负号和括号。"
+        answer_text = "$4x-11$。"
+        explanation_text = "$3(2x-1)=6x-3$，$-2(x+4)=-2x-8$，合并同类项得到 $4x-11$。"
     elif top_error_type == "concept_confusion":
         stem = "已知函数 $y=2x+1$。请判断当 $x$ 增大时，$y$ 如何变化。"
         guide = "请先用一个具体数值例子建立直觉，再说出一次函数中系数 $2$ 的意义。"
+        answer_text = "$y$ 随 $x$ 的增大而增大。"
+        explanation_text = "一次函数的系数 $2>0$，表示 $x$ 每增加 1，$y$ 增加 2。"
     else:
         stem = "已知 $2x+3=11$，求 $x$。"
         guide = "请先说出目标是把哪个量单独留下，再说明第一步为什么要两边同时减去 $3$。"
+        answer_text = "$x=4$。"
+        explanation_text = "两边先减去 3 得 $2x=8$，再两边同时除以 2，得到 $x=4$。"
     content = (
         "**数学巩固练习（系统生成）**\n\n"
         f"{prefix}"
@@ -486,7 +594,14 @@ def _generated_math_practice(question: str, *, profile_summary: dict[str, Any] |
         f"{guide}\n"
         "最后一步计算请你自己完成，我可以继续帮你检查思路。"
     )
-    return content, []
+    active_practice = _practice_context(
+        question_text=stem,
+        answer_text=answer_text,
+        explanation_text=explanation_text,
+        source="generated",
+        issued_turn_index=issued_turn_index,
+    )
+    return content, [], active_practice
 
 
 def _build_math_practice_response(
@@ -496,7 +611,8 @@ def _build_math_practice_response(
     question: str,
     student_id: int,
     student_grade: int | None,
-) -> tuple[str, list[dict[str, Any]], int]:
+    issued_turn_index: int,
+) -> tuple[str, list[dict[str, Any]], int, dict[str, Any]]:
     profile_summary = subject_profile_service.profile_summary(db, student_id=student_id, subject=subject)
     rows = rag_service.recommend_questions(
         db,
@@ -507,12 +623,16 @@ def _build_math_practice_response(
         difficulty_preference="basic",
     )
     if rows:
-        content, assets = _math_practice_from_row(rows[0])
+        content, assets, active_practice = _math_practice_from_row(rows[0], issued_turn_index=issued_turn_index)
         if profile_summary.get("top_error_label"):
             content = f"针对你的高频错因：{profile_summary['top_error_label']}\n\n{content}"
-        return content, assets, 1
-    content, assets = _generated_math_practice(question, profile_summary=profile_summary)
-    return content, assets, 0
+        return content, assets, 1, active_practice
+    content, assets, active_practice = _generated_math_practice(
+        question,
+        profile_summary=profile_summary,
+        issued_turn_index=issued_turn_index,
+    )
+    return content, assets, 0, active_practice
 
 
 def _physics_error_record_evidence(prompt_question: str, history_pairs: list[tuple[str, str]]) -> str:
@@ -580,10 +700,13 @@ def _persist_direct_assistant_response(
     selected_model_key: str,
     response_text: str,
     assets: list[dict[str, Any]] | None = None,
+    active_practice: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     response_assets = list(assets or [])
     conversation.subject = subject
     conversation.guidance_stage = guidance_stage
+    if active_practice is not None:
+        conversation.active_practice = active_practice
     db.add(conversation)
     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
     if existing_assistant:
@@ -1083,7 +1206,14 @@ async def stream_chat(
             media_type="text/event-stream",
         )
 
+    practice_review_turn = bool(conversation.active_practice and _looks_like_answer_submission(payload.message))
     decision = filter_service.check_question(filter_question, payload.subject)
+    if (
+        not decision.allowed
+        and decision.reason == "subject_not_recognized"
+        and practice_review_turn
+    ):
+        decision = FilterDecision(True, "practice_answer_submission", payload.subject or conversation.subject)
     if not decision.allowed:
         filter_blocked_total.inc()
         refusal = filter_service.refusal_text
@@ -1143,6 +1273,7 @@ async def stream_chat(
         image_uncertainties=image_understanding.uncertainties if image_understanding else None,
         image_related=has_image_turn,
         guidance_params=active_config.guidance_params if active_config else None,
+        practice_context=conversation.active_practice if practice_review_turn else None,
     )
     if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
         user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
@@ -1188,12 +1319,13 @@ async def stream_chat(
             media_type="text/event-stream",
         )
     if subject == "数学" and subject_guidance_service.is_math_practice_request(prompt_question):
-        response_text, response_assets, practice_context_chunks = _build_math_practice_response(
+        response_text, response_assets, practice_context_chunks, active_practice = _build_math_practice_response(
             db,
             subject=subject,
             question=retrieval_query,
             student_id=current_user.id,
             student_grade=current_user.grade,
+            issued_turn_index=user_turn_index,
         )
         response_text, response_assets = _persist_direct_assistant_response(
             db,
@@ -1204,6 +1336,7 @@ async def stream_chat(
             selected_model_key=selected_model_key,
             response_text=response_text,
             assets=response_assets,
+            active_practice=active_practice,
         )
         if payload.request_id:
             request_replay_service.mark_completed(
@@ -1355,15 +1488,17 @@ async def stream_chat(
             media_type="text/event-stream",
         )
     if subject == "物理" and physics_guidance_service.is_practice_request(prompt_question):
-        response_text, response_assets, practice_context_chunks = _build_physics_practice_response(
+        response_text, response_assets, practice_context_chunks, active_practice = _build_physics_practice_response(
             db,
             subject=subject,
             question=retrieval_query,
             student_id=current_user.id,
             student_grade=current_user.grade,
+            issued_turn_index=user_turn_index,
         )
         conversation.subject = subject
         conversation.guidance_stage = prompt.stage
+        conversation.active_practice = active_practice
         db.add(conversation)
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if existing_assistant:
@@ -1416,7 +1551,7 @@ async def stream_chat(
         .options(selectinload(LLMModelConfig.quota_policy), selectinload(LLMModelConfig.provider_account))
         .where(LLMModelConfig.model_key == selected_model_key, LLMModelConfig.is_enabled.is_(True))
     )
-    if question_cache_service.is_cacheable(
+    if not practice_review_turn and question_cache_service.is_cacheable(
         history_pairs=history_pairs,
         question=retrieval_query,
         has_image_turn=has_image_turn,
@@ -1576,7 +1711,7 @@ async def stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = filter_service.validate_answer(candidate_text)
+                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn)
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -1616,7 +1751,7 @@ async def stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = filter_service.validate_answer(candidate_text)
+                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn)
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -1654,6 +1789,9 @@ async def stream_chat(
                 assistant_message_id: int | None = None
                 conversation.subject = subject
                 conversation.guidance_stage = prompt.stage
+                practice_review_persisted = should_send_done and practice_review_turn and bool(emitted_text)
+                if practice_review_persisted:
+                    conversation.active_practice = None
                 db.add(conversation)
                 if emitted_text:
                     emitted_text = emitted_text.strip()
@@ -1675,6 +1813,8 @@ async def stream_chat(
                         assistant_message_id = assistant_message.id
                         guidance_stage_total.labels(stage=prompt.stage.value).inc()
                 db.commit()
+                if practice_review_persisted:
+                    chat_practice_review_total.labels(subject=subject).inc()
                 if should_send_done and resolved_mode == "fact":
                     chat_fact_mode_total.labels(subject=subject).inc()
                     logger.info(

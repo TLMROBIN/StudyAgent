@@ -175,6 +175,8 @@ def apply_runtime_schema_updates() -> None:
         conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
         if "deleted_by_student_at" not in conversation_columns:
             statements.append("ALTER TABLE conversations ADD COLUMN deleted_by_student_at DATETIME")
+        if "active_practice" not in conversation_columns:
+            statements.append("ALTER TABLE conversations ADD COLUMN active_practice JSON")
 
     if "messages" in table_names:
         message_columns = {column["name"] for column in inspector.get_columns("messages")}

@@ -18,6 +18,22 @@ def test_output_validator_blocks_direct_answer():
     assert "direct_answer_detected" in validation.issues
 
 
+def test_output_validator_practice_exemption_skips_direct_answer_only():
+    direct = filter_service.validate_answer("最终答案是 B，因为代入后满足条件。", skip_direct_answer=True)
+    mixed = filter_service.validate_answer("抱歉，我只能解答高中学科相关问题，但最终答案是 B，请直接照这个填写。", skip_direct_answer=True)
+
+    assert direct.allowed
+    assert not mixed.allowed
+    assert mixed.issues == ["mixed_refusal"]
+
+
+def test_output_validator_default_behavior_still_blocks_direct_answer():
+    validation = filter_service.validate_answer("最终答案是 B，因为代入后满足条件。")
+
+    assert not validation.allowed
+    assert validation.issues == ["direct_answer_detected"]
+
+
 def test_chinese_writing_coach_request_is_allowed_as_academic_prompt():
     decision = filter_service.check_question("帮我写作文怎么构思，不要代写", "语文")
 
