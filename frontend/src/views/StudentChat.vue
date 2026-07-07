@@ -281,6 +281,7 @@ async function openConversation(id: number) {
     content: item.content,
     attachment: item.attachment || null,
     assets: item.assets || [],
+    suggested_replies: normalizeSuggestedReplies(item.suggested_replies),
   }))
   await preloadMessageAttachments(messages.value)
   resetRecommendations()
@@ -992,10 +993,53 @@ function applyRecommendationToInput(item: QuestionRecommendation) {
   ElMessage.success('题目已带入输入框，可继续追问')
 }
 
+function normalizeSuggestedReplies(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const replies: string[] = []
+  const seen = new Set<string>()
+  value.forEach((item) => {
+    const reply = String(item || '').trim()
+    if (!reply || seen.has(reply)) {
+      return
+    }
+    replies.push(reply)
+    seen.add(reply)
+  })
+  return replies.slice(0, 5)
+}
+
+function clearActiveSuggestedReplies() {
+  const last = messages.value[messages.value.length - 1]
+  if (last?.role === 'assistant') {
+    last.suggested_replies = []
+  }
+}
+
+function canShowSuggestedReplies(index: number, item: ChatMessageRead): boolean {
+  return item.role === 'assistant'
+    && index === messages.value.length - 1
+    && !sending.value
+    && normalizeSuggestedReplies(item.suggested_replies).length > 0
+}
+
+async function sendSuggestedReply(reply: string) {
+  const message = reply.trim()
+  if (!message || sending.value) {
+    return
+  }
+  clearActiveSuggestedReplies()
+  form.message = message
+  await nextTick()
+  await sendMessage()
+}
+
 async function sendMessage() {
   if (!canSend.value) {
     return
   }
+  clearActiveSuggestedReplies()
   const message = form.message.trim()
   const image = pendingImageFile.value
   const attachment = image ? {
@@ -1015,7 +1059,7 @@ async function sendMessage() {
     content,
     attachment,
   })
-  messages.value.push({ role: 'assistant', content: '', assets: [] })
+  messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [] })
   queueScrollToBottom()
 
   try {
@@ -1040,6 +1084,7 @@ async function sendMessage() {
           const last = messages.value[messages.value.length - 1]
           if (last && last.role === 'assistant') {
             last.content = ''
+            last.suggested_replies = []
             queueScrollToBottom()
           }
         }
@@ -1058,6 +1103,7 @@ async function sendMessage() {
               void preloadAssets(last.assets)
             }
             last.content = data.content
+            last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
             queueScrollToBottom()
           }
         }        
@@ -1168,31 +1214,49 @@ onMounted(async () => {
         </span>
       </div>
       <div ref="chatStreamRef" class="chat-stream">
-        <article v-for="(item, index) in messages" :key="index" :class="['bubble', item.role]">
-          <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
-          <div
-            v-if="item.attachment?.content_type.startsWith('image/')"
-            class="recommendation-card__images"
-          >
-            <a
-              class="recommendation-image"
-              :href="messageAttachmentSrc(item.attachment) || undefined"
-              target="_blank"
-              rel="noreferrer"
-              @click.prevent="openMessageAttachment(item.attachment)"
+        <div v-for="(item, index) in messages" :key="index" :class="['message-row', item.role]">
+          <article :class="['bubble', item.role]">
+            <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
+            <div
+              v-if="item.attachment?.content_type.startsWith('image/')"
+              class="recommendation-card__images"
             >
-              <img
-                v-if="messageAttachmentSrc(item.attachment)"
-                :src="messageAttachmentSrc(item.attachment)"
-                :alt="item.attachment.filename"
-                loading="lazy"
-              />
-              <span v-else>图片加载中...</span>
-              <span>{{ item.attachment.filename }}</span>
-            </a>
+              <a
+                class="recommendation-image"
+                :href="messageAttachmentSrc(item.attachment) || undefined"
+                target="_blank"
+                rel="noreferrer"
+                @click.prevent="openMessageAttachment(item.attachment)"
+              >
+                <img
+                  v-if="messageAttachmentSrc(item.attachment)"
+                  :src="messageAttachmentSrc(item.attachment)"
+                  :alt="item.attachment.filename"
+                  loading="lazy"
+                />
+                <span v-else>图片加载中...</span>
+                <span>{{ item.attachment.filename }}</span>
+              </a>
+            </div>
+            <div class="message-body" v-html="renderMessageBody(item.content, item.assets || [])"></div>
+          </article>
+          <div
+            v-if="canShowSuggestedReplies(index, item)"
+            class="suggested-replies"
+            aria-label="可选回复"
+          >
+            <button
+              v-for="reply in normalizeSuggestedReplies(item.suggested_replies)"
+              :key="reply"
+              type="button"
+              class="suggested-reply-chip"
+              :disabled="sending"
+              @click="sendSuggestedReply(reply)"
+            >
+              {{ reply }}
+            </button>
           </div>
-          <div class="message-body" v-html="renderMessageBody(item.content, item.assets || [])"></div>
-        </article>
+        </div>
       </div>
 
       <div class="chat-controls">

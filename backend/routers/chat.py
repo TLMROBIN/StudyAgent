@@ -68,6 +68,7 @@ from backend.services.physics_guidance_service import physics_guidance_service
 from backend.services.socratic_service import socratic_service
 from backend.services.subject_guidance_service import subject_guidance_service
 from backend.services.subject_profile_service import subject_profile_service
+from backend.services.suggested_reply_service import suggested_reply_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -311,6 +312,7 @@ def _instant_stream(
     request: Request,
     context_chunks: int = 0,
     assets: list[dict[str, Any]] | None = None,
+    suggested_replies: list[str] | None = None,
 ):
     async def stream():
         sse_active_connections.inc()
@@ -325,11 +327,47 @@ def _instant_stream(
                     "request_id": getattr(request.state, "request_id", None),
                 },
             )
-            yield _sse_event("done", {"content": content, "assets": list(assets or [])})
+            yield _sse_event(
+                "done",
+                {
+                    "content": content,
+                    "assets": list(assets or []),
+                    "suggested_replies": list(suggested_replies or []),
+                },
+            )
         finally:
             sse_active_connections.dec()
 
     return stream()
+
+
+async def _generate_suggested_replies(
+    *,
+    subject: str,
+    guidance_stage: GuidanceStage,
+    current_question: str,
+    assistant_response: str,
+    history_pairs: list[tuple[str, str]],
+    model_key: str | None,
+) -> list[str]:
+    try:
+        return await suggested_reply_service.generate(
+            subject=subject,
+            guidance_stage=guidance_stage,
+            current_question=current_question,
+            assistant_response=assistant_response,
+            history=history_pairs,
+            model_key=model_key,
+        )
+    except Exception as exc:
+        logger.warning(
+            "suggested_replies_generation_failed subject=%s stage=%s error_type=%s error=%s",
+            subject,
+            guidance_stage.value,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        return []
 
 
 def _normalize_practice_assets(raw_assets: Any) -> list[dict[str, Any]]:
@@ -1050,6 +1088,7 @@ async def stream_chat(
                     content=replay_state.final_content,
                     request=request,
                     assets=list(replay_state.assets or []),
+                    suggested_replies=list(replay_state.suggested_replies or []),
                 ),
                 media_type="text/event-stream",
             )
@@ -1078,6 +1117,7 @@ async def stream_chat(
                     guidance_stage=existing_assistant.guidance_stage,
                     final_content=existing_assistant.content,
                     assets=list(existing_assistant.assets or []),
+                    suggested_replies=list(existing_assistant.suggested_replies or []),
                 )
             return StreamingResponse(
                 _instant_stream(
@@ -1086,6 +1126,7 @@ async def stream_chat(
                     content=existing_assistant.content,
                     request=request,
                     assets=list(existing_assistant.assets or []),
+                    suggested_replies=list(existing_assistant.suggested_replies or []),
                 ),
                 media_type="text/event-stream",
             )
@@ -1566,15 +1607,27 @@ async def stream_chat(
         )
         if cache_lookup.answer:
             response_text = cache_lookup.answer
+            suggested_replies: list[str] = []
             conversation.subject = subject
             conversation.guidance_stage = prompt.stage
             db.add(conversation)
             existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
-            if not existing_assistant:
+            if existing_assistant:
+                suggested_replies = list(existing_assistant.suggested_replies or [])
+            else:
+                suggested_replies = await _generate_suggested_replies(
+                    subject=subject,
+                    guidance_stage=prompt.stage,
+                    current_question=prompt_question,
+                    assistant_response=response_text,
+                    history_pairs=history_pairs,
+                    model_key=selected_model_key,
+                )
                 assistant_message = Message(
                     conversation_id=conversation.id,
                     role=MessageRole.ASSISTANT,
                     content=response_text,
+                    suggested_replies=suggested_replies,
                     turn_index=user_turn_index,
                     guidance_stage=prompt.stage,
                     llm_model_key=selected_model_key,
@@ -1592,6 +1645,7 @@ async def stream_chat(
                     subject=subject,
                     guidance_stage=prompt.stage,
                     final_content=response_text,
+                    suggested_replies=suggested_replies,
                 )
             return StreamingResponse(
                 _instant_stream(
@@ -1600,6 +1654,7 @@ async def stream_chat(
                     content=response_text,
                     request=request,
                     context_chunks=len(retrieval.chunks),
+                    suggested_replies=suggested_replies,
                 ),
                 media_type="text/event-stream",
             )
@@ -1654,7 +1709,19 @@ async def stream_chat(
         stop_streaming = False
         provider_stream_started = False
         usage_recorded = False
+        ticket_released = False
+        suggested_replies: list[str] = []
         sse_active_connections.inc()
+
+        async def release_ticket_once() -> None:
+            nonlocal ticket_released
+            if ticket_released:
+                return
+            with suppress(Exception):
+                await ticket_context.__aexit__(None, None, None)
+            ticket_released = True
+            llm_queue_depth.set(queue_service.waiting)
+
         try:
             yield _sse_event(
                 "meta",
@@ -1776,14 +1843,21 @@ async def stream_chat(
                 emitted_text = fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
             if should_send_done:
                 emitted_text = emitted_text.strip()
-                yield _sse_event("done", {"content": emitted_text})
+                await release_ticket_once()
+                suggested_replies = await _generate_suggested_replies(
+                    subject=subject,
+                    guidance_stage=prompt.stage,
+                    current_question=prompt_question,
+                    assistant_response=emitted_text,
+                    history_pairs=history_pairs,
+                    model_key=selected_model_key,
+                )
+                yield _sse_event("done", {"content": emitted_text, "suggested_replies": suggested_replies})
         finally:
             if llm_stream is not None:
                 with suppress(Exception):
                     await llm_stream.aclose()
-            with suppress(Exception):
-                await ticket_context.__aexit__(None, None, None)
-            llm_queue_depth.set(queue_service.waiting)
+            await release_ticket_once()
 
             try:
                 assistant_message_id: int | None = None
@@ -1798,12 +1872,14 @@ async def stream_chat(
                     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
                     if existing_assistant:
                         emitted_text = existing_assistant.content
+                        suggested_replies = list(existing_assistant.suggested_replies or [])
                         assistant_message_id = existing_assistant.id
                     else:
                         assistant_message = Message(
                             conversation_id=conversation.id,
                             role=MessageRole.ASSISTANT,
                             content=emitted_text,
+                            suggested_replies=suggested_replies,
                             turn_index=user_turn_index,
                             guidance_stage=prompt.stage,
                             llm_model_key=selected_model_key,
@@ -1875,6 +1951,7 @@ async def stream_chat(
                             subject=subject,
                             guidance_stage=prompt.stage,
                             final_content=emitted_text,
+                            suggested_replies=suggested_replies,
                         )
             except Exception:
                 db.rollback()

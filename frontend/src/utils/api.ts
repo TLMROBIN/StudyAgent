@@ -54,6 +54,7 @@ export interface ChatMessageRead {
   content: string
   attachment?: ChatMessageAttachment | null
   assets?: KnowledgeAsset[]
+  suggested_replies?: string[]
 }
 
 export interface ChatConversationRead {

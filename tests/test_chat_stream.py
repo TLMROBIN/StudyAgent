@@ -198,12 +198,21 @@ async def _read_streaming_response(response) -> str:
 def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
+    suggested_replies = [
+        "我觉得先看定义域，但理由还不确定",
+        "是不是要比较两个区间的变化",
+        "能不能提示我先验证哪一步",
+    ]
 
     async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
         for chunk in ["先看定义域。", "再判断增减性。"]:
             yield chunk
 
+    async def fake_generate_suggested_replies(**kwargs):
+        return suggested_replies
+
     monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.suggested_reply_service, "generate", fake_generate_suggested_replies)
     monkeypatch.setattr(
         chat_router.rag_service,
         "retrieve",
@@ -225,12 +234,14 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         events = _parse_sse(asyncio.run(_read_streaming_response(response)))
         assert [event for event, _ in events] == ["meta", "chunk", "chunk", "done"]
         assert events[-1][1]["content"] == "先看定义域。再判断增减性。"
+        assert events[-1][1]["suggested_replies"] == suggested_replies
 
         stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
         assert len(stored_messages) == 2
         assert stored_messages[0].role == MessageRole.USER
         assert stored_messages[1].role == MessageRole.ASSISTANT
         assert stored_messages[1].content == "先看定义域。再判断增减性。"
+        assert stored_messages[1].suggested_replies == suggested_replies
     finally:
         session.close()
 
@@ -834,12 +845,23 @@ def test_chat_stream_replays_completed_request_id(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
     llm_call_count = {"value": 0}
+    suggestions_call_count = {"value": 0}
+    suggested_replies = [
+        "我先圈出已知条件试试",
+        "是不是要判断用哪个模型",
+        "我不确定目标量该怎么找",
+    ]
 
     async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
         llm_call_count["value"] += 1
         yield "先判断已知条件。"
 
+    async def fake_generate_suggested_replies(**kwargs):
+        suggestions_call_count["value"] += 1
+        return suggested_replies
+
     monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.suggested_reply_service, "generate", fake_generate_suggested_replies)
     monkeypatch.setattr(
         chat_router.rag_service,
         "retrieve",
@@ -874,8 +896,11 @@ def test_chat_stream_replays_completed_request_id(monkeypatch):
         stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
 
         assert llm_call_count["value"] == 1
+        assert suggestions_call_count["value"] == 1
         assert [event for event, _ in first_events] == ["meta", "chunk", "done"]
         assert [event for event, _ in second_events] == ["meta", "done"]
+        assert first_events[-1][1]["suggested_replies"] == suggested_replies
+        assert second_events[-1][1]["suggested_replies"] == suggested_replies
         assert len(stored_messages) == 2
         assert stored_messages[1].content == "先判断已知条件。"
     finally:

@@ -82,6 +82,11 @@ class FilterService:
 
         return FilterDecision(False, "subject_not_recognized")
 
+    def is_question_blocked(self, text: str) -> bool:
+        snapshot = self._engine.snapshot()
+        normalized = text.strip()
+        return any(rule.pattern.search(normalized) for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST))
+
     # ---- LLM 输出校验 ----
 
     def validate_answer(self, answer: str, *, skip_direct_answer: bool = False) -> OutputValidation:

@@ -182,6 +182,8 @@ def apply_runtime_schema_updates() -> None:
         message_columns = {column["name"] for column in inspector.get_columns("messages")}
         if "llm_model_key" not in message_columns:
             statements.append("ALTER TABLE messages ADD COLUMN llm_model_key VARCHAR(64)")
+        if "suggested_replies" not in message_columns:
+            statements.append("ALTER TABLE messages ADD COLUMN suggested_replies JSON")
 
     if "llm_model_configs" in table_names:
         model_columns = {column["name"] for column in inspector.get_columns("llm_model_configs")}
@@ -216,6 +218,14 @@ def apply_runtime_schema_updates() -> None:
                     "UPDATE knowledge_documents "
                     "SET tags_json = '[]' "
                     "WHERE tags_json IS NULL OR tags_json = ''"
+                )
+            )
+        if "messages" in table_names:
+            connection.execute(
+                text(
+                    "UPDATE messages "
+                    "SET suggested_replies = '[]' "
+                    "WHERE suggested_replies IS NULL OR suggested_replies = ''"
                 )
             )
 

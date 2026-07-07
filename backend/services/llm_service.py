@@ -536,6 +536,43 @@ class LLMService:
             chunks.append(chunk)
         return "".join(chunks).strip()
 
+    async def complete_response(
+        self,
+        messages: list[dict[str, object]],
+        fallback_text: str = "",
+        *,
+        model_key: str | None = None,
+        max_completion_tokens: int | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        selected_model_key = self.normalize_chat_model_key(model_key)
+        for provider in self._providers_for_chat_model(selected_model_key):
+            if not provider.available or not provider.base_url or not provider.api_key:
+                continue
+            try:
+                text = await self._complete_openai_compatible(
+                    provider,
+                    messages,
+                    max_completion_tokens=max_completion_tokens,
+                    temperature=temperature,
+                    timeout_seconds=self.settings.llm_request_timeout_seconds,
+                )
+                if text.strip():
+                    self._reset_provider(provider)
+                    return text.strip()
+                self._mark_provider_failure(provider)
+            except Exception as exc:
+                logger.warning(
+                    "llm_completion_provider_failure provider=%s model=%s model_key=%s error_type=%s error=%s",
+                    provider.name,
+                    provider.model,
+                    selected_model_key,
+                    type(exc).__name__,
+                    str(exc)[:300],
+                )
+                self._mark_provider_failure(provider)
+        return fallback_text.strip()
+
     async def stream_response(
         self,
         messages: list[dict[str, str]],
@@ -866,16 +903,26 @@ class LLMService:
             return "network"
         return "other"
 
-    async def _complete_openai_compatible(self, provider: ProviderState, messages: list[dict[str, object]]) -> str:
+    async def _complete_openai_compatible(
+        self,
+        provider: ProviderState,
+        messages: list[dict[str, object]],
+        *,
+        max_completion_tokens: int | None = None,
+        temperature: float = 0.1,
+        timeout_seconds: float | None = None,
+    ) -> str:
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
         payload = {
             "model": provider.model,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": temperature,
             "stream": False,
         }
+        if max_completion_tokens:
+            payload["max_completion_tokens"] = max_completion_tokens
         url = self._chat_completions_url(provider.base_url)
-        timeout = httpx.Timeout(self.settings.effective_chat_image_vision_timeout_seconds)
+        timeout = httpx.Timeout(timeout_seconds or self.settings.effective_chat_image_vision_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
