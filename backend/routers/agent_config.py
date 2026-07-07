@@ -1,12 +1,33 @@
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
 
+import json
+import logging
+from pathlib import Path
+
 from backend.dependencies import CurrentAdmin, CurrentUser, DbSession
 from backend.models.agent_config import AgentConfig
 from backend.models.schemas import AgentConfigCreate, AgentConfigRead
 from backend.services.audit_service import audit_service
 
 router = APIRouter(prefix="/api/agent-config", tags=["agent-config"])
+
+logger = logging.getLogger(__name__)
+
+SUBJECT_PROMPT_DEFAULTS_PATH = Path(__file__).resolve().parent.parent / "data" / "subject_prompt_defaults.json"
+
+
+@router.get("/subject-prompt-defaults")
+def get_subject_prompt_defaults(current_user: CurrentAdmin) -> dict[str, str]:
+    """九科 subject_prompts 推荐默认模板（只读）。文件缺失或损坏时返回空 dict。"""
+    try:
+        raw = json.loads(SUBJECT_PROMPT_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("subject_prompt_defaults.json 不可用: %s", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items() if isinstance(v, str) and v.strip()}
 
 
 @router.get("/", response_model=list[AgentConfigRead])

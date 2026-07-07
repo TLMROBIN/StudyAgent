@@ -509,7 +509,8 @@ def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
     assert final_text != chat_router.filter_service.image_uncertainty_text
     assert "我识别到这张数学题图里主要有" in final_text
     assert "函数图像经过点 A" in final_text
-    assert "题目条件、目标结论" in final_text
+    # 题干含“函数/图像/单调”信号，命中数学函数专项模式的引导式兜底
+    assert "大致图像" in final_text
     assert "函数" in final_text
     assert "我是 AI" not in final_text
 
@@ -2625,3 +2626,37 @@ def test_recommendation_request_requires_conversation_id_for_context_mode():
         assert "Conversation id is required for context recommendations" in str(exc)
     else:
         raise AssertionError("Expected context recommendation payload to require conversation_id")
+
+
+# ---- 分学科 LLM 采样参数（guidance_params.llm_params）----
+
+
+def test_subject_llm_params_extraction_merge_and_clamping():
+    from backend.routers.chat import _subject_llm_params
+
+    guidance = {
+        "llm_params": {"temperature": 0.3},
+        "by_subject": {
+            "数学": {"llm_params": {"temperature": 0.15, "top_p": 0.95, "max_tokens": 512}},
+        },
+    }
+    assert _subject_llm_params(guidance, "数学") == {"temperature": 0.15, "top_p": 0.95, "max_tokens": 512}
+    # 未命中学科回落全局 llm_params
+    assert _subject_llm_params(guidance, "语文") == {"temperature": 0.3}
+    # 无配置 → 空（llm_service 保持默认 0.3）
+    assert _subject_llm_params(None, "数学") == {}
+    assert _subject_llm_params({}, "数学") == {}
+    # 非法值逐项忽略，不击穿链路
+    bad = {"llm_params": {"temperature": 99, "top_p": 0, "max_tokens": -5}}
+    assert _subject_llm_params(bad, "数学") == {}
+    mixed = {"llm_params": {"temperature": 0.2, "top_p": "high"}}
+    assert _subject_llm_params(mixed, "数学") == {"temperature": 0.2}
+
+
+def test_chat_router_wires_subject_llm_params_into_stream_call():
+    source = Path("backend/routers/chat.py").read_text()
+
+    assert 'temperature=subject_llm_params.get("temperature")' in source
+    assert 'top_p=subject_llm_params.get("top_p")' in source
+    # 学科 max_tokens 与配额取 min，不放大配额
+    assert "min(candidate_max_tokens)" in source

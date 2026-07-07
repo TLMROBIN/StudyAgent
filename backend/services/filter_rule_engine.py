@@ -224,6 +224,43 @@ DEFAULT_CONFIG: dict = {
             "enabled": True,
             "description": "答案末尾裸数值等式兜底，如“= 42 J”。兜底模式，可能误伤“已知 g = 9.8 m/s²”这类常量声明结尾，误报偏高时可设 enabled=false 关闭",
         },
+        # ---- LLM 输出校验：分学科泄答案模式（新增；subjects 非空 = 仅对列出学科生效）----
+        {
+            "id": "output.direct.mc_option_leak",
+            "layer": LAYER_DIRECT_ANSWER,
+            "type": "regex",
+            "pattern": r"(正确答案|正确选项)(?:就)?(?:应该|应当)?[是为选][：:]?\s*[（(]?[A-D](?![A-Za-z])|(?:应该|应当|所以)选\s*[（(]?[A-D](?![A-Za-z])",
+            "enabled": True,
+            "subjects": [],
+            "description": "选择题选项泄漏（全学科），如“正确答案是C”“应该选 B”。锚定结论词，不匹配“你先排掉一个选项”类引导话术。可关闭：设 enabled=false",
+        },
+        {
+            "id": "output.direct.math_symbolic_answer",
+            "layer": LAYER_DIRECT_ANSWER,
+            "type": "regex",
+            "pattern": r"(答案|解)(?:就)?[是为][：:]?\s*[a-zA-Z]\s*[=≈]",
+            "enabled": True,
+            "subjects": ["数学"],
+            "description": "数学符号解直接泄漏（仅数学），如“答案是 x=4”“解为 t≈2”。数值版由全学科规则 output.direct.numeric_answer 覆盖。可关闭：设 enabled=false",
+        },
+        {
+            "id": "output.direct.chem_balanced_equation",
+            "layer": LAYER_DIRECT_ANSWER,
+            "type": "regex",
+            "pattern": r"(配平后|配平结果|方程式[是为]|所以)[^\n]{0,12}?\d*\s*[A-Z][a-zA-Z0-9()（）]*\s*[+＋][^\n=→⟶]{0,50}[=→⟶]",
+            "enabled": True,
+            "subjects": ["化学"],
+            "description": "化学结论句给出完整配平方程式（仅化学），如“配平后：2H2 + O2 = 2H2O”。要求同时出现结论词、化学式、加号与等号/箭头以降低误报；误报偏高时可设 enabled=false 关闭",
+        },
+        {
+            "id": "output.direct.essay_ghostwriting",
+            "layer": LAYER_DIRECT_ANSWER,
+            "type": "regex",
+            "pattern": r"(以下|下面)是(一篇)?(范文|完整的?(作文|文章|范例))|我(帮你|为你|来)写(好了|了)?(一篇|这篇|整篇)",
+            "enabled": True,
+            "subjects": ["英语", "语文"],
+            "description": "作文代写泄漏（仅英语/语文），如“以下是一篇范文”“我帮你写好了这篇作文”。提纲引导与句式点评不受影响。可关闭：设 enabled=false",
+        },
         # ---- LLM 输出校验：图片理解不确定性声明（迁移自原 IMAGE_DISCLAIMER_UNCERTAINTY_PATTERNS）----
         {
             "id": "image.uncertainty.maybe_inaccurate",
@@ -285,6 +322,7 @@ class CompiledRule:
     raw_pattern: str
     pattern: re.Pattern
     description: str = ""
+    subjects: tuple[str, ...] = ()  # 空 = 全学科生效；非空 = 仅对列出学科生效（调用方需传 subject）
 
 
 @dataclass(frozen=True)
@@ -331,6 +369,11 @@ def _compile_rule(entry: object) -> tuple[CompiledRule | None, str]:
     _require(isinstance(enabled, bool), f"rule {rule_id}: enabled must be a boolean")
     description = entry.get("description", "")
     _require(isinstance(description, str), f"rule {rule_id}: description must be a string")
+    subjects_raw = entry.get("subjects", [])
+    _require(
+        isinstance(subjects_raw, list) and all(isinstance(item, str) and item for item in subjects_raw),
+        f"rule {rule_id}: subjects must be a list of non-empty strings",
+    )
     if not enabled:
         return None, rule_id
     try:
@@ -340,7 +383,18 @@ def _compile_rule(entry: object) -> tuple[CompiledRule | None, str]:
             compiled = re.compile(raw_pattern, re.IGNORECASE)
     except re.error as exc:
         raise ValueError(f"rule {rule_id}: invalid regex pattern: {exc}") from exc
-    return CompiledRule(id=rule_id, layer=layer, type=rule_type, raw_pattern=raw_pattern, pattern=compiled, description=description), rule_id
+    return (
+        CompiledRule(
+            id=rule_id,
+            layer=layer,
+            type=rule_type,
+            raw_pattern=raw_pattern,
+            pattern=compiled,
+            description=description,
+            subjects=tuple(subjects_raw),
+        ),
+        rule_id,
+    )
 
 
 def compile_config(raw: object, *, source: str, config_path: str, error: str | None = None) -> RuleSnapshot:

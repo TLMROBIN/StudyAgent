@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     rag_chunk_size: int = Field(default=512, alias="RAG_CHUNK_SIZE")
     rag_chunk_overlap: int = Field(default=64, alias="RAG_CHUNK_OVERLAP")
     rag_top_k: int = Field(default=4, alias="RAG_TOP_K")
+    # 分学科检索策略覆盖（JSON 字符串，深覆盖 rag_service.SUBJECT_RETRIEVAL_POLICIES；
+    # 非法 JSON 时告警并回退内置表），如 '{"数学":{"question_bank_bonus":0}}'
+    rag_subject_policies_json: str = Field(default="", alias="RAG_SUBJECT_POLICIES")
 
     default_school_name: str = Field(default="示例高中", alias="DEFAULT_SCHOOL_NAME")
     default_semester: str = Field(default="2025-2026-2", alias="DEFAULT_SEMESTER")

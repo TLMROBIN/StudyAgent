@@ -34,6 +34,8 @@ class SubjectTeachingMode(StrEnum):
     GEO_LOCATION = "geo_location"
     POL_MATERIAL_PRINCIPLE = "pol_material_principle"
     POL_DEBATE = "pol_debate"
+    MATH_FUNCTION = "math_function"
+    MATH_GEOMETRY = "math_geometry"
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class SubjectGuidanceStrategy:
     teaching_mode: SubjectTeachingMode
     prompt_section: str
     fallback_text: str
+    matched_by_trigger: bool = True  # False = 命中末位兜底规则（低置信，可供意图分类兜底升级）
 
 
 @dataclass(frozen=True)
@@ -54,9 +57,210 @@ class SubjectRule:
     fallback_by_stage: dict[GuidanceStage, str]
 
 
-# 新增 5 科（化学/生物/历史/地理/政治）走声明式注册表；数学/英语/语文仍走手写分支。
-# 每科最后一条规则 triggers=() 作为兜底，命中失败时仍返回它。
+# 九科全部走声明式注册表。每科最后一条规则 triggers=() 作为兜底，命中失败时仍返回它。
+# 规则顺序即优先级（先命中先胜），迁移自原手写分支时保持原判定顺序。
 SUBJECT_STRATEGY_RULES: dict[str, tuple[SubjectRule, ...]] = {
+    "数学": (
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_WORD_PROBLEM,
+            triggers=("应用题", "设x", "设 x", "列方程", "数量关系", "行程", "工程", "浓度", "利润", "相遇"),
+            prompt_section=(
+                "数学专项引导策略：应用题必须先做建模，不直接替学生列方程。"
+                "请按“识别量→说关系→转方程”推进，让学生自己说出数量关系，再把自然语言转成数学语言。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别急着列式。我们按数量关系三步来：识别量→说关系→转方程。你先把题目里变化的量和不变的量各圈出来。",
+                GuidanceStage.HINT: "现在把每个量之间的关系说成一句普通话，再把这句话翻译成方程。你先试着写出最核心的数量关系。",
+                GuidanceStage.FALLBACK: "我们收束一下：先设未知数，再列数量关系句，最后转成方程。最后一步求解和检验单位请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_ERROR_REVIEW,
+            triggers=("错了", "错因", "又错", "总是错", "老是错", "为什么错", "错哪"),
+            prompt_section=(
+                "数学错因归类模式：引导学生把错误归到概念错、计算错还是审题错，"
+                "不直接指出错在哪一步，让学生自己定位并说明错误原因。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别看正确解法。你先回看自己的过程，判断这次是概念没吃透、计算失误，还是审题偏了？把可疑的那一步先圈出来。",
+                GuidanceStage.HINT: "把你圈出的那一步和课本定义或例题对照一下：条件用全了吗？公式适用范围对吗？你先说说这一步的依据是什么。",
+                GuidanceStage.FALLBACK: "我们按概念→计算→审题三类逐一排查：先复述考查的概念，再重算可疑步骤，最后回读题干核对条件。错因结论和订正请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_MULTI_SOLUTION,
+            triggers=("还有别的方法", "另一种解法", "一题多解", "多种解法", "其他方法", "别的解法"),
+            prompt_section=(
+                "数学一题多解模式：引导学生比较不同方法的适用条件和优劣，"
+                "不直接演示第二种解法，让学生自己尝试从另一个知识点切入。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先不急着给你另一种解法。你现在这种方法用到了哪个知识点？换一个角度想想，这道题还能不能从函数、几何或方程的另一条路切入？",
+                GuidanceStage.HINT: "选定新角度后，先写出这条路里最关键的第一步，再比较它和原方法用到的条件有什么差异。你先把新思路的第一步写出来。",
+                GuidanceStage.FALLBACK: "我们按知识点定位→新路径第一步→两种方法比较来收束。第二种解法的完整过程和优劣结论请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_CONCEPT,
+            triggers=("什么是", "是什么意思", "为什么", "概念", "定义", "原理", "区别"),
+            prompt_section=(
+                "数学概念直觉模式：先用生活类比或图形直觉建立意义，再引入定义、公式或符号；"
+                "不要只让学生背结论，要追问这个定义解决了什么问题。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先不背公式。你先说说这个概念想解决什么问题，再举一个最简单的例子来检验理解。",
+                GuidanceStage.HINT: "把定义拆成条件和结论两部分，再用你举的例子逐条对照。你先说说例子满足了定义里的哪个条件。",
+                GuidanceStage.FALLBACK: "我们按“解决什么问题→定义条件→典型例子→易混点”梳理。最后用一句自己的话概括这个概念，请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_FUNCTION,
+            triggers=("函数", "单调", "最值", "图像", "导数", "零点"),
+            prompt_section=(
+                "数学函数专项模式：图像优先。先引导学生画出或想象函数图像，标出定义域、关键点和变化趋势，"
+                "再把图像特征翻译成代数条件；不直接给出单调区间或最值结论。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别急着求导或代公式。你先画出（或想象）这个函数的大致图像，说说定义域和图像的整体走势是什么？",
+                GuidanceStage.HINT: "把图像特征翻译成代数语言：单调性对应导数或差值的符号，最值对应端点或极值点。你先写出对应的代数条件。",
+                GuidanceStage.FALLBACK: "我们按“定义域→图像趋势→代数条件→求解验证”推进。最后的区间或最值结果请你自己算出，并回到图像上验证。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_GEOMETRY,
+            triggers=("几何", "证明", "辅助线", "相似", "全等", "圆锥曲线", "向量"),
+            prompt_section=(
+                "数学几何证明模式：先引导学生把已知条件标注到图形上，从结论倒推需要的中间量，"
+                "再考虑辅助线或坐标系；不直接给出证明步骤或辅助线做法。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别急着写证明。你先把已知条件全部标到图上，再从要证的结论倒推：它需要哪个中间结论支撑？",
+                GuidanceStage.HINT: "看看缺的那个中间结论：现有图形里的条件够不够用？如果不够，想想添一条什么样的辅助线（或建坐标系）能把条件连起来。你先说出你的候选方案。",
+                GuidanceStage.FALLBACK: "我们按“标条件→倒推结论→补辅助线或建系→串联证明”梳理链条。最后一步的完整书写请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.MATH_PROBLEM,
+            triggers=(),
+            prompt_section=(
+                "数学专项引导策略：先定位知识点和已知条件，再让学生选择方法。"
+                "不要直接给计算结果；如果学生要同类题，优先给变式训练。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先把题目条件、目标结论和可能用到的知识点分开写。你先判断这题更像函数、几何、方程还是概率问题？",
+                GuidanceStage.HINT: "从你定位的知识点出发，写出它对应的核心公式或性质，再看题目条件能代入哪些。你先完成这一步对应。",
+                GuidanceStage.FALLBACK: "我们按“条件梳理→知识点定位→列式推进”拆解。最后的计算结果和检验请你自己完成。",
+            },
+        ),
+    ),
+    "英语": (
+        SubjectRule(
+            mode=SubjectTeachingMode.ENGLISH_VOCABULARY,
+            triggers=("词汇DNA", "词汇 DNA", "存入词汇", "记单词", "背单词", "复习词汇", "单词"),
+            prompt_section=(
+                "英语词汇DNA模式：围绕词义、词性、例句和复习触发点帮助学生记词。"
+                "只在学生明确要求时记录词汇；不要承诺外部定时提醒。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先把这个词拆成词义、词性和一个你能自己造的例句。你先说说它在这句话里是什么词性？",
+                GuidanceStage.HINT: "再看它的常见搭配和近义词差别，试着在你的例句里替换一个搭配。你先说一个它的高频搭配。",
+                GuidanceStage.FALLBACK: "我们按“词义→词性→搭配→自造句”闭环整理。最后那句自造例句和记忆触发点请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.ENGLISH_WRITING,
+            triggers=("作文", "写作", "批改", "句式", "邮件", "段落", "改这篇"),
+            prompt_section=(
+                "英语写作专项：采用AI外教三维批改法，从语法、用词、逻辑中只抓最关键的2-3处。"
+                "不要代写整篇作文，用追问引导学生自己升级句式。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "我们先不重写整篇。你先选一句最想提升的句子，我只从语法、用词、逻辑里挑最关键的一点让你自己改。",
+                GuidanceStage.HINT: "对照我指出的那个维度，想想有没有更贴切的词或更清晰的句式可以替换。你先给出你的修改版本。",
+                GuidanceStage.FALLBACK: "我们按“定位问题维度→方向提示→你来改写”推进。这句话的最终改写请你自己完成，改完我再帮你检查。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.ENGLISH_READING,
+            triggers=("阅读理解", "七选五", "完形", "推断题", "细节题", "主旨题"),
+            prompt_section=(
+                "英语阅读理解模式：引导学生先定位题目对应的关键句，再用选项排除法逐项验证，"
+                "不直接给出正确选项，让学生自己说明每个选项的取舍依据。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别急着选。你先回原文定位到和这题相关的那一句，再看哪个选项和原文意思最贴、哪些明显能排除。你先排掉一个最不可能的选项。",
+                GuidanceStage.HINT: "把剩下的选项和定位句逐词比对：哪个选项偷换了范围、程度或对象？你先指出一处偷换。",
+                GuidanceStage.FALLBACK: "我们按“回原文定位→逐项排除→比对剩余选项”收束。最后的选择和理由请你自己给出。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.ENGLISH_GRAMMAR,
+            triggers=(),
+            prompt_section=(
+                "英语语法追问教练：不要一次性改完所有错误。先定位最核心的1-2个语法点，"
+                "用追问让学生自己发现主谓、时态、从句或搭配问题。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先看一个核心点：这句话的主语是谁，谓语动词应该跟主语保持什么形式？你先试着改第一处。",
+                GuidanceStage.HINT: "再检查时态和从句：主句和从句的时间关系一致吗？连接词选对了吗？你先说说这句话的时间线。",
+                GuidanceStage.FALLBACK: "我们按“主谓一致→时态→从句和搭配”逐层排查。最后一处的修改请你自己完成，并说明理由。",
+            },
+        ),
+    ),
+    "语文": (
+        SubjectRule(
+            mode=SubjectTeachingMode.CHINESE_MATERIAL,
+            triggers=("素材库", "存入素材", "素材", "名言", "事例", "好句"),
+            prompt_section=(
+                "语文素材库模式：帮助学生按主题、人物、适用文体整理素材，并在写作前主动匹配。"
+                "不要替学生写成完整作文。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先给这条素材打两个标签：它适合哪个主题？更适合议论文、记叙文还是说明文？",
+                GuidanceStage.HINT: "再想想这条素材的独特角度：它和常见用法有什么不同？你先说一个别人不常用的切入点。",
+                GuidanceStage.FALLBACK: "我们按“主题标签→文体适配→独特角度→一句概括”整理。最后那句素材点评请你自己写出来。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.CHINESE_CLASSICAL,
+            triggers=("文言文", "古诗", "古诗词", "诗词", "苏轼", "李白", "杜甫", "翻译", "作者心情"),
+            prompt_section=(
+                "文言文复活模式：先还原作者处境、情感触发点和关键字词，再进入翻译或赏析。"
+                "让学生从“这个人在什么情境中说这句话”开始理解。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先别逐字翻译。你先判断作者当时处在什么处境、最强烈的情绪是什么，再看关键词为什么这样写。",
+                GuidanceStage.HINT: "抓住最能体现情绪的那个字或那句话，想想它的字面义和语境义差在哪里。你先解释这个关键词。",
+                GuidanceStage.FALLBACK: "我们按“还原处境→定位情感→关键字词→整句理解”推进。最后的完整翻译或赏析请你自己完成。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.CHINESE_WRITING,
+            triggers=("作文", "写作", "议论文", "记叙文", "说明文", "爆破思路", "提纲", "辩论"),
+            prompt_section=(
+                "语文写作教练：按“爆破思路→检验逻辑→学生自己写→AI首读→精准提升”推进。"
+                "不代写作文，只激活学生自己的观点和材料。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先做思路爆破：围绕题目写出3个你真实相信的观点，再选一个最有证据支撑的观点展开。",
+                GuidanceStage.HINT: "检验你选的观点：它能用什么事例或名言支撑？会不会被反例推翻？你先给出一个最有力的论据。",
+                GuidanceStage.FALLBACK: "我们按“爆破观点→检验逻辑→搭提纲”收束。提纲和正文请你自己写，写完我来做首读反馈。",
+            },
+        ),
+        SubjectRule(
+            mode=SubjectTeachingMode.CHINESE_READING,
+            triggers=(),
+            prompt_section=(
+                "阅读理解拆解模式：从出题人视角分析题目，先判断考点，再回到文本找依据。"
+                "不要直接给标准答案，训练学生识别常见失分坑。"
+            ),
+            fallback_by_stage={
+                GuidanceStage.INITIAL: "先从出题人视角看：这题到底在考概括、赏析、作用，还是人物/情感理解？你先选一个考点。",
+                GuidanceStage.HINT: "带着考点回文本：找出与题目直接相关的原句，圈出关键词。你先读出最关键的那一句。",
+                GuidanceStage.FALLBACK: "我们按“判考点→回文本找证据→按答题框架组织”梳理。最后的答案组织请你自己完成，我再帮你对照失分点。",
+            },
+        ),
+    ),
     "化学": (
         SubjectRule(
             mode=SubjectTeachingMode.CHEM_EQUATION,
@@ -266,25 +470,28 @@ class SubjectGuidanceService:
         "同类型",
         "类似题",
     )
-    concept_signals = ("什么是", "是什么意思", "为什么", "概念", "定义", "原理", "区别")
-    math_word_problem_signals = ("应用题", "设x", "设 x", "列方程", "数量关系", "行程", "工程", "浓度", "利润", "相遇")
-    math_error_signals = ("错了", "错因", "又错", "总是错", "老是错", "为什么错", "错哪")
-    math_multi_solution_signals = ("还有别的方法", "另一种解法", "一题多解", "多种解法", "其他方法", "别的解法")
-    english_reading_signals = ("阅读理解", "七选五", "完形", "推断题", "细节题", "主旨题")
-    english_writing_signals = ("作文", "写作", "批改", "句式", "邮件", "段落", "改这篇")
-    english_vocabulary_signals = ("词汇DNA", "词汇 DNA", "存入词汇", "记单词", "背单词", "复习词汇", "单词")
-    chinese_material_signals = ("素材库", "存入素材", "素材", "名言", "事例", "好句")
-    chinese_classical_signals = ("文言文", "古诗", "古诗词", "诗词", "苏轼", "李白", "杜甫", "翻译", "作者心情")
-    chinese_writing_signals = ("作文", "写作", "议论文", "记叙文", "说明文", "爆破思路", "提纲", "辩论")
-    chinese_reading_signals = ("阅读理解", "现代文", "出题人", "答题", "丢分")
 
-    def analyze(self, question: str, subject: str, stage: GuidanceStage) -> SubjectGuidanceStrategy | None:
-        if subject == "数学":
-            return self._math_strategy(question, stage)
-        if subject == "英语":
-            return self._english_strategy(question, stage)
-        if subject == "语文":
-            return self._chinese_strategy(question, stage)
+    def analyze(
+        self,
+        question: str,
+        subject: str,
+        stage: GuidanceStage,
+        *,
+        mode_override: SubjectTeachingMode | None = None,
+    ) -> SubjectGuidanceStrategy | None:
+        if mode_override is not None:
+            rules = SUBJECT_STRATEGY_RULES.get(subject)
+            if rules:
+                for rule in rules:
+                    if rule.mode == mode_override:
+                        fallback = rule.fallback_by_stage.get(stage) or rule.fallback_by_stage[GuidanceStage.INITIAL]
+                        return SubjectGuidanceStrategy(
+                            subject=subject,
+                            teaching_mode=rule.mode,
+                            prompt_section=rule.prompt_section,
+                            fallback_text=fallback,
+                            matched_by_trigger=True,  # 意图分类结果视为高置信
+                        )
         return self._registry_strategy(question, subject, stage)
 
     def _registry_strategy(
@@ -295,6 +502,7 @@ class SubjectGuidanceService:
             return None
         normalized = question.strip()
         matched = next((rule for rule in rules if any(kw in normalized for kw in rule.triggers)), None)
+        matched_by_trigger = matched is not None
         if matched is None:
             matched = rules[-1]  # 末位规则作为兜底
         fallback = matched.fallback_by_stage.get(stage) or matched.fallback_by_stage[GuidanceStage.INITIAL]
@@ -303,151 +511,12 @@ class SubjectGuidanceService:
             teaching_mode=matched.mode,
             prompt_section=matched.prompt_section,
             fallback_text=fallback,
+            matched_by_trigger=matched_by_trigger,
         )
 
     def is_math_practice_request(self, question: str) -> bool:
         normalized = question.strip()
         return any(signal in normalized for signal in self.practice_request_signals)
-
-    def _math_strategy(self, question: str, stage: GuidanceStage) -> SubjectGuidanceStrategy:
-        normalized = question.replace(" ", "")
-        if any(signal.replace(" ", "") in normalized for signal in self.math_word_problem_signals):
-            if stage == GuidanceStage.INITIAL:
-                fallback = "先别急着列式。我们按数量关系三步来：识别量→说关系→转方程。你先把题目里变化的量和不变的量各圈出来。"
-            elif stage == GuidanceStage.HINT:
-                fallback = "现在把每个量之间的关系说成一句普通话，再把这句话翻译成方程。你先试着写出最核心的数量关系。"
-            else:
-                fallback = "我们收束一下：先设未知数，再列数量关系句，最后转成方程。最后一步求解和检验单位请你自己完成。"
-            return SubjectGuidanceStrategy(
-                subject="数学",
-                teaching_mode=SubjectTeachingMode.MATH_WORD_PROBLEM,
-                prompt_section=(
-                    "数学专项引导策略：应用题必须先做建模，不直接替学生列方程。"
-                    "请按“识别量→说关系→转方程”推进，让学生自己说出数量关系，再把自然语言转成数学语言。"
-                ),
-                fallback_text=fallback,
-            )
-        if any(signal in question for signal in self.math_error_signals):
-            return SubjectGuidanceStrategy(
-                subject="数学",
-                teaching_mode=SubjectTeachingMode.MATH_ERROR_REVIEW,
-                prompt_section=(
-                    "数学错因归类模式：引导学生把错误归到概念错、计算错还是审题错，"
-                    "不直接指出错在哪一步，让学生自己定位并说明错误原因。"
-                ),
-                fallback_text="先别看正确解法。你先回看自己的过程，判断这次是概念没吃透、计算失误，还是审题偏了？把可疑的那一步先圈出来。",
-            )
-        if any(signal in question for signal in self.math_multi_solution_signals):
-            return SubjectGuidanceStrategy(
-                subject="数学",
-                teaching_mode=SubjectTeachingMode.MATH_MULTI_SOLUTION,
-                prompt_section=(
-                    "数学一题多解模式：引导学生比较不同方法的适用条件和优劣，"
-                    "不直接演示第二种解法，让学生自己尝试从另一个知识点切入。"
-                ),
-                fallback_text="先不急着给你另一种解法。你现在这种方法用到了哪个知识点？换一个角度想想，这道题还能不能从函数、几何或方程的另一条路切入？",
-            )
-        if any(signal in question for signal in self.concept_signals):
-            return SubjectGuidanceStrategy(
-                subject="数学",
-                teaching_mode=SubjectTeachingMode.MATH_CONCEPT,
-                prompt_section=(
-                    "数学概念直觉模式：先用生活类比或图形直觉建立意义，再引入定义、公式或符号；"
-                    "不要只让学生背结论，要追问这个定义解决了什么问题。"
-                ),
-                fallback_text="先不背公式。你先说说这个概念想解决什么问题，再举一个最简单的例子来检验理解。",
-            )
-        return SubjectGuidanceStrategy(
-            subject="数学",
-            teaching_mode=SubjectTeachingMode.MATH_PROBLEM,
-            prompt_section=(
-                "数学专项引导策略：先定位知识点和已知条件，再让学生选择方法。"
-                "不要直接给计算结果；如果学生要同类题，优先给变式训练。"
-            ),
-            fallback_text="先把题目条件、目标结论和可能用到的知识点分开写。你先判断这题更像函数、几何、方程还是概率问题？",
-        )
-
-    def _english_strategy(self, question: str, stage: GuidanceStage) -> SubjectGuidanceStrategy:
-        if any(signal in question for signal in self.english_vocabulary_signals):
-            return SubjectGuidanceStrategy(
-                subject="英语",
-                teaching_mode=SubjectTeachingMode.ENGLISH_VOCABULARY,
-                prompt_section=(
-                    "英语词汇DNA模式：围绕词义、词性、例句和复习触发点帮助学生记词。"
-                    "只在学生明确要求时记录词汇；不要承诺外部定时提醒。"
-                ),
-                fallback_text="先把这个词拆成词义、词性和一个你能自己造的例句。你先说说它在这句话里是什么词性？",
-            )
-        if any(signal in question for signal in self.english_writing_signals):
-            return SubjectGuidanceStrategy(
-                subject="英语",
-                teaching_mode=SubjectTeachingMode.ENGLISH_WRITING,
-                prompt_section=(
-                    "英语写作专项：采用AI外教三维批改法，从语法、用词、逻辑中只抓最关键的2-3处。"
-                    "不要代写整篇作文，用追问引导学生自己升级句式。"
-                ),
-                fallback_text="我们先不重写整篇。你先选一句最想提升的句子，我只从语法、用词、逻辑里挑最关键的一点让你自己改。",
-            )
-        if any(signal in question for signal in self.english_reading_signals):
-            return SubjectGuidanceStrategy(
-                subject="英语",
-                teaching_mode=SubjectTeachingMode.ENGLISH_READING,
-                prompt_section=(
-                    "英语阅读理解模式：引导学生先定位题目对应的关键句，再用选项排除法逐项验证，"
-                    "不直接给出正确选项，让学生自己说明每个选项的取舍依据。"
-                ),
-                fallback_text="先别急着选。你先回原文定位到和这题相关的那一句，再看哪个选项和原文意思最贴、哪些明显能排除。你先排掉一个最不可能的选项。",
-            )
-        return SubjectGuidanceStrategy(
-            subject="英语",
-            teaching_mode=SubjectTeachingMode.ENGLISH_GRAMMAR,
-            prompt_section=(
-                "英语语法追问教练：不要一次性改完所有错误。先定位最核心的1-2个语法点，"
-                "用追问让学生自己发现主谓、时态、从句或搭配问题。"
-            ),
-            fallback_text="先看一个核心点：这句话的主语是谁，谓语动词应该跟主语保持什么形式？你先试着改第一处。",
-        )
-
-    def _chinese_strategy(self, question: str, stage: GuidanceStage) -> SubjectGuidanceStrategy:
-        if any(signal in question for signal in self.chinese_material_signals):
-            return SubjectGuidanceStrategy(
-                subject="语文",
-                teaching_mode=SubjectTeachingMode.CHINESE_MATERIAL,
-                prompt_section=(
-                    "语文素材库模式：帮助学生按主题、人物、适用文体整理素材，并在写作前主动匹配。"
-                    "不要替学生写成完整作文。"
-                ),
-                fallback_text="先给这条素材打两个标签：它适合哪个主题？更适合议论文、记叙文还是说明文？",
-            )
-        if any(signal in question for signal in self.chinese_classical_signals):
-            return SubjectGuidanceStrategy(
-                subject="语文",
-                teaching_mode=SubjectTeachingMode.CHINESE_CLASSICAL,
-                prompt_section=(
-                    "文言文复活模式：先还原作者处境、情感触发点和关键字词，再进入翻译或赏析。"
-                    "让学生从“这个人在什么情境中说这句话”开始理解。"
-                ),
-                fallback_text="先别逐字翻译。你先判断作者当时处在什么处境、最强烈的情绪是什么，再看关键词为什么这样写。",
-            )
-        if any(signal in question for signal in self.chinese_writing_signals):
-            return SubjectGuidanceStrategy(
-                subject="语文",
-                teaching_mode=SubjectTeachingMode.CHINESE_WRITING,
-                prompt_section=(
-                    "语文写作教练：按“爆破思路→检验逻辑→学生自己写→AI首读→精准提升”推进。"
-                    "不代写作文，只激活学生自己的观点和材料。"
-                ),
-                fallback_text="先做思路爆破：围绕题目写出3个你真实相信的观点，再选一个最有证据支撑的观点展开。",
-            )
-        return SubjectGuidanceStrategy(
-            subject="语文",
-            teaching_mode=SubjectTeachingMode.CHINESE_READING,
-            prompt_section=(
-                "阅读理解拆解模式：从出题人视角分析题目，先判断考点，再回到文本找依据。"
-                "不要直接给标准答案，训练学生识别常见失分坑。"
-            ),
-            fallback_text="先从出题人视角看：这题到底在考概括、赏析、作用，还是人物/情感理解？你先选一个考点。",
-        )
 
 
 subject_guidance_service = SubjectGuidanceService()

@@ -66,7 +66,8 @@ from backend.services.request_replay_service import request_replay_service
 from backend.services.physics_error_profile_service import physics_error_profile_service
 from backend.services.physics_guidance_service import physics_guidance_service
 from backend.services.socratic_service import socratic_service
-from backend.services.subject_guidance_service import subject_guidance_service
+from backend.services.subject_guidance_service import SUBJECT_STRATEGY_RULES, SubjectTeachingMode, subject_guidance_service
+from backend.services.intent_classify_service import intent_classify_service
 from backend.services.subject_profile_service import subject_profile_service
 from backend.services.suggested_reply_service import suggested_reply_service
 
@@ -115,6 +116,8 @@ async def _stream_llm_events(
     *,
     model_key: str,
     max_completion_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
 ):
     stream_response_func = getattr(llm_service.stream_response, "__func__", None)
     if stream_response_func is not LLMService.stream_response:
@@ -126,8 +129,79 @@ async def _stream_llm_events(
         fallback_text,
         model_key=model_key,
         max_completion_tokens=max_completion_tokens,
+        temperature=temperature,
+        top_p=top_p,
     ):
         yield event
+
+
+def _subject_llm_params(guidance_params: dict | None, subject: str) -> dict[str, float | int]:
+    """从 guidance_params（含 by_subject 分学科覆盖）提取合法的 LLM 采样参数。
+
+    非法值（类型错/越界）忽略并告警，回落默认——配置错误不可击穿聊天链路。
+    """
+    effective = socratic_service._effective_guidance_params(guidance_params, subject)
+    raw = effective.get("llm_params")
+    result: dict[str, float | int] = {}
+    if not isinstance(raw, dict):
+        return result
+    temperature = raw.get("temperature")
+    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool) and 0.0 <= float(temperature) <= 1.5:
+        result["temperature"] = float(temperature)
+    elif temperature is not None:
+        logger.warning("忽略非法 llm_params.temperature=%r (subject=%s)", temperature, subject)
+    top_p = raw.get("top_p")
+    if isinstance(top_p, (int, float)) and not isinstance(top_p, bool) and 0.0 < float(top_p) <= 1.0:
+        result["top_p"] = float(top_p)
+    elif top_p is not None:
+        logger.warning("忽略非法 llm_params.top_p=%r (subject=%s)", top_p, subject)
+    max_tokens = raw.get("max_tokens")
+    if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) and max_tokens > 0:
+        result["max_tokens"] = max_tokens
+    elif max_tokens is not None:
+        logger.warning("忽略非法 llm_params.max_tokens=%r (subject=%s)", max_tokens, subject)
+    return result
+
+
+async def _classify_subject_mode(
+    *,
+    guidance_params: dict | None,
+    question: str,
+    subject: str,
+    history_pairs: list[tuple[str, str]],
+    has_image_turn: bool,
+    practice_review_turn: bool,
+    model_key: str | None,
+) -> SubjectTeachingMode | None:
+    """混合式意图识别：规则快路径 + 低置信时 LLM 分类兜底。
+
+    仅在全部满足时才调用 LLM（默认关闭，配置灰度）：
+    1. guidance_params.intent_classifier.enabled 为 True；
+    2. 学科在注册表内且非物理（物理走深度专项服务）、命中可选学科白名单；
+    3. 规则结果命中末位兜底规则（matched_by_trigger=False，低置信）；
+    4. 非图片轮、非练习判卷轮。
+    分类失败/超时/非法输出一律返回 None（fail-open 回纯规则）。
+    """
+    intent_cfg = (guidance_params or {}).get("intent_classifier")
+    if not isinstance(intent_cfg, dict) or intent_cfg.get("enabled") is not True:
+        return None
+    if has_image_turn or practice_review_turn:
+        return None
+    if subject == "物理" or subject not in SUBJECT_STRATEGY_RULES:
+        return None
+    allowed_subjects = intent_cfg.get("subjects")
+    if isinstance(allowed_subjects, list) and subject not in allowed_subjects:
+        return None
+    stage_estimate = socratic_service.infer_stage(len(history_pairs) // 2)
+    rule_result = subject_guidance_service.analyze(question, subject, stage_estimate)
+    if rule_result is None or rule_result.matched_by_trigger:
+        return None
+    return await intent_classify_service.classify(
+        question=question,
+        subject=subject,
+        model_key=model_key,
+        timeout_seconds=intent_cfg.get("timeout_seconds"),
+    )
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> str:
@@ -1303,6 +1377,16 @@ async def stream_chat(
     )
     active_config = db.scalar(select(AgentConfig).where(AgentConfig.is_active.is_(True)).order_by(AgentConfig.version.desc()))
     subject_supplement = ((active_config.subject_prompts or {}).get(subject) or None) if active_config else None
+    subject_llm_params = _subject_llm_params(active_config.guidance_params if active_config else None, subject)
+    subject_mode_override = await _classify_subject_mode(
+        guidance_params=active_config.guidance_params if active_config else None,
+        question=prompt_question,
+        subject=subject,
+        history_pairs=history_pairs,
+        has_image_turn=has_image_turn,
+        practice_review_turn=practice_review_turn,
+        model_key=selected_model_key,
+    )
     prompt = socratic_service.build_prompt(
         question=prompt_question,
         subject=subject,
@@ -1317,6 +1401,7 @@ async def stream_chat(
         guidance_params=active_config.guidance_params if active_config else None,
         practice_context=conversation.active_practice if practice_review_turn else None,
         subject_supplement=subject_supplement,
+        subject_mode_override=subject_mode_override,
     )
     if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
         user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
@@ -1606,6 +1691,7 @@ async def stream_chat(
             agent_version=active_config.version if active_config else 0,
             chunks=retrieval.chunks,
             llm_model=selected_model_key,
+            teaching_mode=subject_mode_override.value if subject_mode_override else None,
         )
         if cache_lookup.answer:
             response_text = cache_lookup.answer
@@ -1735,15 +1821,20 @@ async def stream_chat(
                     "request_id": getattr(request.state, "request_id", None),
                 },
             )
+            quota_max_tokens = (
+                selected_model_config.quota_policy.max_completion_tokens
+                if selected_model_config and selected_model_config.quota_policy
+                else None
+            )
+            subject_max_tokens = subject_llm_params.get("max_tokens")
+            candidate_max_tokens = [value for value in (quota_max_tokens, subject_max_tokens) if value]
             llm_stream = _stream_llm_events(
                 prompt.messages,
                 fallback_text,
                 model_key=selected_model_key,
-                max_completion_tokens=(
-                    selected_model_config.quota_policy.max_completion_tokens
-                    if selected_model_config and selected_model_config.quota_policy
-                    else None
-                ),
+                max_completion_tokens=min(candidate_max_tokens) if candidate_max_tokens else None,
+                temperature=subject_llm_params.get("temperature"),
+                top_p=subject_llm_params.get("top_p"),
             )
 
             while True:
@@ -1780,7 +1871,7 @@ async def stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn)
+                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -1820,7 +1911,7 @@ async def stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn)
+                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(

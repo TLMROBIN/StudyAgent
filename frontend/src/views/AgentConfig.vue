@@ -28,11 +28,53 @@ const subjectPrompts = reactive<Record<string, string>>(
 const subjectMaxQuestions = reactive<Record<string, number | null>>(
   Object.fromEntries(SUBJECTS.map((s) => [s, null])),
 )
+// 每科可选 temperature 覆盖（留空=继承默认 0.3；数学/物理推荐 0.15，写作类推荐 0.5-0.6）
+const subjectTemperature = reactive<Record<string, number | null>>(
+  Object.fromEntries(SUBJECTS.map((s) => [s, null])),
+)
 const agentConfigCollectionPath = '/agent-config/'
+// 九科推荐模板（后端只读端点提供），null = 尚未加载
+const subjectPromptDefaults = ref<Record<string, string> | null>(null)
 
 async function loadConfigs() {
   const { data } = await api.get<AgentConfigItem[]>(agentConfigCollectionPath)
   configs.value = data
+}
+
+async function ensureDefaultsLoaded(): Promise<Record<string, string>> {
+  if (subjectPromptDefaults.value === null) {
+    const { data } = await api.get<Record<string, string>>('/agent-config/subject-prompt-defaults')
+    subjectPromptDefaults.value = data ?? {}
+  }
+  return subjectPromptDefaults.value
+}
+
+async function fillSubjectDefault(subject: string) {
+  const defaults = await ensureDefaultsLoaded()
+  const template = (defaults[subject] ?? '').trim()
+  if (!template) {
+    ElMessage.warning(`暂无 ${subject} 的推荐模板`)
+    return
+  }
+  if ((subjectPrompts[subject] ?? '').trim()) {
+    ElMessage.warning(`${subject} 已有内容，请先清空后再填充`)
+    return
+  }
+  subjectPrompts[subject] = template
+  ElMessage.success(`已填充 ${subject} 推荐模板`)
+}
+
+async function fillAllSubjectDefaults() {
+  const defaults = await ensureDefaultsLoaded()
+  let filled = 0
+  for (const subject of SUBJECTS) {
+    const template = (defaults[subject] ?? '').trim()
+    if (template && !(subjectPrompts[subject] ?? '').trim()) {
+      subjectPrompts[subject] = template
+      filled += 1
+    }
+  }
+  ElMessage.success(filled > 0 ? `已为 ${filled} 个学科填充推荐模板（已有内容的学科未覆盖）` : '所有学科均已有内容，未做填充')
 }
 
 async function createConfig() {
@@ -40,11 +82,19 @@ async function createConfig() {
     max_questions_per_turn: form.max_questions_per_turn,
     fallback_after_turns: form.fallback_after_turns,
   }
-  const bySubject: Record<string, Record<string, number>> = {}
+  const bySubject: Record<string, Record<string, unknown>> = {}
   for (const subject of SUBJECTS) {
+    const override: Record<string, unknown> = {}
     const value = subjectMaxQuestions[subject]
     if (typeof value === 'number' && value >= 1 && value <= 3) {
-      bySubject[subject] = { max_questions_per_turn: value }
+      override.max_questions_per_turn = value
+    }
+    const temperature = subjectTemperature[subject]
+    if (typeof temperature === 'number' && temperature >= 0 && temperature <= 1.5) {
+      override.llm_params = { temperature }
+    }
+    if (Object.keys(override).length > 0) {
+      bySubject[subject] = override
     }
   }
   if (Object.keys(bySubject).length > 0) {
@@ -67,6 +117,7 @@ async function createConfig() {
   for (const subject of SUBJECTS) {
     subjectPrompts[subject] = ''
     subjectMaxQuestions[subject] = null
+    subjectTemperature[subject] = null
   }
   ElMessage.success('已创建新版本')
   await loadConfigs()
@@ -123,6 +174,9 @@ onMounted(async () => {
             resize="none"
             :placeholder="`${subject} 追加提示词（可选，留空则不追加）`"
           />
+          <button class="ghost-button fill-default-button" @click="fillSubjectDefault(subject)">
+            填充推荐模板
+          </button>
           <label class="subject-param">
             该科每轮引导问题数（留空继承全局）
             <el-input-number
@@ -132,9 +186,23 @@ onMounted(async () => {
               controls-position="right"
             />
           </label>
+          <label class="subject-param">
+            该科 LLM temperature（留空继承默认 0.3；理科推荐 0.15，写作类推荐 0.5-0.6）
+            <el-input-number
+              v-model="subjectTemperature[subject]"
+              :min="0"
+              :max="1.5"
+              :step="0.05"
+              :precision="2"
+              controls-position="right"
+            />
+          </label>
         </el-collapse-item>
       </el-collapse>
-      <button class="primary-button" @click="createConfig">创建新版本</button>
+      <div class="action-row">
+        <button class="ghost-button" @click="fillAllSubjectDefaults">一键填充全部推荐模板</button>
+        <button class="primary-button" @click="createConfig">创建新版本</button>
+      </div>
     </section>
     <section class="panel">
       <div class="panel-header">
@@ -182,5 +250,15 @@ onMounted(async () => {
 .subject-tags {
   font-size: 12px;
   color: var(--el-text-color-secondary, #909399);
+}
+.fill-default-button {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.action-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
 }
 </style>

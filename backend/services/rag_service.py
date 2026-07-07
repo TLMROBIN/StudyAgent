@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 import mimetypes
@@ -74,7 +75,30 @@ from backend.services.vector_store_service import VectorStoreService, vector_sto
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 logging.getLogger("pdfplumber").setLevel(logging.ERROR)
 
+logger = logging.getLogger(__name__)
+
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
+# 分学科检索策略。缺省值 = 现行为（零加权、全局 top_k、不过滤低分行）。
+# 可用 env RAG_SUBJECT_POLICIES（JSON 字符串）逐科深覆盖，非法 JSON 时告警并回退本表。
+DEFAULT_SUBJECT_RETRIEVAL_POLICY: dict[str, object] = {
+    "top_k": None,               # None → settings.rag_top_k
+    "question_bank_bonus": 0.0,  # chunk_kind == question_item 的加权
+    "source_material_bonus": 0.0,  # 讲义/教材/拓展类资源加权
+    "min_base_score": None,      # 向量检索基础分下限（None = 不过滤）
+}
+SUBJECT_RETRIEVAL_POLICIES: dict[str, dict[str, object]] = {
+    "数学": {"question_bank_bonus": 0.12},
+    "物理": {"question_bank_bonus": 0.12},
+    "语文": {"source_material_bonus": 0.10, "top_k": 5},
+    "历史": {"source_material_bonus": 0.10, "top_k": 5},
+    "政治": {"source_material_bonus": 0.10, "top_k": 5},
+    # 英语/化学/生物/地理：全默认（现行为）
+}
+SOURCE_MATERIAL_RESOURCE_TYPES = {
+    ResourceType.KNOWLEDGE_NOTE.value,
+    ResourceType.TEXTBOOK.value,
+    ResourceType.EXTENSION.value,
+}
 CHAPTER_AWARE_RESOURCE_TYPES = {
     ResourceType.KNOWLEDGE_NOTE.value,
     ResourceType.TEXTBOOK.value,
@@ -201,8 +225,9 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
 
     def retrieve(self, db: Session, subject: str, question: str, *, student_grade: int | None = None) -> RetrievalResult:
         profile = self._infer_question_profile(question)
+        effective_top_k = self._effective_top_k(subject)
         try:
-            matches = self.vector_store.query(subject, question, max(self.settings.rag_top_k * 4, self.settings.rag_top_k))
+            matches = self.vector_store.query(subject, question, max(effective_top_k * 4, effective_top_k))
             if matches:
                 chunk_ids = [match.chunk_id for match in matches]
                 rows = db.scalars(
@@ -224,6 +249,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                     profile=profile,
                     scored_rows=scored_rows,
                     student_grade=student_grade,
+                    subject=subject,
                 )
                 ordered_rows = self._exclude_disabled_question_rows(ordered_rows)
                 if ordered_rows:
@@ -316,6 +342,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
             profile=profile or self._infer_question_profile(question),
             scored_rows=scored_rows,
             student_grade=student_grade,
+            subject=subject,
         )
         best = self._exclude_disabled_question_rows(best)
         return RetrievalResult(context=self._format_context(best), chunks=best)
@@ -885,6 +912,45 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
             prefer_extension=prefer_extension,
         )
 
+    # ---- 分学科检索策略 ----
+
+    _env_subject_policies_cache: tuple[str, dict] | None = None
+
+    def _env_subject_policies(self) -> dict:
+        raw = (getattr(self.settings, "rag_subject_policies_json", "") or "").strip()
+        if not raw:
+            return {}
+        cache = self._env_subject_policies_cache
+        if cache is not None and cache[0] == raw:
+            return cache[1]
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError("RAG_SUBJECT_POLICIES must be a JSON object")
+        except ValueError:
+            logger.warning("RAG_SUBJECT_POLICIES 非法 JSON，忽略并回退内置分学科检索策略表")
+            parsed = {}
+        self._env_subject_policies_cache = (raw, parsed)
+        return parsed
+
+    def _subject_policy(self, subject: str | None) -> dict[str, object]:
+        policy = dict(DEFAULT_SUBJECT_RETRIEVAL_POLICY)
+        if not subject:
+            return policy
+        builtin = SUBJECT_RETRIEVAL_POLICIES.get(subject)
+        if isinstance(builtin, dict):
+            policy.update(builtin)
+        override = self._env_subject_policies().get(subject)
+        if isinstance(override, dict):
+            policy.update({key: value for key, value in override.items() if key in DEFAULT_SUBJECT_RETRIEVAL_POLICY})
+        return policy
+
+    def _effective_top_k(self, subject: str | None) -> int:
+        top_k = self._subject_policy(subject).get("top_k")
+        if isinstance(top_k, int) and not isinstance(top_k, bool) and top_k > 0:
+            return top_k
+        return self.settings.rag_top_k
+
     def _rerank_rows(
         self,
         *,
@@ -892,7 +958,14 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         profile: QuestionProfile,
         scored_rows: list[tuple[float, KnowledgeChunk]],
         student_grade: int | None,
+        subject: str | None = None,
     ) -> list[KnowledgeChunk]:
+        policy = self._subject_policy(subject)
+        min_base_score = policy.get("min_base_score")
+        if isinstance(min_base_score, (int, float)) and not isinstance(min_base_score, bool):
+            filtered = [(score, row) for score, row in scored_rows if score >= float(min_base_score)]
+            if filtered:  # 过滤后为空则回退全量（不确定时保留）
+                scored_rows = filtered
         rescored: list[tuple[float, KnowledgeChunk]] = []
         for base_score, row in scored_rows:
             final_score = base_score + self._metadata_score(
@@ -901,10 +974,11 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                 profile,
                 student_grade,
                 recommendation_mode=False,
+                subject=subject,
             )
             rescored.append((final_score, row))
         rescored.sort(key=lambda item: item[0], reverse=True)
-        return [row for _, row in rescored[: self.settings.rag_top_k]]
+        return [row for _, row in rescored[: self._effective_top_k(subject)]]
 
     def _metadata_score(
         self,
@@ -914,6 +988,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         student_grade: int | None,
         *,
         recommendation_mode: bool,
+        subject: str | None = None,
     ) -> float:
         score = 0.0
         document = row.document
@@ -969,6 +1044,22 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         for tag in list(dict.fromkeys(tag_candidates))[:8]:
             if tag.lower() in question_lowered:
                 score += 0.08
+        if subject:
+            policy = self._subject_policy(subject)
+            question_bank_bonus = policy.get("question_bank_bonus")
+            if (
+                isinstance(question_bank_bonus, (int, float))
+                and question_bank_bonus
+                and metadata.get("chunk_kind") == "question_item"
+            ):
+                score += float(question_bank_bonus)
+            source_material_bonus = policy.get("source_material_bonus")
+            if (
+                isinstance(source_material_bonus, (int, float))
+                and source_material_bonus
+                and resource_type in SOURCE_MATERIAL_RESOURCE_TYPES
+            ):
+                score += float(source_material_bonus)
         return score
 
     def _recommendation_profile(self, question: str) -> QuestionProfile:

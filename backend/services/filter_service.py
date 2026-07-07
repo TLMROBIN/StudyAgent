@@ -89,11 +89,28 @@ class FilterService:
 
     # ---- LLM 输出校验 ----
 
-    def validate_answer(self, answer: str, *, skip_direct_answer: bool = False) -> OutputValidation:
+    def validate_answer(
+        self,
+        answer: str,
+        *,
+        skip_direct_answer: bool = False,
+        subject: str | None = None,
+    ) -> OutputValidation:
+        """输出校验。
+
+        subject 语义：规则 subjects 为空 → 全学科生效（原行为）；
+        subjects 非空 → 仅当 subject 命中时生效。subject=None（旧调用方）
+        时跳过所有 subject-scoped 规则，存量行为零变化。
+        """
         snapshot = self._engine.snapshot()
         issues: list[str] = []
-        if not skip_direct_answer and any(rule.pattern.search(answer) for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER)):
-            issues.append("direct_answer_detected")
+        if not skip_direct_answer:
+            for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER):
+                if rule.subjects and (subject is None or subject not in rule.subjects):
+                    continue
+                if rule.pattern.search(answer):
+                    issues.append("direct_answer_detected")
+                    break
         # 结构性校验（拒答文案与正文混排），依赖长度组合判断，保留在代码内
         if "抱歉，我只能解答高中学科相关问题" in answer and len(answer) > 30:
             issues.append("mixed_refusal")
