@@ -694,6 +694,62 @@ def test_chat_stream_replays_completed_request_id(monkeypatch):
         session.close()
 
 
+def test_chat_stream_strips_leading_blank_output_before_emit_persist_and_replay(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    llm_call_count = {"value": 0}
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        llm_call_count["value"] += 1
+        yield "\n\n你好，我们先看题干条件。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "store_backend", MemoryStore())
+    monkeypatch.setattr(chat_router.request_replay_service, "store_backend", MemoryStore())
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        first_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="函数题怎么下手", request_id="trim-leading-req"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        first_events = _parse_sse(asyncio.run(_read_streaming_response(first_response)))
+
+        second_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="函数题怎么下手", request_id="trim-leading-req"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        second_events = _parse_sse(asyncio.run(_read_streaming_response(second_response)))
+        assistant_message = session.scalar(
+            select(Message).where(Message.role == MessageRole.ASSISTANT).order_by(Message.id.desc()).limit(1)
+        )
+    finally:
+        session.close()
+
+    first_chunks = [data["content"] for event, data in first_events if event == "chunk"]
+    assert llm_call_count["value"] == 1
+    assert first_chunks
+    assert not first_chunks[0][0].isspace()
+    assert first_events[-1][1]["content"] == "你好，我们先看题干条件。"
+    assert second_events[-1][1]["content"] == "你好，我们先看题干条件。"
+    assert assistant_message is not None
+    assert assistant_message.content == "你好，我们先看题干条件。"
+
+
 def test_chat_stream_replays_disconnected_request_without_second_llm_call(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)

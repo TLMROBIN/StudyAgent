@@ -697,6 +697,10 @@ textarea {
   font-size: 12px;
 }
 
+.bubble.user .bubble-role {
+  display: none;
+}
+
 .message-body {
   display: grid;
   gap: 10px;
