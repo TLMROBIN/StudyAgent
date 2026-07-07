@@ -22,3 +22,33 @@ def test_inline_katex_has_overflow_handling():
     css = Path("frontend/src/styles.css").read_text()
 
     assert ":not(.katex-display) > .katex" in css
+
+
+def test_viewport_meta_declares_interactive_widget():
+    html = Path("frontend/index.html").read_text()
+
+    assert "interactive-widget=resizes-content" in html
+
+
+def test_chat_input_scrolls_into_view_on_focus():
+    source = Path("frontend/src/views/StudentChat.vue").read_text()
+
+    assert "ref=\"messageInputRef\"" in source
+    assert "@focus=\"handleMessageInputFocus\"" in source
+    assert "handleMessageInputFocus" in source
+    assert "scrollIntoView" in source
+
+
+def test_student_chat_main_uses_resized_viewport_height():
+    app = Path("frontend/src/App.vue").read_text()
+    css = Path("frontend/src/styles.css").read_text()
+
+    assert "app-main--student-chat" in app
+    assert "route.path === '/student'" in app
+
+    start = css.index(".app-main--student-chat")
+    end = css.index("}", start)
+    rule = css[start:end]
+    assert "height: var(--app-viewport-height" in rule
+    assert "max-height: var(--app-viewport-height" in rule
+    assert "overflow: hidden" in rule

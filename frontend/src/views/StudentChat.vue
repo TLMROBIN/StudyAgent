@@ -103,6 +103,7 @@ const recommendationDifficulty = ref<'basic' | 'standard' | 'advanced'>('basic')
 const recommendationMode = ref<RecommendationMode>('context')
 const recommendationKeyword = ref('')
 const chatStreamRef = ref<HTMLElement | null>(null)
+const messageInputRef = ref<{ $el?: HTMLElement } | null>(null)
 const cameraInputRef = ref<HTMLInputElement | null>(null)
 const galleryInputRef = ref<HTMLInputElement | null>(null)
 const cropImageRef = ref<HTMLImageElement | null>(null)
@@ -170,6 +171,13 @@ function queueScrollToBottom() {
   void nextTick(() => {
     scrollToBottom()
   })
+}
+
+function handleMessageInputFocus() {
+  window.setTimeout(() => {
+    const root = messageInputRef.value?.$el || document.querySelector<HTMLElement>('.chat-message-input')
+    root?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, 300)
 }
 
 async function loadConversations() {
@@ -1261,6 +1269,7 @@ onMounted(async () => {
           </el-option>
         </el-select>
         <el-input
+          ref="messageInputRef"
           v-model="form.message"
           class="chat-message-input"
           :disabled="sending"
@@ -1268,6 +1277,7 @@ onMounted(async () => {
           :rows="3"
           resize="none"
           placeholder="输入你的问题，系统会先引导你整理思路"
+          @focus="handleMessageInputFocus"
         />
         <div v-if="pendingImagePreviewUrl" class="recommendation-card__images">
           <a

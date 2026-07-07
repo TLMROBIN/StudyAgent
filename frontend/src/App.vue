@@ -35,6 +35,7 @@ const unreadSummary = ref<FeedbackUnreadSummary>({
 const requiresAuth = computed(() => route.matched.some((record) => record.meta.requiresAuth))
 const showShell = computed(() => route.path !== '/login')
 const shellActive = computed(() => showShell.value && !!auth.user)
+const studentChatActive = computed(() => route.path === '/student')
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
 const navigationItems = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = []
@@ -175,7 +176,15 @@ function toggleSidebar() {
         </button>
       </div>
     </aside>
-    <main :class="['app-main', { 'app-main--plain': !shellActive }]">
+    <main
+      :class="[
+        'app-main',
+        {
+          'app-main--plain': !shellActive,
+          'app-main--student-chat': shellActive && studentChatActive,
+        },
+      ]"
+    >
       <div v-if="!routeReady" class="auth-guard">
         <p class="panel-subcopy">正在检查登录状态...</p>
       </div>
