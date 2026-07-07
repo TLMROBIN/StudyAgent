@@ -10,6 +10,14 @@ def test_student_chat_refreshes_model_quota_after_stream_finishes():
     assert "await loadChatModels()" in success_block
 
 
+def test_student_chat_renders_and_sends_suggested_replies():
+    source = Path("frontend/src/views/StudentChat.vue").read_text()
+
+    assert "last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)" in source
+    assert "canShowSuggestedReplies(index, item)" in source
+    assert "@click=\"sendSuggestedReply(reply)\"" in source
+
+
 def test_student_chat_uses_selected_image_without_opening_crop_dialog_by_default():
     source = Path("frontend/src/views/StudentChat.vue").read_text()
     start = source.index("function handleImageSelection")

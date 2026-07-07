@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import AliasChoices, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
@@ -123,10 +123,18 @@ class MessageRead(BaseModel):
     content: str
     attachment: ChatAttachmentRead | None = None
     assets: list[KnowledgeAssetRead] = Field(default_factory=list)
+    suggested_replies: list[str] = Field(default_factory=list)
     turn_index: int
     guidance_stage: GuidanceStage
     llm_model_key: str | None = None
     created_at: datetime
+
+    @field_validator("suggested_replies", mode="before")
+    @classmethod
+    def normalize_suggested_replies(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 class ConversationRead(BaseModel):

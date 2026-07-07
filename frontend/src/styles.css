@@ -640,15 +640,34 @@ textarea {
   touch-action: pan-y;
 }
 
-.bubble {
+.message-row {
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   width: auto;
   max-width: min(78%, 720px);
+  min-width: 0;
+}
+
+.message-row.user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.message-row.assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.bubble {
+  width: 100%;
   min-width: 0;
   padding: 16px 18px;
   border-radius: 22px;
   line-height: 1.7;
   overflow-wrap: anywhere;
+  box-sizing: border-box;
 }
 
 .student-history-panel .conversation-list,
@@ -675,7 +694,7 @@ textarea {
   background: rgba(15, 118, 110, 0.58);
 }
 
-.chat-stream .bubble:first-child {
+.chat-stream .message-row:first-child {
   margin-top: auto;
 }
 
@@ -689,6 +708,40 @@ textarea {
   align-self: flex-start;
   background: #fffaf0;
   border: 1px solid var(--line);
+}
+
+.suggested-replies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.suggested-reply-chip {
+  max-width: 100%;
+  padding: 7px 12px;
+  border: 1px dashed rgba(15, 118, 110, 0.45);
+  border-radius: 999px;
+  background: rgba(236, 253, 245, 0.88);
+  color: #0f766e;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.suggested-reply-chip:hover,
+.suggested-reply-chip:focus-visible {
+  border-color: rgba(15, 118, 110, 0.78);
+  background: rgba(209, 250, 229, 0.95);
+}
+
+.suggested-reply-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .bubble-role {
@@ -1893,6 +1946,10 @@ textarea {
   .chat-stream {
     gap: 8px;
     padding-right: 6px;
+  }
+
+  .message-row {
+    max-width: 92%;
   }
 
   .bubble {
