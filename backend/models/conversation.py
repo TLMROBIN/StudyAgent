@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, JSON, String, Text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -76,6 +76,7 @@ class Conversation(TimestampMixin, Base):
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
     deleted_by_student_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    active_practice: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     student: Mapped["User"] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(

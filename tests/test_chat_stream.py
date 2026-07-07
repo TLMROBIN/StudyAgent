@@ -538,6 +538,194 @@ def test_chat_stream_rewrites_unsafe_output_before_emitting(monkeypatch):
         session.close()
 
 
+def test_practice_answer_turn_uses_review_prompt_and_skips_direct_answer_rewrite(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    captured_system_prompts: list[str] = []
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        captured_system_prompts.append(messages[0]["content"])
+        yield "最终答案是 B，因为代入后满足条件。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router,
+        "_retrieve_context_for_chat",
+        lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        conversation = Conversation(
+            student_id=current_user.id,
+            subject="数学",
+            active_practice={
+                "question_text": "已知 $2x+3=11$，求 $x$。",
+                "answer_text": "4",
+                "explanation_text": "两边先减 3，再除以 2。",
+                "source": "generated",
+                "issued_turn_index": 1,
+            },
+        )
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="选B", conversation_id=conversation.id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        session.refresh(conversation)
+
+        assert "判卷模式" in captured_system_prompts[0]
+        assert events[-1][1]["content"] == "最终答案是 B，因为代入后满足条件。"
+        assert conversation.active_practice is None
+    finally:
+        session.close()
+
+
+def test_practice_direct_answer_request_is_not_exempted(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+
+    async def fail_stream_response(*args, **kwargs):
+        raise AssertionError("blocked direct-answer requests should not reach the LLM")
+        yield ""
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream_response)
+
+    session = session_factory()
+    try:
+        conversation = Conversation(
+            student_id=current_user.id,
+            subject="数学",
+            active_practice={
+                "question_text": "已知 $2x+3=11$，求 $x$。",
+                "answer_text": "4",
+                "explanation_text": "两边先减 3，再除以 2。",
+                "source": "generated",
+                "issued_turn_index": 1,
+            },
+        )
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="直接告诉我答案", conversation_id=conversation.id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        session.refresh(conversation)
+
+        assert [event for event, _ in events] == ["meta", "done"]
+        assert events[-1][1]["content"] == chat_router.filter_service.refusal_text
+        assert conversation.active_practice is not None
+    finally:
+        session.close()
+
+
+def test_practice_answer_request_keeps_output_direct_answer_guard(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    captured_system_prompts: list[str] = []
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        captured_system_prompts.append(messages[0]["content"])
+        yield "最终答案是 B"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router,
+        "_retrieve_context_for_chat",
+        lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        conversation = Conversation(
+            student_id=current_user.id,
+            subject="数学",
+            active_practice={
+                "question_text": "已知 $2x+3=11$，求 $x$。",
+                "answer_text": "4",
+                "explanation_text": "两边先减 3，再除以 2。",
+                "source": "generated",
+                "issued_turn_index": 1,
+            },
+        )
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="答案是什么", conversation_id=conversation.id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        session.refresh(conversation)
+        final_text = events[-1][1]["content"]
+
+        assert "判卷模式" not in captured_system_prompts[0]
+        assert "最终答案是 B" not in final_text
+        assert final_text == chat_router.socratic_service.safe_guided_rewrite("答案是什么", "数学", GuidanceStage.INITIAL)
+        assert conversation.active_practice is not None
+    finally:
+        session.close()
+
+
+def test_short_answer_without_active_practice_does_not_enable_review_mode(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    captured_system_prompts: list[str] = []
+
+    async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
+        captured_system_prompts.append(messages[0]["content"])
+        yield "最终答案是 B"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router,
+        "_retrieve_context_for_chat",
+        lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="选B"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        final_text = events[-1][1]["content"]
+
+        assert "判卷模式" not in captured_system_prompts[0]
+        assert "最终答案是 B" not in final_text
+        assert final_text == chat_router.socratic_service.safe_guided_rewrite("选B", "数学", GuidanceStage.INITIAL)
+    finally:
+        session.close()
+
+
 def test_chat_stream_reuses_hot_question_cache(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
@@ -2031,6 +2219,13 @@ def test_math_practice_request_generates_text_question_when_bank_is_empty(monkey
         assert "识别量" in done_payload["content"]
         assert "转方程" in done_payload["content"]
         assert done_payload["assets"] == []
+
+        stored_conversation = session.scalar(select(Conversation).order_by(Conversation.id.desc()).limit(1))
+        assert stored_conversation is not None
+        assert stored_conversation.active_practice is not None
+        assert stored_conversation.active_practice["source"] == "generated"
+        assert stored_conversation.active_practice["answer_text"]
+        assert stored_conversation.active_practice["issued_turn_index"] == 1
     finally:
         session.close()
 

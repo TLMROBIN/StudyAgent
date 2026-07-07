@@ -254,6 +254,7 @@ def test_upgrade_head(alembic_ctx) -> None:
     missing = KEY_TABLES - _table_names(db_path)
     assert not missing, f"head 状态缺少关键表：{sorted(missing)}"
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
+    assert "active_practice" in _column_names(db_path, "conversations")
 
     assert set(failures) == KNOWN_BROKEN_UPGRADES_ON_FRESH_DB, (
         "全新库上失败的迁移与已知风险清单不一致。\n"
@@ -302,15 +303,13 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
     prev = order[-2]
 
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
+    assert "active_practice" in _column_names(db_path, "conversations")
 
     command.downgrade(cfg, "-1")
     assert _current_revision(db_path) == prev
-    assert "understanding_json" not in _column_names(db_path, "chat_message_attachments"), (
-        "回退一步后 chat_message_attachments.understanding_json 应被删除"
-    )
+    assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
+    assert "active_practice" not in _column_names(db_path, "conversations"), "回退一步后 conversations.active_practice 应被删除"
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
-    assert "understanding_json" in _column_names(db_path, "chat_message_attachments"), (
-        "重新 upgrade 后 chat_message_attachments.understanding_json 应被重建"
-    )
+    assert "active_practice" in _column_names(db_path, "conversations"), "重新 upgrade 后 conversations.active_practice 应被重建"

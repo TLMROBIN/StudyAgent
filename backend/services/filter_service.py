@@ -84,10 +84,10 @@ class FilterService:
 
     # ---- LLM 输出校验 ----
 
-    def validate_answer(self, answer: str) -> OutputValidation:
+    def validate_answer(self, answer: str, *, skip_direct_answer: bool = False) -> OutputValidation:
         snapshot = self._engine.snapshot()
         issues: list[str] = []
-        if any(rule.pattern.search(answer) for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER)):
+        if not skip_direct_answer and any(rule.pattern.search(answer) for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER)):
             issues.append("direct_answer_detected")
         # 结构性校验（拒答文案与正文混排），依赖长度组合判断，保留在代码内
         if "抱歉，我只能解答高中学科相关问题" in answer and len(answer) > 30:

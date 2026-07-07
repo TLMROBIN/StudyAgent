@@ -32,6 +32,29 @@ def test_build_prompt_adds_latex_instruction_for_stem_subjects():
     assert "$$...$$" in system_text
 
 
+def test_build_prompt_adds_practice_review_context():
+    prompt = socratic_service.build_prompt(
+        question="选B",
+        subject="数学",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+        practice_context={
+            "question_text": "已知 $2x+3=11$，求 $x$。",
+            "answer_text": "4",
+            "explanation_text": "两边先减 3，再除以 2。",
+            "source": "generated",
+            "issued_turn_index": 1,
+        },
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert "判卷模式" in system_text
+    assert "已知 $2x+3=11$，求 $x$。" in system_text
+    assert "参考答案：4" in system_text
+    assert "两边先减 3，再除以 2。" in system_text
+
+
 def test_build_prompt_does_not_force_disclaimer_for_high_confidence_image_turn():
     prompt = socratic_service.build_prompt(
         question="请看这张图",
