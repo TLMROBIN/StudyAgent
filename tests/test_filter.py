@@ -48,3 +48,42 @@ def test_image_answer_validator_accepts_human_low_confidence_disclaimer():
     assert not invalid.allowed
     assert "missing_image_uncertainty_disclaimer" in invalid.issues
     assert valid.allowed
+
+
+# ---- 分学科输出校验（subjects 作用域）----
+
+
+def test_adversarial_output_cases_match_expectation():
+    cases = json.loads(Path("tests/adversarial_output_cases.json").read_text(encoding="utf-8"))
+    assert len(cases) >= 20
+    for case in cases:
+        validation = filter_service.validate_answer(case["answer"], subject=case["subject"])
+        assert validation.allowed is case["allowed"], f"{case['note']}: {case['answer']}"
+
+
+def test_subject_scoped_rules_skipped_when_subject_is_none():
+    # 旧调用方（不传 subject）行为零变化：学科作用域规则不触发
+    math_leak = "答案是 x=4，把它代回去验证一下。"
+    assert filter_service.validate_answer(math_leak).allowed
+    assert not filter_service.validate_answer(math_leak, subject="数学").allowed
+    # 全学科规则不受 subject 影响
+    assert not filter_service.validate_answer("最终答案是 B。").allowed
+    assert not filter_service.validate_answer("最终答案是 B。", subject="数学").allowed
+
+
+def test_practice_exemption_covers_subject_scoped_rules():
+    # 练习判卷豁免整个 direct_answer 层，新增学科规则同层自动被豁免
+    validation = filter_service.validate_answer(
+        "正确答案是C。答案是 x=4，你的解法在第二步出了问题。",
+        skip_direct_answer=True,
+        subject="数学",
+    )
+    assert validation.allowed
+
+
+def test_chat_router_passes_subject_to_output_validation():
+    source = Path("backend/routers/chat.py").read_text()
+
+    assert source.count(
+        "validate_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)"
+    ) == 2

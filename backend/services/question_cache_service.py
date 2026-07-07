@@ -34,6 +34,7 @@ class QuestionCacheService:
         agent_version: int,
         chunks: list[KnowledgeChunk],
         llm_model: str | None = None,
+        teaching_mode: str | None = None,
     ) -> QuestionCacheLookup:
         cache_key = self._build_key(
             subject=subject,
@@ -42,6 +43,7 @@ class QuestionCacheService:
             agent_version=agent_version,
             chunks=chunks,
             llm_model=llm_model,
+            teaching_mode=teaching_mode,
         )
         if not cache_key:
             return QuestionCacheLookup(cache_key=None, answer=None)
@@ -77,6 +79,7 @@ class QuestionCacheService:
         agent_version: int,
         chunks: list[KnowledgeChunk],
         llm_model: str | None = None,
+        teaching_mode: str | None = None,
     ) -> str | None:
         normalized_question = self.normalize_question(question)
         if not normalized_question:
@@ -90,6 +93,9 @@ class QuestionCacheService:
             "chunk_ids": [chunk.id for chunk in chunks],
             "llm_model": (llm_model or "").strip(),
         }
+        if teaching_mode:
+            # 意图分类 override 生效时纳入 key，避免不同教学模式共享缓存答案
+            payload["teaching_mode"] = teaching_mode
         digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         return f"question_cache:{digest}"
 

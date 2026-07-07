@@ -6,7 +6,11 @@ import re
 from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEHOLDER
 from backend.services.physics_guidance_service import PhysicsGuidanceStrategy, physics_guidance_service
-from backend.services.subject_guidance_service import SubjectGuidanceStrategy, subject_guidance_service
+from backend.services.subject_guidance_service import (
+    SubjectGuidanceStrategy,
+    SubjectTeachingMode,
+    subject_guidance_service,
+)
 
 
 @dataclass
@@ -72,10 +76,17 @@ class SocraticService:
             return None
         return physics_guidance_service.analyze(question, stage=stage, image_summary=image_summary)
 
-    def subject_strategy(self, question: str, subject: str, stage: GuidanceStage) -> SubjectGuidanceStrategy | None:
+    def subject_strategy(
+        self,
+        question: str,
+        subject: str,
+        stage: GuidanceStage,
+        *,
+        mode_override: SubjectTeachingMode | None = None,
+    ) -> SubjectGuidanceStrategy | None:
         if subject == "物理":
             return None
-        return subject_guidance_service.analyze(question, subject, stage)
+        return subject_guidance_service.analyze(question, subject, stage, mode_override=mode_override)
 
     @staticmethod
     def _effective_guidance_params(guidance_params: dict | None, subject: str) -> dict:
@@ -109,12 +120,13 @@ class SocraticService:
         guidance_params: dict | None = None,
         practice_context: dict | None = None,
         subject_supplement: str | None = None,
+        subject_mode_override: SubjectTeachingMode | None = None,
     ) -> PromptPackage:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
         question_type = self.infer_question_type(question)
         physics_strategy = self.physics_strategy(question, subject, stage, image_summary=image_summary)
-        subject_strategy = self.subject_strategy(question, subject, stage)
+        subject_strategy = self.subject_strategy(question, subject, stage, mode_override=subject_mode_override)
         fact_mode_offered = self.fact_mode_eligible(question, image_related=image_related)
         effective_params = self._effective_guidance_params(guidance_params, subject)
         max_questions = 2

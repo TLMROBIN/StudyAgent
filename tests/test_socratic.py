@@ -506,3 +506,82 @@ def test_chat_router_passes_subject_supplement_and_keeps_guidance_params():
     assert "subject_supplement=subject_supplement" in source
     assert "guidance_params=active_config.guidance_params if active_config else None" in source
 
+
+# --- 数/英/语声明式化 + 阶段化兜底 ---
+
+
+def test_math_function_and_geometry_modes():
+    function_prompt = socratic_service.build_prompt(
+        "求这个函数的单调区间和最值", "数学", [], "", ""
+    )
+    geometry_prompt = socratic_service.build_prompt(
+        "这道几何题怎么证明两个三角形全等", "数学", [], "", ""
+    )
+
+    assert "数学函数专项模式" in function_prompt.messages[0]["content"]
+    assert "图像" in function_prompt.messages[0]["content"]
+    assert "数学几何证明模式" in geometry_prompt.messages[0]["content"]
+    assert "辅助线" in geometry_prompt.messages[0]["content"]
+
+
+def test_math_concept_still_wins_over_function_rule():
+    # 概念信号优先级高于函数细分规则（迁移保持原判定顺序）
+    strategy = subject_guidance_service.analyze("什么是函数单调性", "数学", GuidanceStage.INITIAL)
+
+    assert strategy is not None
+    assert strategy.teaching_mode.value == "math_concept"
+
+
+def test_migrated_subjects_have_stage_differentiated_fallbacks():
+    cases = [
+        ("数学", "这道题我又错了，为什么错"),
+        ("数学", "求这个函数的最值"),
+        ("英语", "这道阅读理解的推断题怎么做"),
+        ("英语", "帮我批改这篇作文"),
+        ("语文", "这首古诗的翻译"),
+        ("语文", "现代文阅读怎么答"),
+    ]
+    for subject, question in cases:
+        texts = {
+            stage: subject_guidance_service.analyze(question, subject, stage).fallback_text
+            for stage in (GuidanceStage.INITIAL, GuidanceStage.HINT, GuidanceStage.FALLBACK)
+        }
+        assert len(set(texts.values())) == 3, f"{subject}:{question} 三阶段文案应互不相同"
+
+
+def test_migrated_subjects_fallback_stage_keeps_last_step_for_student():
+    cases = [
+        ("数学", "解这个方程组"),
+        ("数学", "应用题不会列方程"),
+        ("数学", "这道题我又错了"),
+        ("数学", "还有别的方法吗"),
+        ("数学", "什么是导数的定义"),
+        ("英语", "I goes to school 怎么改"),
+        ("英语", "帮我批改这篇作文"),
+        ("英语", "这道阅读理解怎么做"),
+        ("英语", "帮我记这个单词"),
+        ("语文", "现代文阅读怎么答"),
+        ("语文", "帮我爆破作文思路"),
+        ("语文", "这段文言文的翻译"),
+        ("语文", "存入素材库这条名言"),
+    ]
+    for subject, question in cases:
+        strategy = subject_guidance_service.analyze(question, subject, GuidanceStage.FALLBACK)
+        assert strategy is not None
+        text = strategy.fallback_text
+        assert "自己" in text, f"{subject}:{question} FALLBACK 应保留最后一步给学生"
+        assert "最终答案" not in text
+        assert "标准答案" not in text
+
+
+def test_matched_by_trigger_marks_catch_all_rules():
+    triggered = subject_guidance_service.analyze("帮我配平这个化学方程式", "化学", GuidanceStage.INITIAL)
+    catch_all = subject_guidance_service.analyze("这道化学题不会", "化学", GuidanceStage.INITIAL)
+    math_triggered = subject_guidance_service.analyze("求函数最值", "数学", GuidanceStage.INITIAL)
+    math_catch_all = subject_guidance_service.analyze("这道题不会做", "数学", GuidanceStage.INITIAL)
+
+    assert triggered.matched_by_trigger is True
+    assert catch_all.matched_by_trigger is False
+    assert math_triggered.matched_by_trigger is True
+    assert math_catch_all.matched_by_trigger is False
+

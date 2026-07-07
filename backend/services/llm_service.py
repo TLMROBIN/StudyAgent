@@ -591,6 +591,8 @@ class LLMService:
         *,
         model_key: str | None = None,
         max_completion_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         selected_model_key = self.normalize_chat_model_key(model_key)
         fallback_reason = "no_available_provider"
@@ -614,6 +616,8 @@ class LLMService:
                         provider,
                         messages,
                         max_completion_tokens=max_completion_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
                     ):
                         yielded = True
                         yield event
@@ -735,6 +739,8 @@ class LLMService:
         messages: list[dict[str, str]],
         *,
         max_completion_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         content_filter = ThinkingContentFilter()
         emitted_text = ""
@@ -742,10 +748,12 @@ class LLMService:
         payload = {
             "model": provider.model,
             "messages": messages,
-            "temperature": 0.3,
+            "temperature": temperature if temperature is not None else 0.3,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if top_p is not None:
+            payload["top_p"] = top_p
         if max_completion_tokens:
             payload["max_completion_tokens"] = max_completion_tokens
         url = self._chat_completions_url(provider.base_url)

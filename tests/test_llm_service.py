@@ -572,3 +572,68 @@ def test_image_completion_uses_chat_image_vision_timeout_setting(monkeypatch):
     assert result == "题干：如图所示。"
     assert captured["timeout"].connect == 77
     assert captured["timeout"].read == 77
+
+
+def test_stream_events_pass_subject_llm_params_to_payload(monkeypatch):
+    service = LLMService()
+    provider = ProviderState(
+        name="deepseek",
+        base_url="https://api.example.test/v1",
+        api_key="secret",
+        model="deepseek-chat",
+    )
+    lines = ['data: {"choices":[{"delta":{"content":"好"}}]}', "data: [DONE]"]
+    captured_payloads: list[dict] = []
+
+    class FakeStreamResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            captured_payloads.append(kwargs["json"])
+            return FakeStreamContext()
+
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    import asyncio
+
+    async def run_once(**kwargs):
+        return [
+            event
+            async for event in service._stream_openai_compatible_events(
+                provider,
+                [{"role": "user", "content": "看条件"}],
+                **kwargs,
+            )
+        ]
+
+    # 分学科参数透传
+    asyncio.run(run_once(temperature=0.15, top_p=0.95))
+    assert captured_payloads[-1]["temperature"] == 0.15
+    assert captured_payloads[-1]["top_p"] == 0.95
+
+    # 不传 → 保持默认 0.3，且 payload 不含 top_p（现行为不变）
+    asyncio.run(run_once())
+    assert captured_payloads[-1]["temperature"] == 0.3
+    assert "top_p" not in captured_payloads[-1]

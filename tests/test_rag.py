@@ -3544,3 +3544,103 @@ def test_retrieve_excludes_disabled_question_rows_from_final_context(tmp_path):
         assert "第1题" not in result.context
     finally:
         session.close()
+
+
+# ---- 分学科检索策略（SUBJECT_RETRIEVAL_POLICIES）----
+
+
+def _make_chunk(subject: str, resource_type: str, content: str, metadata: dict | None = None) -> KnowledgeChunk:
+    doc = KnowledgeDocument(
+        subject=subject,
+        filename="t.txt",
+        file_path="t.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        resource_type=resource_type,
+    )
+    chunk = KnowledgeChunk(subject=subject, chunk_index=0, content=content, metadata_json=metadata or {})
+    chunk.document = doc
+    return chunk
+
+
+def test_subject_policy_defaults_are_equivalent_to_legacy_behavior(tmp_path, monkeypatch):
+    import backend.services.rag_service as rag_module
+
+    service = build_rag_service(tmp_path)
+    monkeypatch.setattr(rag_module, "SUBJECT_RETRIEVAL_POLICIES", {})
+    profile = service._infer_question_profile("函数单调性怎么判断")
+    chunk = _make_chunk("数学", ResourceType.EXERCISE.value, "第1题 求函数最值", {"chunk_kind": "question_item"})
+
+    with_subject = service._metadata_score(chunk, "函数单调性怎么判断", profile, None, recommendation_mode=False, subject="数学")
+    without_subject = service._metadata_score(chunk, "函数单调性怎么判断", profile, None, recommendation_mode=False)
+
+    assert with_subject == without_subject
+    assert service._effective_top_k("数学") == service.settings.rag_top_k
+
+
+def test_question_bank_bonus_promotes_question_item_rows(tmp_path):
+    service = build_rag_service(tmp_path)
+    profile = service._infer_question_profile("求这道题的解法")
+    question_chunk = _make_chunk("数学", ResourceType.EXERCISE.value, "第1题 已知函数", {"chunk_kind": "question_item"})
+    note_chunk = _make_chunk("数学", ResourceType.EXERCISE.value, "知识点整理", {})
+
+    base = service._metadata_score(note_chunk, "求这道题的解法", profile, None, recommendation_mode=False, subject="数学")
+    boosted = service._metadata_score(question_chunk, "求这道题的解法", profile, None, recommendation_mode=False, subject="数学")
+    unboosted = service._metadata_score(question_chunk, "求这道题的解法", profile, None, recommendation_mode=False, subject="英语")
+
+    assert boosted - base >= 0.12 - 1e-9
+    assert boosted > unboosted
+
+
+def test_source_material_bonus_and_top_k_for_liberal_arts(tmp_path):
+    service = build_rag_service(tmp_path)
+    profile = service._infer_question_profile("分析这段材料")
+    note_chunk = _make_chunk("历史", ResourceType.KNOWLEDGE_NOTE.value, "史料原文与讲解", {})
+
+    with_bonus = service._metadata_score(note_chunk, "分析这段材料", profile, None, recommendation_mode=False, subject="历史")
+    without_bonus = service._metadata_score(note_chunk, "分析这段材料", profile, None, recommendation_mode=False)
+
+    assert with_bonus - without_bonus >= 0.10 - 1e-9
+    assert service._effective_top_k("语文") == 5
+    assert service._effective_top_k("历史") == 5
+    assert service._effective_top_k("英语") == service.settings.rag_top_k
+    assert service._effective_top_k(None) == service.settings.rag_top_k
+
+
+def test_env_json_overrides_builtin_policy(tmp_path):
+    service = build_rag_service(tmp_path)
+    service.settings.rag_subject_policies_json = '{"数学": {"question_bank_bonus": 0, "top_k": 6}}'
+    service._env_subject_policies_cache = None
+
+    policy = service._subject_policy("数学")
+    assert policy["question_bank_bonus"] == 0
+    assert service._effective_top_k("数学") == 6
+    # 未覆盖的学科不受影响
+    assert service._subject_policy("物理")["question_bank_bonus"] == 0.12
+
+
+def test_invalid_env_json_falls_back_to_builtin_policy(tmp_path):
+    service = build_rag_service(tmp_path)
+    service.settings.rag_subject_policies_json = "{not valid json"
+    service._env_subject_policies_cache = None
+
+    assert service._subject_policy("数学")["question_bank_bonus"] == 0.12
+    assert service._effective_top_k("语文") == 5
+
+
+def test_min_base_score_filter_falls_back_to_all_rows_when_empty(tmp_path):
+    service = build_rag_service(tmp_path)
+    service.settings.rag_subject_policies_json = '{"生物": {"min_base_score": 0.9}}'
+    service._env_subject_policies_cache = None
+    profile = service._infer_question_profile("光合作用过程")
+    low_a = (0.2, _make_chunk("生物", ResourceType.KNOWLEDGE_NOTE.value, "光合作用第一阶段", {}))
+    low_b = (0.1, _make_chunk("生物", ResourceType.KNOWLEDGE_NOTE.value, "呼吸作用", {}))
+
+    # 全部低于阈值 → 回退全量（不确定时保留）
+    rows = service._rerank_rows(question="光合作用过程", profile=profile, scored_rows=[low_a, low_b], student_grade=None, subject="生物")
+    assert len(rows) == 2
+
+    # 部分达标 → 仅保留达标行
+    high = (0.95, _make_chunk("生物", ResourceType.KNOWLEDGE_NOTE.value, "光合作用光反应", {}))
+    rows = service._rerank_rows(question="光合作用过程", profile=profile, scored_rows=[low_a, high], student_grade=None, subject="生物")
+    assert len(rows) == 1

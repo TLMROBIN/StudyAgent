@@ -44,6 +44,11 @@ chat_image_understanding_total = Counter(
     ["source", "confidence"],
 )
 chat_fact_mode_total = Counter("chat_fact_mode_total", "Fact-mode direct answers", ["subject"])
+chat_intent_classify_total = Counter(
+    "chat_intent_classify_total",
+    "Subject teaching-mode intent classification outcomes",
+    ["result"],
+)
 chat_practice_review_total = Counter("chat_practice_review_total", "Practice answer review turns", ["subject"])
 chat_image_vision_call_failures_total = Counter(
     "chat_image_vision_call_failures_total",
