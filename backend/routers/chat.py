@@ -1302,6 +1302,7 @@ async def stream_chat(
         student_grade=current_user.grade,
     )
     active_config = db.scalar(select(AgentConfig).where(AgentConfig.is_active.is_(True)).order_by(AgentConfig.version.desc()))
+    subject_supplement = ((active_config.subject_prompts or {}).get(subject) or None) if active_config else None
     prompt = socratic_service.build_prompt(
         question=prompt_question,
         subject=subject,
@@ -1315,6 +1316,7 @@ async def stream_chat(
         image_related=has_image_turn,
         guidance_params=active_config.guidance_params if active_config else None,
         practice_context=conversation.active_practice if practice_review_turn else None,
+        subject_supplement=subject_supplement,
     )
     if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
         user_message = _user_message_for_turn(db, conversation.id, user_turn_index)

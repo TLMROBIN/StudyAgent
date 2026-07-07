@@ -77,6 +77,23 @@ class SocraticService:
             return None
         return subject_guidance_service.analyze(question, subject, stage)
 
+    @staticmethod
+    def _effective_guidance_params(guidance_params: dict | None, subject: str) -> dict:
+        """合并全局与分学科 guidance_params。
+
+        guidance_params 可含可选键 "by_subject": {subject: {...}}；
+        分学科项浅覆盖全局项。缺失 by_subject 时结果与旧行为完全等价。
+        """
+        if not guidance_params:
+            return {}
+        base = {k: v for k, v in guidance_params.items() if k != "by_subject"}
+        by_subject = guidance_params.get("by_subject")
+        if isinstance(by_subject, dict):
+            override = by_subject.get(subject)
+            if isinstance(override, dict):
+                base = {**base, **override}
+        return base
+
     def build_prompt(
         self,
         question: str,
@@ -91,6 +108,7 @@ class SocraticService:
         image_uncertainties: list[str] | None = None,
         guidance_params: dict | None = None,
         practice_context: dict | None = None,
+        subject_supplement: str | None = None,
     ) -> PromptPackage:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
@@ -98,21 +116,26 @@ class SocraticService:
         physics_strategy = self.physics_strategy(question, subject, stage, image_summary=image_summary)
         subject_strategy = self.subject_strategy(question, subject, stage)
         fact_mode_offered = self.fact_mode_eligible(question, image_related=image_related)
+        effective_params = self._effective_guidance_params(guidance_params, subject)
         max_questions = 2
-        if guidance_params:
-            raw_max_questions = guidance_params.get("max_questions_per_turn")
+        if effective_params:
+            raw_max_questions = effective_params.get("max_questions_per_turn")
             if isinstance(raw_max_questions, int) and 1 <= raw_max_questions <= 3:
                 max_questions = raw_max_questions
         system_sections = [
             self.base_prompt,
             system_prompt,
+        ]
+        if subject_supplement and subject_supplement.strip():
+            system_sections.append(subject_supplement.strip())
+        system_sections.extend([
             f"当前学科：{subject}",
             f"当前引导阶段：{stage.value}",
             f"问题类型：{question_type}",
             "请保持语气平和，先用问题推进理解，再给必要提示。",
             "涉及数学、物理、化学中的公式、方程、上下标或希腊字母时，请使用标准 LaTeX 书写。",
             "行内公式使用 $...$，独立公式使用 $$...$$，不要使用图片或伪公式文本代替。",
-        ]
+        ])
         if fact_mode_offered:
             system_sections.append(
                 "回复模式判断：你的回复必须以模式标签开头——<mode>fact</mode> 或 <mode>guide</mode>，标签后直接接正文。"
