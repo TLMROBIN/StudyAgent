@@ -115,6 +115,56 @@ class ThinkingContentFilter:
         return output
 
 
+class LeadingModeTagParser:
+    """Parse and strip a leading <mode>fact|guide</mode> tag from a stream."""
+
+    MAX_BUFFER_CHARS = 32
+    FACT_TAG = "<mode>fact</mode>"
+    GUIDE_TAG = "<mode>guide</mode>"
+    TAG_RE = re.compile(r"^\s*<mode>(fact|guide)</mode>")
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.resolved_mode: str | None = None
+
+    def feed(self, text: str) -> tuple[str | None, str]:
+        if not text:
+            return None, ""
+        if self.resolved_mode is not None:
+            return None, text
+
+        self.buffer += text
+        match = self.TAG_RE.match(self.buffer)
+        if match:
+            self.resolved_mode = match.group(1)
+            visible = self.buffer[match.end() :]
+            self.buffer = ""
+            return self.resolved_mode, visible
+
+        stripped = self.buffer.lstrip()
+        if len(self.buffer) > self.MAX_BUFFER_CHARS:
+            return self._resolve_without_tag()
+        if not stripped or self.FACT_TAG.startswith(stripped) or self.GUIDE_TAG.startswith(stripped):
+            return None, ""
+        return self._resolve_without_tag()
+
+    def flush(self) -> str:
+        if self.resolved_mode is not None:
+            output = self.buffer
+            self.buffer = ""
+            return output
+        self.resolved_mode = "guide"
+        output = self.buffer
+        self.buffer = ""
+        return output
+
+    def _resolve_without_tag(self) -> tuple[str, str]:
+        self.resolved_mode = "guide"
+        visible = self.buffer
+        self.buffer = ""
+        return self.resolved_mode, visible
+
+
 @dataclass
 class ProviderState:
     name: str

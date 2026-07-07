@@ -43,6 +43,7 @@ chat_image_understanding_total = Counter(
     "Chat image understanding results",
     ["source", "confidence"],
 )
+chat_fact_mode_total = Counter("chat_fact_mode_total", "Fact-mode direct answers", ["subject"])
 chat_image_vision_call_failures_total = Counter(
     "chat_image_vision_call_failures_total",
     "Vision model calls failed during chat image understanding",

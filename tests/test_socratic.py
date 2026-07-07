@@ -270,3 +270,35 @@ def test_default_agent_config_sets_question_limit():
     source = Path("backend/main.py").read_text()
 
     assert '"max_questions_per_turn": 2' in source
+
+
+def test_fact_mode_gate_blocks_disguised_exercises():
+    blocked = [
+        "什么是使 x²+3x+2=0 的 x 的值",
+        "三角形内角和是否可能为 200°，如图",
+        "下列哪个正确（A）光合作用…（B）…",
+        "求光合作用的定义",
+        "第3题的这个概念是什么意思",
+    ]
+    for question in blocked:
+        assert socratic_service.fact_mode_eligible(question) is False, question
+
+
+def test_fact_mode_gate_allows_plain_facts():
+    allowed = ["三溴苯酚是否部分溶于水", "什么是光合作用", "定语从句和同位语从句的区别"]
+    for question in allowed:
+        assert socratic_service.fact_mode_eligible(question) is True, question
+
+
+def test_fact_mode_gate_vetoes_image_turns():
+    assert socratic_service.fact_mode_eligible("什么是光合作用", image_related=True) is False
+
+
+def test_mode_instruction_only_injected_when_eligible():
+    fact_prompt = socratic_service.build_prompt("什么是光合作用", "生物", [], "", "")
+    guide_prompt = socratic_service.build_prompt("求 x²+3x+2=0 的解", "数学", [], "", "")
+
+    assert "<mode>" in fact_prompt.messages[0]["content"]
+    assert fact_prompt.fact_mode_offered is True
+    assert "<mode>" not in guide_prompt.messages[0]["content"]
+    assert guide_prompt.fact_mode_offered is False

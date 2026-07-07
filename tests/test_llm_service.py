@@ -58,6 +58,57 @@ def test_thinking_filter_handles_split_tags_across_chunks():
     assert output == "最终回答"
 
 
+def test_leading_mode_tag_parser_strips_complete_tag():
+    from backend.services.llm_service import LeadingModeTagParser
+
+    parser = LeadingModeTagParser()
+    mode, visible = parser.feed("<mode>fact</mode>直接结论。")
+
+    assert mode == "fact"
+    assert visible == "直接结论。"
+    assert parser.flush() == ""
+
+
+def test_leading_mode_tag_parser_handles_split_tag():
+    from backend.services.llm_service import LeadingModeTagParser
+
+    parser = LeadingModeTagParser()
+
+    assert parser.feed("<mo") == (None, "")
+    assert parser.feed("de>fa") == (None, "")
+    assert parser.feed("ct</mode>结论") == ("fact", "结论")
+    assert parser.feed("继续") == (None, "继续")
+
+
+def test_leading_mode_tag_parser_defaults_to_guide_without_tag():
+    from backend.services.llm_service import LeadingModeTagParser
+
+    parser = LeadingModeTagParser()
+    mode, visible = parser.feed("直接正文")
+
+    assert mode == "guide"
+    assert visible == "直接正文"
+
+
+def test_leading_mode_tag_parser_flushes_partial_tag():
+    from backend.services.llm_service import LeadingModeTagParser
+
+    parser = LeadingModeTagParser()
+
+    assert parser.feed("<mode>fa") == (None, "")
+    assert parser.flush() == "<mode>fa"
+
+
+def test_leading_mode_tag_parser_releases_overlong_prefix():
+    from backend.services.llm_service import LeadingModeTagParser
+
+    parser = LeadingModeTagParser()
+    mode, visible = parser.feed(" " * 33)
+
+    assert mode == "guide"
+    assert visible == " " * 33
+
+
 def test_stream_parser_reads_final_message_content_chunk(monkeypatch):
     service = LLMService()
     provider = ProviderState(

@@ -5,6 +5,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
+import logging
 import mimetypes
 from time import perf_counter
 from typing import Any
@@ -43,8 +44,9 @@ from backend.services.chat_attachment_service import StoredChatAttachment, chat_
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
-from backend.services.llm_service import LLMService, LLMStreamEvent, LLMUsage, llm_service
+from backend.services.llm_service import LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, llm_service
 from backend.services.metrics_service import (
+    chat_fact_mode_total,
     chat_first_token_seconds,
     chat_full_response_seconds,
     chat_request_total,
@@ -66,6 +68,7 @@ from backend.services.subject_guidance_service import subject_guidance_service
 from backend.services.subject_profile_service import subject_profile_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 STREAM_HEARTBEAT_SECONDS = 15
 STREAM_FORCE_FLUSH_CHARS = 96
 STREAM_GUARD_TAIL_CHARS = 24
@@ -1506,6 +1509,8 @@ async def stream_chat(
         nonlocal quota_usage
         emitted_text = ""
         emitted_visible = False
+        mode_parser = LeadingModeTagParser() if prompt.fact_mode_offered else None
+        resolved_mode: str | None = None
         pending_buffer = ""
         llm_stream = None
         disconnected = False
@@ -1558,6 +1563,10 @@ async def stream_chat(
 
                 provider_chunk = provider_event.content
                 provider_stream_started = provider_stream_started or bool(provider_chunk)
+                if mode_parser is not None and resolved_mode is None:
+                    parsed_mode, provider_chunk = mode_parser.feed(provider_chunk)
+                    if parsed_mode is not None:
+                        resolved_mode = parsed_mode
                 pending_buffer += provider_chunk
                 segments, pending_buffer = _split_stream_buffer(pending_buffer)
                 for segment in segments:
@@ -1593,6 +1602,10 @@ async def stream_chat(
 
                 if stop_streaming:
                     break
+
+            if mode_parser is not None and resolved_mode is None:
+                pending_buffer += mode_parser.flush()
+                resolved_mode = mode_parser.resolved_mode
 
             if not disconnected and pending_buffer:
                 segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
@@ -1662,6 +1675,16 @@ async def stream_chat(
                         assistant_message_id = assistant_message.id
                         guidance_stage_total.labels(stage=prompt.stage.value).inc()
                 db.commit()
+                if should_send_done and resolved_mode == "fact":
+                    chat_fact_mode_total.labels(subject=subject).inc()
+                    logger.info(
+                        "chat_fact_mode",
+                        extra={
+                            "student_id": current_user.id,
+                            "conversation_id": conversation.id,
+                            "subject": subject,
+                        },
+                    )
                 if quota_reservation is not None and provider_stream_started and not usage_recorded:
                     usage_recorded = True
                     if quota_usage is not None:
