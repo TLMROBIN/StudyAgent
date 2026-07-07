@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from backend.models.conversation import GuidanceStage
 from backend.services.socratic_service import socratic_service
 
@@ -237,3 +239,34 @@ def test_image_extremely_low_confidence_text_reports_recognition_failure():
 
     assert "识别失败" in text
     assert "重新上传" in text
+
+
+def test_prompt_limits_questions_per_turn_default():
+    package = socratic_service.build_prompt("什么是加速度", "物理", [], "", "")
+
+    assert "最多提出 2 个引导问题" in package.messages[0]["content"]
+
+
+def test_prompt_limits_questions_per_turn_configurable():
+    package = socratic_service.build_prompt(
+        "什么是加速度",
+        "物理",
+        [],
+        "",
+        "",
+        guidance_params={"max_questions_per_turn": 1},
+    )
+
+    assert "最多提出 1 个引导问题" in package.messages[0]["content"]
+
+
+def test_chat_router_passes_active_guidance_params_to_prompt():
+    source = Path("backend/routers/chat.py").read_text()
+
+    assert "guidance_params=active_config.guidance_params if active_config else None" in source
+
+
+def test_default_agent_config_sets_question_limit():
+    source = Path("backend/main.py").read_text()
+
+    assert '"max_questions_per_turn": 2' in source

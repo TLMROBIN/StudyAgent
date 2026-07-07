@@ -72,12 +72,18 @@ class SocraticService:
         image_confidence: str | None = None,
         image_related: bool = False,
         image_uncertainties: list[str] | None = None,
+        guidance_params: dict | None = None,
     ) -> PromptPackage:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
         question_type = self.infer_question_type(question)
         physics_strategy = self.physics_strategy(question, subject, stage, image_summary=image_summary)
         subject_strategy = self.subject_strategy(question, subject, stage)
+        max_questions = 2
+        if guidance_params:
+            raw_max_questions = guidance_params.get("max_questions_per_turn")
+            if isinstance(raw_max_questions, int) and 1 <= raw_max_questions <= 3:
+                max_questions = raw_max_questions
         system_sections = [
             self.base_prompt,
             system_prompt,
@@ -88,6 +94,10 @@ class SocraticService:
             "涉及数学、物理、化学中的公式、方程、上下标或希腊字母时，请使用标准 LaTeX 书写。",
             "行内公式使用 $...$，独立公式使用 $$...$$，不要使用图片或伪公式文本代替。",
         ]
+        system_sections.append(
+            f"每次回复最多提出 {max_questions} 个引导问题，且必须聚焦同一个思考点；"
+            "不要在一条回复中并列多个问题让学生逐一回答，需要追问时分多轮进行。"
+        )
         if physics_strategy:
             system_sections.append(physics_strategy.prompt_section)
             if physics_strategy.teaching_mode.value == "concept_intuition":
