@@ -39,7 +39,7 @@ def seed_default_agent_config() -> None:
         config = AgentConfig(
             version=1,
             system_prompt=socratic_service.base_prompt,
-            guidance_params={"fallback_after_turns": 3, "max_guidance_turns": 4},
+            guidance_params={"fallback_after_turns": 3, "max_guidance_turns": 4, "max_questions_per_turn": 2},
             subject_prompts={},
             filter_rules={"blocked_modes": ["chat", "prompt_injection", "non_subject"]},
             is_active=True,

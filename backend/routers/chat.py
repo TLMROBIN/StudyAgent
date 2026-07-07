@@ -1139,6 +1139,7 @@ async def stream_chat(
         image_confidence=image_understanding.confidence_level if image_understanding else None,
         image_uncertainties=image_understanding.uncertainties if image_understanding else None,
         image_related=has_image_turn,
+        guidance_params=active_config.guidance_params if active_config else None,
     )
     if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
         user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
