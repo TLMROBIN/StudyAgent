@@ -23,6 +23,23 @@ GENERIC_REPLIES = {
     "再讲讲",
     "讲详细点",
 }
+STUDENT_REPLY_DIRECT_PATTERNS = (
+    re.compile(r"(最终|标准)?答案(?:是|为|选|：|:)"),
+    re.compile(r"(正确答案|正确选项)"),
+    re.compile(r"(完整步骤|完整解法|标准解)"),
+    re.compile(r"(?:应该|应当|所以)?选\s*[（(]?[A-D](?![A-Za-z])"),
+)
+GENERIC_FALLBACK_REPLIES = (
+    "我先说一个关键词，你帮我判断方向对不对。",
+    "是不是还需要补充一个适用条件？",
+    "我不确定下一步该看哪个条件。",
+    "能不能给我一个更小的提示？",
+)
+COULOMB_FALLBACK_REPLIES = (
+    "两个带电物体之间吗？",
+    "是不是还要看能不能近似成点电荷？",
+    "我不确定距离这个条件要怎么说。",
+)
 
 
 class SuggestedReplyService:
@@ -56,7 +73,16 @@ class SuggestedReplyService:
             max_completion_tokens=220,
             temperature=0.35,
         )
-        return self._normalize_options(raw_text)
+        replies = self._normalize_options(raw_text, subject=subject)
+        if len(replies) < MIN_REPLY_COUNT:
+            replies = self._supplement_options(
+                replies,
+                subject=subject,
+                current_question=current_question,
+                assistant_response=assistant_response,
+                history=history,
+            )
+        return replies[:MAX_REPLY_COUNT] if len(replies) >= MIN_REPLY_COUNT else []
 
     def _build_messages(
         self,
@@ -102,22 +128,60 @@ class SuggestedReplyService:
                 lines.append(f"{role}: {clipped}")
         return self._clip("\n".join(lines), MAX_CONTEXT_CHARS)
 
-    def _normalize_options(self, raw_text: str) -> list[str]:
+    def _normalize_options(self, raw_text: str, *, subject: str | None = None) -> list[str]:
         payload = self._parse_json(raw_text)
         candidates = self._candidate_strings(payload)
+        return self._filter_options(candidates, subject=subject)
+
+    def _filter_options(self, candidates: list[str], *, subject: str | None = None) -> list[str]:
         replies: list[str] = []
         seen: set[str] = set()
         for candidate in candidates:
             normalized = self._clean_reply(candidate)
             if not normalized or normalized in seen:
                 continue
-            if not self._is_allowed_reply(normalized):
+            if not self._is_allowed_reply(normalized, subject=subject):
                 continue
             replies.append(normalized)
             seen.add(normalized)
             if len(replies) >= MAX_REPLY_COUNT:
                 break
-        return replies if len(replies) >= MIN_REPLY_COUNT else []
+        return replies
+
+    def _supplement_options(
+        self,
+        replies: list[str],
+        *,
+        subject: str,
+        current_question: str,
+        assistant_response: str,
+        history: list[tuple[str, str]],
+    ) -> list[str]:
+        context_text = "\n".join(
+            [
+                current_question or "",
+                assistant_response or "",
+                self._format_history(history),
+            ]
+        )
+        fallback_candidates: list[str] = []
+        if subject == "物理" and any(keyword in context_text for keyword in ("库仑定律", "库仑力", "点电荷")):
+            fallback_candidates.extend(COULOMB_FALLBACK_REPLIES)
+        fallback_candidates.extend(GENERIC_FALLBACK_REPLIES)
+
+        combined = list(replies)
+        seen = set(combined)
+        for candidate in fallback_candidates:
+            normalized = self._clean_reply(candidate)
+            if not normalized or normalized in seen:
+                continue
+            if not self._is_allowed_reply(normalized, subject=subject):
+                continue
+            combined.append(normalized)
+            seen.add(normalized)
+            if len(combined) >= MIN_REPLY_COUNT:
+                break
+        return combined
 
     def _parse_json(self, raw_text: str) -> Any:
         text = self._strip_thinking(raw_text).strip()
@@ -182,12 +246,14 @@ class SuggestedReplyService:
         return not any(text.startswith(prefix) for prefix in blocked_prefixes)
 
     @staticmethod
-    def _is_allowed_reply(reply: str) -> bool:
+    def _is_allowed_reply(reply: str, *, subject: str | None = None) -> bool:
         if len(reply) < 3 or len(reply) > MAX_REPLY_CHARS:
             return False
         if reply in GENERIC_REPLIES:
             return False
-        if not filter_service.validate_answer(reply).allowed:
+        if any(pattern.search(reply) for pattern in STUDENT_REPLY_DIRECT_PATTERNS):
+            return False
+        if not filter_service.validate_answer(reply, subject=subject).allowed:
             return False
         return not filter_service.is_question_blocked(reply)
 
