@@ -83,6 +83,8 @@ EMPTY_CHAT_RESPONSE_FALLBACK = (
 )
 ANSWER_SUBMISSION_RE = re.compile(r"[A-Da-d]|\d|[=≈]|^是|^不是|^对|^错|^能|^不能|^正确|^不正确")
 ANSWER_REQUEST_RE = re.compile(r"直接(告诉|给|说)|答案是什么|是多少|不会|不知道|怎么做")
+SHORT_FOLLOWUP_BLOCK_RE = re.compile(r"怎么|为什么|什么是|讲|解释|求|计算|证明|答案|不会|不知道|直接|再来|出一道|推荐")
+SHORT_FOLLOWUP_PROMPT_MARKERS = ("？", "?", "请你", "你先", "试着", "能不能", "能否", "哪些", "什么条件", "是否", "吗")
 
 
 def _looks_like_answer_submission(text: str) -> bool:
@@ -92,6 +94,75 @@ def _looks_like_answer_submission(text: str) -> bool:
     if ANSWER_REQUEST_RE.search(stripped):
         return False
     return bool(ANSWER_SUBMISSION_RE.search(stripped))
+
+
+def _clip_followup_context(text: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip()
+
+
+def _previous_user_topic(history_pairs: list[tuple[str, str]]) -> str:
+    for role, content in reversed(history_pairs):
+        if role == MessageRole.USER.value and content.strip():
+            return content.strip()
+    return ""
+
+
+def _previous_assistant_prompt(history_pairs: list[tuple[str, str]]) -> str:
+    if not history_pairs or history_pairs[-1][0] != MessageRole.ASSISTANT.value:
+        return ""
+    prompt = history_pairs[-1][1].strip()
+    if not prompt:
+        return ""
+    if not any(marker in prompt for marker in SHORT_FOLLOWUP_PROMPT_MARKERS):
+        return ""
+    return prompt
+
+
+def _looks_like_short_followup_answer(text: str) -> bool:
+    stripped = re.sub(r"\s+", "", (text or "").strip())
+    if not stripped or len(stripped) > 24:
+        return False
+    if "?" in stripped or "？" in stripped:
+        return False
+    return not SHORT_FOLLOWUP_BLOCK_RE.search(stripped)
+
+
+def _short_followup_context(
+    *,
+    subject: str,
+    current_answer: str,
+    history_pairs: list[tuple[str, str]],
+) -> dict[str, str] | None:
+    answer = (current_answer or "").strip()
+    previous_prompt = _previous_assistant_prompt(history_pairs)
+    if not previous_prompt or not _looks_like_short_followup_answer(answer):
+        return None
+
+    topic = _previous_user_topic(history_pairs)
+    topic_line = f"上一轮学习主题：{_clip_followup_context(topic, 140)}\n" if topic else ""
+    clipped_prompt = _clip_followup_context(previous_prompt, 360)
+    clipped_answer = _clip_followup_context(answer, 80)
+    prompt_question = (
+        f"学生正在回答上一轮{subject}概念问题。\n"
+        f"{topic_line}"
+        f"上一轮导师问题：{clipped_prompt}\n"
+        f"学生回答：{clipped_answer}\n"
+        "请先判断学生回答是否完全或部分正确；如果不完整，用一句话补足关键条件；"
+        "然后继续提出 1 个聚焦的引导问题。不要把它当成新的题目重新开始，也不要要求学生画无关图景。"
+    )
+    retrieval_query = " ".join(
+        part
+        for part in (
+            _clip_followup_context(topic, 120),
+            _clip_followup_context(previous_prompt, 180),
+            clipped_answer,
+        )
+        if part
+    )
+    return {"prompt_question": prompt_question, "retrieval_query": retrieval_query or clipped_answer}
 
 
 def _chat_model_key_or_422(model_key: str | None) -> str:
@@ -1368,7 +1439,19 @@ async def stream_chat(
 
     subject = decision.subject or payload.subject
     prompt_question = _build_prompt_question(payload_message=payload.message, subject=subject, understanding=image_understanding)
+    followup_context = (
+        None
+        if has_image_turn or practice_review_turn
+        else _short_followup_context(
+            subject=subject,
+            current_answer=prompt_question,
+            history_pairs=history_pairs,
+        )
+    )
     retrieval_query = filter_question or prompt_question
+    if followup_context:
+        prompt_question = followup_context["prompt_question"]
+        retrieval_query = followup_context["retrieval_query"]
     retrieval = await asyncio.to_thread(
         _retrieve_context_for_chat,
         subject,

@@ -600,11 +600,14 @@ class LLMService:
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:
-                yielded = False
+                yielded_text = False
+                pending_usage_events: list[LLMStreamEvent] = []
                 stream_func = getattr(self._stream_openai_compatible, "__func__", None)
                 if stream_func is not LLMService._stream_openai_compatible:
                     async for chunk in self._stream_openai_compatible(provider, messages):
-                        yielded = True
+                        if not chunk:
+                            continue
+                        yielded_text = True
                         yield LLMStreamEvent(
                             type="chunk",
                             content=chunk,
@@ -619,9 +622,21 @@ class LLMService:
                         temperature=temperature,
                         top_p=top_p,
                     ):
-                        yielded = True
+                        if event.type == "usage":
+                            if yielded_text:
+                                yield event
+                            else:
+                                pending_usage_events.append(event)
+                            continue
+                        if not event.content:
+                            continue
+                        yielded_text = True
                         yield event
-                if yielded:
+                        if pending_usage_events:
+                            for usage_event in pending_usage_events:
+                                yield usage_event
+                            pending_usage_events.clear()
+                if yielded_text:
                     self._reset_provider(provider)
                     return
                 fallback_reason = "empty_stream"
@@ -758,6 +773,11 @@ class LLMService:
             payload["max_completion_tokens"] = max_completion_tokens
         url = self._chat_completions_url(provider.base_url)
         timeout = httpx.Timeout(self.settings.llm_request_timeout_seconds)
+        raw_event_count = 0
+        content_event_count = 0
+        reasoning_event_count = 0
+        usage_event_count = 0
+        finish_reasons: list[str] = []
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 response.raise_for_status()
@@ -768,8 +788,10 @@ class LLMService:
                     if data == "[DONE]":
                         break
                     payload = json.loads(data)
+                    raw_event_count += 1
                     usage = self._parse_usage(payload)
                     if usage is not None:
+                        usage_event_count += 1
                         yield LLMStreamEvent(
                             type="usage",
                             usage=usage,
@@ -778,12 +800,21 @@ class LLMService:
                         )
                         continue
                     choice = payload.get("choices", [{}])[0]
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason:
+                        finish_reasons.append(str(finish_reason))
                     delta = _content_text(choice.get("delta", {}).get("content"))
                     message_content = _content_text(choice.get("message", {}).get("content"))
+                    reasoning_content = _content_text(choice.get("delta", {}).get("reasoning")) or _content_text(
+                        choice.get("delta", {}).get("reasoning_content")
+                    )
+                    if reasoning_content:
+                        reasoning_event_count += 1
                     text = delta or message_content
                     if text and emitted_text and text.startswith(emitted_text):
                         text = text[len(emitted_text) :]
                     if text:
+                        content_event_count += 1
                         visible_text = content_filter.feed(text)
                         if visible_text:
                             emitted_text += visible_text
@@ -802,6 +833,17 @@ class LLMService:
                 content=final_visible_text,
                 provider_name=provider.name,
                 provider_model=provider.model,
+            )
+        if not emitted_text:
+            logger.warning(
+                "llm_stream_no_visible_content provider=%s model=%s raw_events=%s content_events=%s reasoning_events=%s usage_events=%s finish_reasons=%s",
+                provider.name,
+                provider.model,
+                raw_event_count,
+                content_event_count,
+                reasoning_event_count,
+                usage_event_count,
+                ",".join(finish_reasons),
             )
 
     @staticmethod
