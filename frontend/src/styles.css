@@ -971,12 +971,6 @@ textarea {
   max-width: 60%;
 }
 
-.chat-subject-select {
-  flex: 0 0 108px;
-  width: 108px;
-  min-width: 108px;
-}
-
 .chat-controls {
   display: flex;
   flex-wrap: wrap;
@@ -988,6 +982,12 @@ textarea {
   width: auto;
   min-width: 0;
   flex: 0 0 auto;
+}
+
+.chat-controls > .chat-subject-select {
+  flex: 0 0 128px;
+  width: 128px;
+  min-width: 128px;
 }
 
 .chat-controls > .chat-model-select {

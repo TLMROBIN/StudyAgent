@@ -95,9 +95,10 @@ assert.match(
   'student subject selector should have a dedicated width class',
 )
 
-const chatSubjectSelectRule = ruleFor('.chat-subject-select')
-assert.match(chatSubjectSelectRule, /flex:\s*0 0 108px/, 'subject selector should reserve readable label width')
-assert.match(chatSubjectSelectRule, /min-width:\s*108px/, 'subject selector should not collapse to an icon-only control')
+const chatSubjectSelectRule = ruleFor('.chat-controls > .chat-subject-select')
+assert.match(chatSubjectSelectRule, /flex:\s*0 0 128px/, 'subject selector should reserve readable label width')
+assert.match(chatSubjectSelectRule, /width:\s*128px/, 'subject selector should display the current subject label')
+assert.match(chatSubjectSelectRule, /min-width:\s*128px/, 'subject selector should not collapse to an icon-only control')
 
 assert.match(
   styles,
