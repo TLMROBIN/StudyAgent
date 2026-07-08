@@ -57,7 +57,7 @@ const GUIDANCE_STAGE_LABELS: Record<string, string> = {
 }
 const subjects = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
 const DEFAULT_CHAT_MODELS: ChatModelOption[] = [
-  { key: 'minimax-m27', name: 'MiniMax-M2.7', description: 'highspeed' },
+  { key: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', description: '通用快捷' },
 ]
 const resourceTypeOptions = [
   { value: 'knowledge_note', label: '知识讲义' },
@@ -77,7 +77,7 @@ const MODEL_STATUS_REFRESH_MS = 300000
 const form = reactive({
   subject: '数学',
   message: '',
-  llmModel: 'minimax-m27',
+  llmModel: 'deepseek-v4-flash',
 })
 const passwordForm = reactive({
   currentPassword: '',
@@ -199,7 +199,7 @@ async function loadChatModels() {
     const models = await fetchChatModels()
     chatModels.value = models.length ? models : DEFAULT_CHAT_MODELS
     if (!chatModels.value.some((item) => item.key === form.llmModel)) {
-      form.llmModel = chatModels.value[0]?.key || 'minimax-m27'
+      form.llmModel = chatModels.value[0]?.key || 'deepseek-v4-flash'
     }
   } catch {
     chatModels.value = DEFAULT_CHAT_MODELS
