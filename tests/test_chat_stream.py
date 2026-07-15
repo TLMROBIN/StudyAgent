@@ -199,6 +199,15 @@ def _fail_normal_chat_retrieval(*args, **kwargs):
     raise AssertionError("early special routes must skip normal chat RAG retrieval")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_chat_stream_optional_services(monkeypatch):
+    async def no_suggested_replies(**kwargs):
+        return []
+
+    monkeypatch.setattr(chat_router.suggested_reply_service, "generate", no_suggested_replies)
+    monkeypatch.setattr(chat_router, "rag_session_store", MemoryStore())
+
+
 def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
@@ -236,9 +245,12 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
             )
         )
         events = _parse_sse(asyncio.run(_read_streaming_response(response)))
-        assert [event for event, _ in events] == ["meta", "chunk", "chunk", "done"]
-        assert events[-1][1]["content"] == "先看定义域。再判断增减性。"
-        assert events[-1][1]["suggested_replies"] == suggested_replies
+        assert [event for event, _ in events] == ["meta", "chunk", "chunk", "done", "suggested_replies"]
+        done_event = next(payload for event, payload in events if event == "done")
+        suggested_event = next(payload for event, payload in events if event == "suggested_replies")
+        assert done_event["content"] == "先看定义域。再判断增减性。"
+        assert done_event["suggested_replies"] == []
+        assert suggested_event["suggested_replies"] == suggested_replies
 
         stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
         assert len(stored_messages) == 2
@@ -298,6 +310,70 @@ def test_active_agent_config_cache_reuses_value_until_ttl_expires(monkeypatch):
 
     assert chat_router._get_active_agent_config(db) is active_config
     assert db.scalar_calls == 2
+
+
+def test_rag_session_cache_preserves_chunk_order_and_invalidates_agent_version(monkeypatch):
+    session_factory = _build_session_factory()
+    session = session_factory()
+    cache_store = MemoryStore()
+    monkeypatch.setattr(chat_router, "rag_session_store", cache_store)
+    try:
+        document = KnowledgeDocument(
+            subject="数学",
+            filename="functions.txt",
+            file_path="/tmp/functions.txt",
+            mime_type="text/plain",
+            size_bytes=64,
+        )
+        session.add(document)
+        session.flush()
+        first = KnowledgeChunk(
+            document_id=document.id,
+            subject="数学",
+            chunk_index=0,
+            content="先确认函数定义域。",
+        )
+        second = KnowledgeChunk(
+            document_id=document.id,
+            subject="数学",
+            chunk_index=1,
+            content="再比较区间内函数值变化。",
+        )
+        session.add_all([first, second])
+        session.commit()
+
+        topic_fingerprint = chat_router._rag_topic_fingerprint("函数单调性怎么判断")
+        chat_router._store_rag_session_cache(
+            conversation_id=7,
+            subject="数学",
+            agent_version=3,
+            topic_fingerprint=topic_fingerprint,
+            chunks=[second, first],
+        )
+
+        cached = chat_router._load_rag_session_cache(
+            session,
+            conversation_id=7,
+            subject="数学",
+            agent_version=3,
+            topic_fingerprint=topic_fingerprint,
+        )
+
+        assert cached is not None
+        assert [chunk.id for chunk in cached.chunks] == [second.id, first.id]
+        assert cached.context.index(second.content) < cached.context.index(first.content)
+        assert (
+            chat_router._load_rag_session_cache(
+                session,
+                conversation_id=7,
+                subject="数学",
+                agent_version=4,
+                topic_fingerprint=topic_fingerprint,
+            )
+            is None
+        )
+    finally:
+        session.close()
 
 
 def test_short_reply_to_previous_guiding_question_is_reviewed_in_context(monkeypatch):
@@ -373,6 +449,92 @@ def test_short_reply_to_previous_guiding_question_is_reviewed_in_context(monkeyp
     assert seen["retrieval_query"] != "带电"
     assert "讲解下库仑定律" in seen["retrieval_query"]
     assert "带电" in seen["retrieval_query"]
+
+
+def test_chat_stream_reuses_rag_for_short_followup_and_invalidates_new_topic(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    session = session_factory()
+    rag_calls: list[str] = []
+    prompt_messages: list[list[dict[str, str]]] = []
+    cache_store = MemoryStore()
+
+    document = KnowledgeDocument(
+        subject="数学",
+        filename="math.txt",
+        file_path="/tmp/math.txt",
+        mime_type="text/plain",
+        size_bytes=64,
+    )
+    session.add(document)
+    session.flush()
+    row = KnowledgeChunk(
+        document_id=document.id,
+        subject="数学",
+        chunk_index=0,
+        content="判断函数单调性前先确认定义域。",
+    )
+    session.add(row)
+    session.commit()
+
+    def fake_retrieve(db, subject, question, **kwargs):
+        rag_calls.append(question)
+        return RetrievalResult(context=f"资料片段：{row.content}", chunks=[row])
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        prompt_messages.append(messages)
+        if len(prompt_messages) == 1:
+            yield "你觉得判断函数单调性的第一步是什么？"
+        elif len(prompt_messages) == 2:
+            yield "定义域是好的起点。接下来比较函数值如何变化。"
+        else:
+            yield "先回忆诱导公式反映了哪两个角之间的关系。"
+
+    async def no_suggestions(**kwargs):
+        return []
+
+    monkeypatch.setattr(chat_router, "rag_session_store", cache_store)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", fake_retrieve)
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(chat_router.suggested_reply_service, "generate", no_suggestions)
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    try:
+        first_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="函数单调性怎么判断"),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        first_events = _parse_sse(asyncio.run(_read_streaming_response(first_response)))
+        conversation_id = first_events[0][1]["conversation_id"]
+
+        second_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="定义域", conversation_id=conversation_id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        _parse_sse(asyncio.run(_read_streaming_response(second_response)))
+
+        third_response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="三角函数诱导公式怎么理解", conversation_id=conversation_id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        _parse_sse(asyncio.run(_read_streaming_response(third_response)))
+
+        assert rag_calls == ["函数单调性怎么判断", "三角函数诱导公式怎么理解"]
+        assert row.content in prompt_messages[1][0]["content"]
+    finally:
+        session.close()
 
 
 def test_student_can_list_builtin_chat_models(monkeypatch):
@@ -1027,9 +1189,12 @@ def test_chat_stream_replays_completed_request_id(monkeypatch):
 
         assert llm_call_count["value"] == 1
         assert suggestions_call_count["value"] == 1
-        assert [event for event, _ in first_events] == ["meta", "chunk", "done"]
+        assert [event for event, _ in first_events] == ["meta", "chunk", "done", "suggested_replies"]
         assert [event for event, _ in second_events] == ["meta", "done"]
-        assert first_events[-1][1]["suggested_replies"] == suggested_replies
+        first_done = next(payload for event, payload in first_events if event == "done")
+        first_suggestions = next(payload for event, payload in first_events if event == "suggested_replies")
+        assert first_done["suggested_replies"] == []
+        assert first_suggestions["suggested_replies"] == suggested_replies
         assert second_events[-1][1]["suggested_replies"] == suggested_replies
         assert len(stored_messages) == 2
         assert stored_messages[1].content == "先判断已知条件。"

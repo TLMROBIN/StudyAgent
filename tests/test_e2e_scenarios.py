@@ -91,6 +91,10 @@ def _parse_sse(payload: str) -> list[tuple[str, dict]]:
     return events
 
 
+def _event_payload(events: list[tuple[str, dict]], event_name: str) -> dict:
+    return next(data for name, data in events if name == event_name)
+
+
 class ScriptedLLM:
     """确定性流式 LLM mock：按脚本队列吐 chunk，可禁止调用。"""
 
@@ -181,6 +185,12 @@ def env(tmp_path_factory):
     mp.setattr(chat_router.question_cache_service, "store_backend", MemoryStore())
     mp.setattr(chat_router.request_replay_service, "store_backend", MemoryStore())
     mp.setattr(chat_router.llm_quota_service, "store", MemoryStore())
+    mp.setattr(chat_router, "rag_session_store", MemoryStore())
+
+    async def deterministic_suggested_replies(**kwargs):
+        return ["我先说一个关键词，你帮我判断方向对不对。"]
+
+    mp.setattr(chat_router.suggested_reply_service, "generate", deterministic_suggested_replies)
 
     # 知识库导入链路：无 Celery broker → enqueue 返回 None，走 BackgroundTasks 同步兜底
     mp.setattr(knowledge_router, "rag_service", rag)
@@ -253,7 +263,11 @@ def test_e2e_student_chain_login_ask_history_followup(env):
 
     events = _parse_sse(response.text)
     names = [name for name, _ in events]
-    _step("学生链路·SSE 事件序列", names == ["meta", "chunk", "chunk", "chunk", "done"], names)
+    _step(
+        "学生链路·SSE 事件序列",
+        names == ["meta", "chunk", "chunk", "chunk", "done", "suggested_replies"],
+        names,
+    )
 
     meta = events[0][1]
     _step(
@@ -264,9 +278,13 @@ def test_e2e_student_chain_login_ask_history_followup(env):
     _step("学生链路·guidance_stage 合法", meta["guidance_stage"] in {item.value for item in GuidanceStage}, meta)
 
     chunk_texts = [data["content"] for name, data in events if name == "chunk"]
-    final_text = events[-1][1]["content"]
+    done_payload = _event_payload(events, "done")
+    suggested_payload = _event_payload(events, "suggested_replies")
+    final_text = done_payload["content"]
     _step("学生链路·chunk 与脚本一致", chunk_texts == scripted_chunks, chunk_texts)
     _step("学生链路·done 聚合全文", final_text == "".join(scripted_chunks), final_text)
+    _step("学生链路·done 不等待建议回复", done_payload["suggested_replies"] == [], done_payload)
+    _step("学生链路·建议回复独立后补", bool(suggested_payload["suggested_replies"]), suggested_payload)
 
     # 苏格拉底引导特征：反问引导、不直接给答案；安全校验（三层过滤输出层）放行该回答
     _step("学生链路·苏格拉底引导特征", "？" in final_text and "最终答案" not in final_text, final_text)
@@ -300,7 +318,7 @@ def test_e2e_student_chain_login_ask_history_followup(env):
     followup_meta = followup_events[0][1]
     _step("学生链路·追问复用同一会话", followup_meta["conversation_id"] == conversation_id, followup_meta)
 
-    followup_text = followup_events[-1][1]["content"]
+    followup_text = _event_payload(followup_events, "done")["content"]
     expected_rewrite = socratic_service.safe_guided_rewrite(
         followup_question, "数学", GuidanceStage(followup_meta["guidance_stage"])
     )
@@ -383,7 +401,13 @@ def test_e2e_teacher_chain_upload_ingest_and_rag_hit(env):
     events = _parse_sse(response.text)
     meta = events[0][1]
     _step("教师链路·RAG 元数据出现在响应 meta 中", meta.get("context_chunks", 0) >= 1, meta)
-    _step("教师链路·回答正常收尾", events[-1][0] == "done" and events[-1][1]["content"], events[-1])
+    done_payload = _event_payload(events, "done")
+    _step("教师链路·回答正常收尾", bool(done_payload["content"]), done_payload)
+    _step(
+        "教师链路·建议回复在 done 后补发",
+        [name for name, _ in events][-2:] == ["done", "suggested_replies"],
+        events[-2:],
+    )
 
     # 服务层复核：检索命中的正是刚导入的文档
     session = env.session_factory()

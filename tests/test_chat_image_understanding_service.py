@@ -180,6 +180,94 @@ def test_vision_priority_summarizes_image_before_ocr_supplement(monkeypatch):
     assert "A 点坐标" in result.prompt_summary
 
 
+def test_vision_priority_skips_ocr_for_high_confidence_structured_result_without_formulas(monkeypatch):
+    service = ChatImageUnderstandingService(settings=Settings(CHAT_IMAGE_OCR_BACKEND="hybrid"))
+    payload = {
+        "is_academic": True,
+        "subject_guess": "math",
+        "question_text": "如图所示，函数图像经过 A 点，判断函数在两个区间上的单调性。",
+        "known_conditions": ["A 点坐标为 (1, 2)"],
+        "options": {},
+        "formulas_latex": [],
+        "diagrams": [{"type": "graph", "description": "函数图像"}],
+        "handwriting": "",
+        "printed_answer": "",
+        "uncertainties": [],
+        "quality_issues": [],
+    }
+
+    monkeypatch.setattr(image_service_module.llm_service, "prefers_vision_understanding", lambda model_key: True)
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    async def fail_ocr_supplement(**kwargs) -> str:
+        raise AssertionError("high-confidence structured result without formulas should skip OCR")
+
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+    monkeypatch.setattr(service, "_extract_ocr_supplement", fail_ocr_supplement)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="数学",
+            user_text="",
+            model_key="vision-model",
+        )
+    )
+
+    assert result.confidence_level == "high"
+    assert result.question_text == payload["question_text"]
+    assert result.formulas_latex == []
+    assert result.ocr_raw_text == ""
+
+
+def test_vision_priority_keeps_ocr_supplement_for_structured_formulas(monkeypatch):
+    service = ChatImageUnderstandingService(settings=Settings(CHAT_IMAGE_OCR_BACKEND="hybrid"))
+    payload = {
+        "is_academic": True,
+        "subject_guess": "physics",
+        "question_text": "如图所示，物体沿斜面运动，结合公式判断加速度方向。",
+        "known_conditions": ["斜面光滑"],
+        "options": {},
+        "formulas_latex": ["a=\\frac{F}{m}"],
+        "diagrams": [{"type": "force", "description": "斜面受力图"}],
+        "handwriting": "",
+        "printed_answer": "",
+        "uncertainties": [],
+        "quality_issues": [],
+    }
+    ocr_calls: list[str] = []
+
+    monkeypatch.setattr(image_service_module.llm_service, "prefers_vision_understanding", lambda model_key: True)
+
+    async def fake_summarize_academic_image(**kwargs) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    async def fake_ocr_supplement(**kwargs) -> str:
+        ocr_calls.append("ocr")
+        return "图中公式 a=F/m"
+
+    monkeypatch.setattr(image_service_module.llm_service, "summarize_academic_image", fake_summarize_academic_image)
+    monkeypatch.setattr(service, "_extract_ocr_supplement", fake_ocr_supplement)
+
+    result = asyncio.run(
+        service.understand(
+            image_bytes=_make_png_bytes(),
+            mime_type="image/png",
+            subject="物理",
+            user_text="",
+            model_key="vision-model",
+        )
+    )
+
+    assert result.confidence_level == "high"
+    assert result.formulas_latex == payload["formulas_latex"]
+    assert result.ocr_raw_text == "图中公式 a=F/m"
+    assert ocr_calls == ["ocr"]
+
+
 def test_low_confidence_partial_understanding_keeps_summary_for_user_correction(monkeypatch):
     settings = Settings(CHAT_IMAGE_OCR_BACKEND="llm")
     service = ChatImageUnderstandingService(settings=settings)
