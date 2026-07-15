@@ -33,6 +33,18 @@ def test_build_prompt_adds_latex_instruction_for_stem_subjects():
     assert "$$...$$" in system_text
 
 
+def test_build_prompt_deduplicates_base_system_prompt():
+    prompt = socratic_service.build_prompt(
+        question="什么是加速度",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt=f"  {socratic_service.base_prompt}\n",
+    )
+
+    assert prompt.messages[0]["content"].count(socratic_service.base_prompt) == 1
+
+
 def test_build_prompt_adds_practice_review_context():
     prompt = socratic_service.build_prompt(
         question="选B",
@@ -584,4 +596,3 @@ def test_matched_by_trigger_marks_catch_all_rules():
     assert catch_all.matched_by_trigger is False
     assert math_triggered.matched_by_trigger is True
     assert math_catch_all.matched_by_trigger is False
-

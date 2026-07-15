@@ -195,6 +195,10 @@ async def _read_streaming_response(response) -> str:
     return "".join(chunks)
 
 
+def _fail_normal_chat_retrieval(*args, **kwargs):
+    raise AssertionError("early special routes must skip normal chat RAG retrieval")
+
+
 def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
@@ -244,6 +248,56 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         assert stored_messages[1].suggested_replies == suggested_replies
     finally:
         session.close()
+
+
+def test_suggested_replies_timeout_returns_empty(monkeypatch):
+    async def slow_generate(**kwargs):
+        await asyncio.sleep(0.05)
+        return ["迟到的建议"]
+
+    monkeypatch.setattr(chat_router.suggested_reply_service, "generate", slow_generate)
+    monkeypatch.setattr(chat_router, "SUGGESTED_REPLIES_TIMEOUT_SECONDS", 0.001)
+
+    result = asyncio.run(
+        chat_router._generate_suggested_replies(
+            subject="数学",
+            guidance_stage=GuidanceStage.INITIAL,
+            current_question="函数单调性怎么判断",
+            assistant_response="先看定义域。",
+            history_pairs=[],
+            model_key=None,
+        )
+    )
+
+    assert result == []
+
+
+def test_active_agent_config_cache_reuses_value_until_ttl_expires(monkeypatch):
+    active_config = SimpleNamespace(version=3)
+
+    class FakeDb:
+        def __init__(self) -> None:
+            self.bind = object()
+            self.scalar_calls = 0
+
+        def get_bind(self):
+            return self.bind
+
+        def scalar(self, statement):
+            self.scalar_calls += 1
+            return active_config
+
+    moments = iter([10.0, 20.0, 71.0])
+    db = FakeDb()
+    monkeypatch.setattr(chat_router, "perf_counter", lambda: next(moments))
+    monkeypatch.setattr(chat_router, "_active_agent_config_cache", (None, 0.0, None))
+
+    assert chat_router._get_active_agent_config(db) is active_config
+    assert chat_router._get_active_agent_config(db) is active_config
+    assert db.scalar_calls == 1
+
+    assert chat_router._get_active_agent_config(db) is active_config
+    assert db.scalar_calls == 2
 
 
 def test_short_reply_to_previous_guiding_question_is_reviewed_in_context(monkeypatch):
@@ -2093,7 +2147,7 @@ def test_physics_practice_request_streams_question_bank_assets(monkeypatch):
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [row])
 
@@ -2137,7 +2191,7 @@ def test_physics_practice_request_generates_text_question_when_bank_is_empty(mon
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [])
 
@@ -2167,7 +2221,7 @@ def test_physics_error_record_request_persists_profile_with_explicit_consent(mon
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
 
         async def fail_stream_response(*args, **kwargs):
@@ -2223,7 +2277,7 @@ def test_physics_practice_generation_uses_recorded_error_profile(monkeypatch):
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [])
 
@@ -2253,7 +2307,7 @@ def test_math_error_record_request_persists_profile_with_explicit_consent(monkey
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
 
         async def fail_stream_response(*args, **kwargs):
@@ -2295,7 +2349,7 @@ def test_math_practice_request_generates_text_question_when_bank_is_empty(monkey
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [])
 
@@ -2339,7 +2393,7 @@ def test_english_vocabulary_dna_request_persists_profile(monkeypatch):
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
 
         async def fail_stream_response(*args, **kwargs):
@@ -2378,7 +2432,7 @@ def test_chinese_material_library_request_persists_profile(monkeypatch):
         monkeypatch.setattr(
             chat_router,
             "_retrieve_context_for_chat",
-            lambda *args, **kwargs: RetrievalResult(context="", chunks=[]),
+            _fail_normal_chat_retrieval,
         )
 
         async def fail_stream_response(*args, **kwargs):

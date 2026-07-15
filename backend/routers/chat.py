@@ -50,14 +50,19 @@ from backend.services.metrics_service import (
     chat_fact_mode_total,
     chat_first_token_seconds,
     chat_full_response_seconds,
+    chat_image_understanding_seconds,
+    chat_intent_classify_seconds,
+    chat_practice_review_total,
+    chat_queue_wait_seconds,
+    chat_rag_retrieval_seconds,
     chat_request_total,
+    chat_suggested_replies_seconds,
     chat_stream_disconnect_total,
     chat_stream_safety_rewrite_total,
     filter_blocked_total,
     guidance_stage_total,
     llm_queue_depth,
     sse_active_connections,
-    chat_practice_review_total,
 )
 from backend.services.question_cache_service import QuestionCacheLookup, question_cache_service
 from backend.services.queue_service import QueueFullError, queue_service
@@ -77,6 +82,9 @@ STREAM_HEARTBEAT_SECONDS = 15
 STREAM_FORCE_FLUSH_CHARS = 96
 STREAM_GUARD_TAIL_CHARS = 24
 STREAM_BOUNDARY_CHARS = {"。", "！", "？", "!", "?", "；", ";", "\n"}
+SUGGESTED_REPLIES_TIMEOUT_SECONDS = 2.0
+AGENT_CONFIG_CACHE_TTL_SECONDS = 60.0
+_active_agent_config_cache: tuple[AgentConfig | None, float, int | None] = (None, 0.0, None)
 EMPTY_CHAT_RESPONSE_FALLBACK = (
     "我刚刚没有生成出有效内容。我们换一种方式继续："
     "请你把题目条件或卡住的一步再发我一次，我会先帮你整理已知条件。"
@@ -367,6 +375,22 @@ def _retrieve_context_for_chat(subject: str, question: str, *, student_grade: in
         session.close()
 
 
+def _get_active_agent_config(db: DbSession) -> AgentConfig | None:
+    global _active_agent_config_cache
+
+    now = perf_counter()
+    cached_config, expires_at, cached_bind_id = _active_agent_config_cache
+    bind_id = id(db.get_bind())
+    if cached_bind_id == bind_id and now < expires_at:
+        return cached_config
+
+    active_config = db.scalar(
+        select(AgentConfig).where(AgentConfig.is_active.is_(True)).order_by(AgentConfig.version.desc())
+    )
+    _active_agent_config_cache = (active_config, now + AGENT_CONFIG_CACHE_TTL_SECONDS, bind_id)
+    return active_config
+
+
 def _recommendation_read(row, *, include_solutions: bool) -> QuestionRecommendationRead:
     metadata = row.metadata_json or {}
     document = row.document
@@ -495,14 +519,18 @@ async def _generate_suggested_replies(
     history_pairs: list[tuple[str, str]],
     model_key: str | None,
 ) -> list[str]:
+    started = perf_counter()
     try:
-        return await suggested_reply_service.generate(
-            subject=subject,
-            guidance_stage=guidance_stage,
-            current_question=current_question,
-            assistant_response=assistant_response,
-            history=history_pairs,
-            model_key=model_key,
+        return await asyncio.wait_for(
+            suggested_reply_service.generate(
+                subject=subject,
+                guidance_stage=guidance_stage,
+                current_question=current_question,
+                assistant_response=assistant_response,
+                history=history_pairs,
+                model_key=model_key,
+            ),
+            timeout=SUGGESTED_REPLIES_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         logger.warning(
@@ -513,6 +541,8 @@ async def _generate_suggested_replies(
             str(exc)[:300],
         )
         return []
+    finally:
+        chat_suggested_replies_seconds.observe(perf_counter() - started)
 
 
 def _normalize_practice_assets(raw_assets: Any) -> list[dict[str, Any]]:
@@ -695,14 +725,18 @@ def _build_physics_practice_response(
     issued_turn_index: int,
 ) -> tuple[str, list[dict[str, Any]], int, dict[str, Any]]:
     profile_summary = physics_error_profile_service.profile_summary(db, student_id=student_id, subject=subject)
-    rows = rag_service.recommend_questions(
-        db,
-        subject,
-        question,
-        student_grade=student_grade,
-        limit=1,
-        difficulty_preference="basic",
-    )
+    rag_started = perf_counter()
+    try:
+        rows = rag_service.recommend_questions(
+            db,
+            subject,
+            question,
+            student_grade=student_grade,
+            limit=1,
+            difficulty_preference="basic",
+        )
+    finally:
+        chat_rag_retrieval_seconds.observe(perf_counter() - rag_started)
     if rows:
         content, assets, active_practice = _physics_practice_from_row(rows[0], issued_turn_index=issued_turn_index)
         if profile_summary.get("top_error_label"):
@@ -797,14 +831,18 @@ def _build_math_practice_response(
     issued_turn_index: int,
 ) -> tuple[str, list[dict[str, Any]], int, dict[str, Any]]:
     profile_summary = subject_profile_service.profile_summary(db, student_id=student_id, subject=subject)
-    rows = rag_service.recommend_questions(
-        db,
-        subject,
-        question,
-        student_grade=student_grade,
-        limit=1,
-        difficulty_preference="basic",
-    )
+    rag_started = perf_counter()
+    try:
+        rows = rag_service.recommend_questions(
+            db,
+            subject,
+            question,
+            student_grade=student_grade,
+            limit=1,
+            difficulty_preference="basic",
+        )
+    finally:
+        chat_rag_retrieval_seconds.observe(perf_counter() - rag_started)
     if rows:
         content, assets, active_practice = _math_practice_from_row(rows[0], issued_turn_index=issued_turn_index)
         if profile_summary.get("top_error_label"):
@@ -909,6 +947,59 @@ def _persist_direct_assistant_response(
     guidance_stage_total.labels(stage=guidance_stage.value).inc()
     db.commit()
     return response_text, response_assets
+
+
+def _complete_early_special_response(
+    db: DbSession,
+    *,
+    conversation: Conversation,
+    user_turn_index: int,
+    current_user: User,
+    payload: ChatRequest,
+    request: Request,
+    request_fingerprint: str,
+    subject: str,
+    guidance_stage: GuidanceStage,
+    selected_model_key: str,
+    response_text: str,
+    assets: list[dict[str, Any]] | None = None,
+    context_chunks: int = 0,
+    active_practice: dict[str, Any] | None = None,
+) -> StreamingResponse:
+    response_text, response_assets = _persist_direct_assistant_response(
+        db,
+        conversation=conversation,
+        user_turn_index=user_turn_index,
+        subject=subject,
+        guidance_stage=guidance_stage,
+        selected_model_key=selected_model_key,
+        response_text=response_text,
+        assets=assets,
+        active_practice=active_practice,
+    )
+    if payload.request_id:
+        request_replay_service.mark_completed(
+            user_id=current_user.id,
+            request_id=payload.request_id,
+            question_hash=request_fingerprint,
+            conversation_id=conversation.id,
+            turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=guidance_stage,
+            final_content=response_text,
+            assets=response_assets,
+        )
+    return StreamingResponse(
+        _instant_stream(
+            conversation_id=conversation.id,
+            guidance_stage=guidance_stage.value,
+            content=response_text,
+            request=request,
+            context_chunks=context_chunks,
+            assets=response_assets,
+        ),
+        media_type="text/event-stream",
+    )
 
 
 def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -> Conversation:
@@ -1327,15 +1418,19 @@ async def stream_chat(
             )
 
     if has_image_turn and image_content and attachment_record:
-        image_understanding = await chat_image_understanding_service.understand(
-            image_bytes=image_content,
-            mime_type=attachment_record.mime_type,
-            subject=payload.subject,
-            user_text=payload.message,
-            model_key=selected_model_key,
-            image_path=str(chat_attachment_service.resolve_path(attachment_record.storage_key)),
-            attachment_id=attachment_record.id,
-        )
+        image_understanding_started = perf_counter()
+        try:
+            image_understanding = await chat_image_understanding_service.understand(
+                image_bytes=image_content,
+                mime_type=attachment_record.mime_type,
+                subject=payload.subject,
+                user_text=payload.message,
+                model_key=selected_model_key,
+                image_path=str(chat_attachment_service.resolve_path(attachment_record.storage_key)),
+                attachment_id=attachment_record.id,
+            )
+        finally:
+            chat_image_understanding_seconds.observe(perf_counter() - image_understanding_started)
         attachment_record.ocr_status = {
             "paddleocr": "paddleocr",
             "ocr": "llm_ocr",
@@ -1452,24 +1547,178 @@ async def stream_chat(
     if followup_context:
         prompt_question = followup_context["prompt_question"]
         retrieval_query = followup_context["retrieval_query"]
-    retrieval = await asyncio.to_thread(
-        _retrieve_context_for_chat,
-        subject,
-        retrieval_query,
-        student_grade=current_user.grade,
-    )
-    active_config = db.scalar(select(AgentConfig).where(AgentConfig.is_active.is_(True)).order_by(AgentConfig.version.desc()))
+
+    early_stage = socratic_service.infer_stage(len(history_pairs) // 2)
+    if not has_image_turn and not practice_review_turn:
+        if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
+            user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
+            event = subject_profile_service.record_error_event(
+                db,
+                student_id=current_user.id,
+                subject=subject,
+                conversation_id=conversation.id,
+                message_id=user_message.id if user_message else None,
+                evidence_text=_physics_error_record_evidence(prompt_question, history_pairs),
+            )
+            profile_summary = subject_profile_service.profile_summary(db, student_id=current_user.id, subject=subject)
+            response_text = _subject_error_record_response(subject, event.error_type, event.knowledge_point, profile_summary)
+            return _complete_early_special_response(
+                db,
+                conversation=conversation,
+                user_turn_index=user_turn_index,
+                current_user=current_user,
+                payload=payload,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                subject=subject,
+                guidance_stage=early_stage,
+                selected_model_key=selected_model_key,
+                response_text=response_text,
+            )
+        if subject == "数学" and subject_guidance_service.is_math_practice_request(prompt_question):
+            response_text, response_assets, practice_context_chunks, active_practice = _build_math_practice_response(
+                db,
+                subject=subject,
+                question=retrieval_query,
+                student_id=current_user.id,
+                student_grade=current_user.grade,
+                issued_turn_index=user_turn_index,
+            )
+            return _complete_early_special_response(
+                db,
+                conversation=conversation,
+                user_turn_index=user_turn_index,
+                current_user=current_user,
+                payload=payload,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                subject=subject,
+                guidance_stage=early_stage,
+                selected_model_key=selected_model_key,
+                response_text=response_text,
+                assets=response_assets,
+                context_chunks=practice_context_chunks,
+                active_practice=active_practice,
+            )
+        if subject == "英语" and subject_profile_service.is_vocabulary_request(prompt_question):
+            result = subject_profile_service.add_english_vocabulary(
+                db,
+                student_id=current_user.id,
+                source_text=prompt_question,
+            )
+            return _complete_early_special_response(
+                db,
+                conversation=conversation,
+                user_turn_index=user_turn_index,
+                current_user=current_user,
+                payload=payload,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                subject=subject,
+                guidance_stage=early_stage,
+                selected_model_key=selected_model_key,
+                response_text=_english_vocabulary_response(result),
+            )
+        if subject == "语文" and subject_profile_service.is_chinese_material_request(prompt_question):
+            result = subject_profile_service.add_chinese_material(
+                db,
+                student_id=current_user.id,
+                source_text=prompt_question,
+            )
+            return _complete_early_special_response(
+                db,
+                conversation=conversation,
+                user_turn_index=user_turn_index,
+                current_user=current_user,
+                payload=payload,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                subject=subject,
+                guidance_stage=early_stage,
+                selected_model_key=selected_model_key,
+                response_text=_chinese_material_response(result),
+            )
+        if subject == "物理" and physics_error_profile_service.is_record_request(prompt_question):
+            user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
+            event = physics_error_profile_service.record_event(
+                db,
+                student_id=current_user.id,
+                subject=subject,
+                conversation_id=conversation.id,
+                message_id=user_message.id if user_message else None,
+                evidence_text=_physics_error_record_evidence(prompt_question, history_pairs),
+            )
+            profile_summary = physics_error_profile_service.profile_summary(
+                db,
+                student_id=current_user.id,
+                subject=subject,
+            )
+            response_text = _physics_error_record_response(event.error_type, event.knowledge_point, profile_summary)
+            return _complete_early_special_response(
+                db,
+                conversation=conversation,
+                user_turn_index=user_turn_index,
+                current_user=current_user,
+                payload=payload,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                subject=subject,
+                guidance_stage=early_stage,
+                selected_model_key=selected_model_key,
+                response_text=response_text,
+            )
+        if subject == "物理" and physics_guidance_service.is_practice_request(prompt_question):
+            response_text, response_assets, practice_context_chunks, active_practice = _build_physics_practice_response(
+                db,
+                subject=subject,
+                question=retrieval_query,
+                student_id=current_user.id,
+                student_grade=current_user.grade,
+                issued_turn_index=user_turn_index,
+            )
+            return _complete_early_special_response(
+                db,
+                conversation=conversation,
+                user_turn_index=user_turn_index,
+                current_user=current_user,
+                payload=payload,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                subject=subject,
+                guidance_stage=early_stage,
+                selected_model_key=selected_model_key,
+                response_text=response_text,
+                assets=response_assets,
+                context_chunks=practice_context_chunks,
+                active_practice=active_practice,
+            )
+
+    rag_started = perf_counter()
+    try:
+        retrieval = await asyncio.to_thread(
+            _retrieve_context_for_chat,
+            subject,
+            retrieval_query,
+            student_grade=current_user.grade,
+        )
+    finally:
+        chat_rag_retrieval_seconds.observe(perf_counter() - rag_started)
+    active_config = _get_active_agent_config(db)
     subject_supplement = ((active_config.subject_prompts or {}).get(subject) or None) if active_config else None
     subject_llm_params = _subject_llm_params(active_config.guidance_params if active_config else None, subject)
-    subject_mode_override = await _classify_subject_mode(
-        guidance_params=active_config.guidance_params if active_config else None,
-        question=prompt_question,
-        subject=subject,
-        history_pairs=history_pairs,
-        has_image_turn=has_image_turn,
-        practice_review_turn=practice_review_turn,
-        model_key=selected_model_key,
-    )
+    intent_started = perf_counter()
+    try:
+        subject_mode_override = await _classify_subject_mode(
+            guidance_params=active_config.guidance_params if active_config else None,
+            question=prompt_question,
+            subject=subject,
+            history_pairs=history_pairs,
+            has_image_turn=has_image_turn,
+            practice_review_turn=practice_review_turn,
+            model_key=selected_model_key,
+        )
+    finally:
+        chat_intent_classify_seconds.observe(perf_counter() - intent_started)
     prompt = socratic_service.build_prompt(
         question=prompt_question,
         subject=subject,
@@ -1855,6 +2104,7 @@ async def stream_chat(
             )
         quota_reservation = quota_result
 
+    queue_wait_started = perf_counter()
     try:
         llm_queue_depth.set(queue_service.waiting)
         ticket_context = queue_service.reserve()
@@ -1864,6 +2114,7 @@ async def stream_chat(
             llm_quota_service.release(quota_reservation)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前排队人数较多，请稍后重试") from exc
     finally:
+        chat_queue_wait_seconds.observe(perf_counter() - queue_wait_started)
         llm_queue_depth.set(queue_service.waiting)
 
     async def event_stream():

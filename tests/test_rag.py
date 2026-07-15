@@ -42,6 +42,73 @@ def build_rag_service(tmp_path: Path) -> RagService:
     return RagService(settings=settings, embedder=embedder, vector_store=vector_store)
 
 
+def test_retrieve_logs_vector_failure_and_batches_fallback_embeddings(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+
+    class TrackingEmbedder:
+        def __init__(self) -> None:
+            self.embed_text_calls: list[str] = []
+            self.embed_texts_calls: list[list[str]] = []
+
+        def embed_text(self, text: str) -> list[float]:
+            self.embed_text_calls.append(text)
+            return [1.0, 0.0]
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            self.embed_texts_calls.append(list(texts))
+            return [[1.0, 0.0] for _ in texts]
+
+        @staticmethod
+        def cosine_similarity(left: list[float], right: list[float]) -> float:
+            return sum(a * b for a, b in zip(left, right, strict=False))
+
+    tracker = TrackingEmbedder()
+    rag_service.embedder = tracker
+
+    def fail_vector_query(*args, **kwargs):
+        raise RuntimeError("chroma unavailable")
+
+    logged_exceptions: list[str] = []
+
+    def record_exception(message, *args, **kwargs):
+        logged_exceptions.append(message % args)
+
+    monkeypatch.setattr(rag_service.vector_store, "query", fail_vector_query)
+    monkeypatch.setattr("backend.services.rag_service.logger.exception", record_exception)
+
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        document = KnowledgeDocument(
+            subject="物理",
+            filename="fallback.txt",
+            file_path="/tmp/fallback.txt",
+            mime_type="text/plain",
+            size_bytes=32,
+        )
+        session.add(document)
+        session.flush()
+        contents = ["牛顿第二定律描述合外力与加速度的关系。", "速度描述物体运动快慢。"]
+        session.add_all(
+            [
+                KnowledgeChunk(document_id=document.id, subject="物理", chunk_index=index, content=content)
+                for index, content in enumerate(contents)
+            ]
+        )
+        session.commit()
+
+        result = rag_service.retrieve(session, "物理", "牛顿第二定律")
+
+        assert result.chunks
+        assert tracker.embed_text_calls == ["牛顿第二定律"]
+        assert tracker.embed_texts_calls == [contents]
+        assert logged_exceptions == ["Vector retrieval failed for subject=物理; using database fallback"]
+    finally:
+        session.close()
+
+
 def build_legacy_docx(
     path: Path,
     *,
