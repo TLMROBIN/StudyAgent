@@ -255,7 +255,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                 if ordered_rows:
                     return RetrievalResult(context=self._format_context(ordered_rows), chunks=ordered_rows)
         except Exception:
-            pass
+            logger.exception("Vector retrieval failed for subject=%s; using database fallback", subject)
 
         return self._fallback_retrieve(db, subject, question, profile=profile, student_grade=student_grade)
 
@@ -332,9 +332,11 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
             return RetrievalResult(context="", chunks=[])
 
         query_embedding = self.embedder.embed_text(question)
+        contents = [row.content for row in rows]
+        content_embeddings = self.embedder.embed_texts(contents)
         scored_rows = []
-        for row in rows:
-            score = self.embedder.cosine_similarity(query_embedding, self.embedder.embed_text(row.content))
+        for row, content_embedding in zip(rows, content_embeddings, strict=False):
+            score = self.embedder.cosine_similarity(query_embedding, content_embedding)
             keyword_bonus = sum(1 for char in question[:12] if char and char in row.content) / 20.0
             scored_rows.append((score + keyword_bonus, row))
         best = self._rerank_rows(

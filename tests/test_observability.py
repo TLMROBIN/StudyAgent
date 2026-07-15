@@ -4,6 +4,7 @@ import logging
 
 from backend.middleware.auth import RequestContextMiddleware
 from backend.observability import JsonFormatter
+from backend.services.metrics_service import render_metrics
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -52,3 +53,17 @@ def test_request_context_middleware_sets_request_id_header():
 
     assert response.status_code == 200
     assert response.headers["X-Request-ID"]
+
+
+def test_chat_phase_latency_histograms_are_exported():
+    payload, _ = render_metrics()
+    metrics_text = payload.decode("utf-8")
+
+    for metric_name in (
+        "chat_image_understanding_seconds",
+        "chat_rag_retrieval_seconds",
+        "chat_intent_classify_seconds",
+        "chat_queue_wait_seconds",
+        "chat_suggested_replies_seconds",
+    ):
+        assert f"{metric_name}_count" in metrics_text

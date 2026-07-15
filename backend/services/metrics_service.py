@@ -8,6 +8,20 @@ from starlette.requests import Request
 chat_request_total = Counter("chat_request_total", "Total chat requests")
 chat_first_token_seconds = Histogram("chat_first_token_seconds", "Latency until first streamed token")
 chat_full_response_seconds = Histogram("chat_full_response_seconds", "Full response latency")
+chat_image_understanding_seconds = Histogram(
+    "chat_image_understanding_seconds",
+    "Chat image understanding latency",
+)
+chat_rag_retrieval_seconds = Histogram("chat_rag_retrieval_seconds", "Chat RAG retrieval latency")
+chat_intent_classify_seconds = Histogram(
+    "chat_intent_classify_seconds",
+    "Chat teaching-mode intent classification latency",
+)
+chat_queue_wait_seconds = Histogram("chat_queue_wait_seconds", "Chat LLM queue wait latency")
+chat_suggested_replies_seconds = Histogram(
+    "chat_suggested_replies_seconds",
+    "Chat suggested replies generation latency",
+)
 chat_stream_disconnect_total = Counter("chat_stream_disconnect_total", "Disconnected chat streams")
 chat_stream_safety_rewrite_total = Counter(
     "chat_stream_safety_rewrite_total",

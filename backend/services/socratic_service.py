@@ -134,10 +134,10 @@ class SocraticService:
             raw_max_questions = effective_params.get("max_questions_per_turn")
             if isinstance(raw_max_questions, int) and 1 <= raw_max_questions <= 3:
                 max_questions = raw_max_questions
-        system_sections = [
-            self.base_prompt,
-            system_prompt,
-        ]
+        system_sections = [self.base_prompt]
+        normalized_system_prompt = (system_prompt or "").strip()
+        if normalized_system_prompt and normalized_system_prompt != self.base_prompt:
+            system_sections.append(normalized_system_prompt)
         if subject_supplement and subject_supplement.strip():
             system_sections.append(subject_supplement.strip())
         system_sections.extend([
