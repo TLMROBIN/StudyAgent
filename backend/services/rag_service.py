@@ -227,7 +227,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         profile = self._infer_question_profile(question)
         effective_top_k = self._effective_top_k(subject)
         try:
-            matches = self.vector_store.query(subject, question, max(effective_top_k * 4, effective_top_k))
+            matches = self.vector_store.query(subject, question, effective_top_k * 2)
             if matches:
                 chunk_ids = [match.chunk_id for match in matches]
                 rows = db.scalars(

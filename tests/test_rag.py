@@ -109,6 +109,27 @@ def test_retrieve_logs_vector_failure_and_batches_fallback_embeddings(tmp_path, 
         session.close()
 
 
+def test_retrieve_oversamples_twice_the_effective_top_k(tmp_path, monkeypatch):
+    rag_service = build_rag_service(tmp_path)
+    requested_top_k: list[int] = []
+
+    def record_vector_query(subject: str, question: str, top_k: int):
+        requested_top_k.append(top_k)
+        return []
+
+    monkeypatch.setattr(rag_service.vector_store, "query", record_vector_query)
+
+    engine = create_engine("sqlite:///:memory:")
+    TestingSession = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    session = TestingSession()
+    try:
+        rag_service.retrieve(session, "物理", "牛顿第二定律")
+        assert requested_top_k == [rag_service._effective_top_k("物理") * 2]
+    finally:
+        session.close()
+
+
 def build_legacy_docx(
     path: Path,
     *,
