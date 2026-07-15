@@ -1106,7 +1106,13 @@ async function sendMessage() {
             last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
             queueScrollToBottom()
           }
-        }        
+        }
+        if (event === 'suggested_replies') {
+          const last = messages.value[messages.value.length - 1]
+          if (last && last.role === 'assistant' && Array.isArray(data.suggested_replies)) {
+            last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
+          }
+        }
       },
       { signal: streamAbortController.signal, retryAttempts: 2, retryDelayMs: 1200 },
     )

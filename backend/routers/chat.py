@@ -29,6 +29,7 @@ from backend.models.conversation import (
     normalize_conversation_seed,
 )
 from backend.models.llm_model import LLMModelConfig, QuotaBillingMode
+from backend.models.knowledge import KnowledgeChunk
 from backend.models.schemas import (
     ChatModelOptionRead,
     ChatModelQuotaRead,
@@ -75,6 +76,7 @@ from backend.services.subject_guidance_service import SUBJECT_STRATEGY_RULES, Su
 from backend.services.intent_classify_service import intent_classify_service
 from backend.services.subject_profile_service import subject_profile_service
 from backend.services.suggested_reply_service import suggested_reply_service
+from backend.services.store_service import BaseStore, store
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -84,7 +86,9 @@ STREAM_GUARD_TAIL_CHARS = 24
 STREAM_BOUNDARY_CHARS = {"。", "！", "？", "!", "?", "；", ";", "\n"}
 SUGGESTED_REPLIES_TIMEOUT_SECONDS = 2.0
 AGENT_CONFIG_CACHE_TTL_SECONDS = 60.0
+RAG_SESSION_CACHE_TTL_SECONDS = 600
 _active_agent_config_cache: tuple[AgentConfig | None, float, int | None] = (None, 0.0, None)
+rag_session_store: BaseStore = store
 EMPTY_CHAT_RESPONSE_FALLBACK = (
     "我刚刚没有生成出有效内容。我们换一种方式继续："
     "请你把题目条件或卡住的一步再发我一次，我会先帮你整理已知条件。"
@@ -389,6 +393,99 @@ def _get_active_agent_config(db: DbSession) -> AgentConfig | None:
     )
     _active_agent_config_cache = (active_config, now + AGENT_CONFIG_CACHE_TTL_SECONDS, bind_id)
     return active_config
+
+
+def _rag_session_cache_key(conversation_id: int) -> str:
+    return f"rag_session:{conversation_id}"
+
+
+def _rag_topic_fingerprint(topic: str) -> str:
+    return sha256(topic[:120].encode("utf-8")).hexdigest()[:16]
+
+
+def _rag_topic_seed(
+    retrieval_query: str,
+    history_pairs: list[tuple[str, str]],
+    *,
+    is_short_followup: bool,
+) -> str:
+    if not is_short_followup:
+        return retrieval_query
+    for role, content in reversed(history_pairs):
+        if role != MessageRole.USER.value or not content.strip():
+            continue
+        if not _looks_like_short_followup_answer(content):
+            return content.strip()
+    return retrieval_query
+
+
+def _load_rag_session_cache(
+    db: DbSession,
+    *,
+    conversation_id: int,
+    subject: str,
+    agent_version: int,
+    topic_fingerprint: str,
+) -> RetrievalResult | None:
+    try:
+        cached_raw = rag_session_store.get(_rag_session_cache_key(conversation_id))
+        if not cached_raw:
+            return None
+        cached = json.loads(cached_raw)
+        if not isinstance(cached, dict):
+            return None
+        if (
+            cached.get("subject") != subject
+            or cached.get("agent_ver") != agent_version
+            or cached.get("topic_fp") != topic_fingerprint
+        ):
+            return None
+        chunk_ids = cached.get("chunk_ids")
+        if not isinstance(chunk_ids, list) or not chunk_ids:
+            return None
+        if any(not isinstance(chunk_id, int) or isinstance(chunk_id, bool) for chunk_id in chunk_ids):
+            return None
+        rows = db.scalars(
+            select(KnowledgeChunk)
+            .options(selectinload(KnowledgeChunk.document))
+            .where(KnowledgeChunk.id.in_(chunk_ids), KnowledgeChunk.is_disabled.is_(False))
+        ).all()
+        rows_by_id = {row.id: row for row in rows}
+        if len(rows_by_id) != len(chunk_ids):
+            return None
+        ordered_rows = [rows_by_id[chunk_id] for chunk_id in chunk_ids]
+        return RetrievalResult(context=rag_service.format_context(ordered_rows), chunks=ordered_rows)
+    except Exception:
+        logger.exception("RAG session cache read failed for conversation_id=%s", conversation_id)
+        return None
+
+
+def _store_rag_session_cache(
+    *,
+    conversation_id: int,
+    subject: str,
+    agent_version: int,
+    topic_fingerprint: str,
+    chunks: list[KnowledgeChunk],
+) -> None:
+    if not chunks:
+        return
+    try:
+        rag_session_store.set(
+            _rag_session_cache_key(conversation_id),
+            json.dumps(
+                {
+                    "subject": subject,
+                    "agent_ver": agent_version,
+                    "topic_fp": topic_fingerprint,
+                    "chunk_ids": [chunk.id for chunk in chunks],
+                },
+                ensure_ascii=False,
+            ),
+            ttl_seconds=RAG_SESSION_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("RAG session cache write failed for conversation_id=%s", conversation_id)
 
 
 def _recommendation_read(row, *, include_solutions: bool) -> QuestionRecommendationRead:
@@ -1693,17 +1790,42 @@ async def stream_chat(
                 active_practice=active_practice,
             )
 
-    rag_started = perf_counter()
-    try:
-        retrieval = await asyncio.to_thread(
-            _retrieve_context_for_chat,
-            subject,
-            retrieval_query,
-            student_grade=current_user.grade,
-        )
-    finally:
-        chat_rag_retrieval_seconds.observe(perf_counter() - rag_started)
     active_config = _get_active_agent_config(db)
+    rag_agent_version = active_config.version if active_config else 0
+    rag_topic_seed = _rag_topic_seed(
+        retrieval_query,
+        history_pairs,
+        is_short_followup=followup_context is not None,
+    )
+    rag_topic_fingerprint = _rag_topic_fingerprint(rag_topic_seed)
+    retrieval = None
+    if not has_image_turn:
+        retrieval = _load_rag_session_cache(
+            db,
+            conversation_id=conversation.id,
+            subject=subject,
+            agent_version=rag_agent_version,
+            topic_fingerprint=rag_topic_fingerprint,
+        )
+    if retrieval is None:
+        rag_started = perf_counter()
+        try:
+            retrieval = await asyncio.to_thread(
+                _retrieve_context_for_chat,
+                subject,
+                retrieval_query,
+                student_grade=current_user.grade,
+            )
+        finally:
+            chat_rag_retrieval_seconds.observe(perf_counter() - rag_started)
+        if not has_image_turn:
+            _store_rag_session_cache(
+                conversation_id=conversation.id,
+                subject=subject,
+                agent_version=rag_agent_version,
+                topic_fingerprint=rag_topic_fingerprint,
+                chunks=retrieval.chunks,
+            )
     subject_supplement = ((active_config.subject_prompts or {}).get(subject) or None) if active_config else None
     subject_llm_params = _subject_llm_params(active_config.guidance_params if active_config else None, subject)
     intent_started = perf_counter()
@@ -2271,6 +2393,14 @@ async def stream_chat(
             if should_send_done:
                 emitted_text = emitted_text.strip()
                 await release_ticket_once()
+                yield _sse_event(
+                    "done",
+                    {
+                        "content": emitted_text,
+                        "assets": [],
+                        "suggested_replies": [],
+                    },
+                )
                 suggested_replies = await _generate_suggested_replies(
                     subject=subject,
                     guidance_stage=prompt.stage,
@@ -2279,7 +2409,8 @@ async def stream_chat(
                     history_pairs=history_pairs,
                     model_key=selected_model_key,
                 )
-                yield _sse_event("done", {"content": emitted_text, "suggested_replies": suggested_replies})
+                if suggested_replies:
+                    yield _sse_event("suggested_replies", {"suggested_replies": suggested_replies})
         finally:
             if llm_stream is not None:
                 with suppress(Exception):

@@ -253,7 +253,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                 )
                 ordered_rows = self._exclude_disabled_question_rows(ordered_rows)
                 if ordered_rows:
-                    return RetrievalResult(context=self._format_context(ordered_rows), chunks=ordered_rows)
+                    return RetrievalResult(context=self.format_context(ordered_rows), chunks=ordered_rows)
         except Exception:
             logger.exception("Vector retrieval failed for subject=%s; using database fallback", subject)
 
@@ -347,7 +347,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
             subject=subject,
         )
         best = self._exclude_disabled_question_rows(best)
-        return RetrievalResult(context=self._format_context(best), chunks=best)
+        return RetrievalResult(context=self.format_context(best), chunks=best)
 
     def ingest_document_text(self, db: Session, document: KnowledgeDocument, text: str) -> int:
         prepared_chunks = self.prepare_document_chunks(document, text)
@@ -1336,7 +1336,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
             score -= 0.08
         return score
 
-    def _format_context(self, rows: list[KnowledgeChunk]) -> str:
+    def format_context(self, rows: list[KnowledgeChunk]) -> str:
         parts: list[str] = []
         for index, row in enumerate(rows, start=1):
             labels = [f"资料片段 {index}"]

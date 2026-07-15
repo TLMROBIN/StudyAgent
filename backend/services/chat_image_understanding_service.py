@@ -233,13 +233,22 @@ class ChatImageUnderstandingService:
             source="multimodal",
         )
         multimodal_summary = structured.prompt_summary if structured is not None else self.normalize_text(multimodal_raw)
-        ocr_raw_text = await self._extract_ocr_supplement(
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-            subject=subject,
-            model_key=model_key,
-            image_path=image_path,
+        skip_ocr_supplement = (
+            structured is not None
+            and structured.confidence_level == "high"
+            and structured.is_academic
+            and bool(structured.question_text)
+            and not structured.formulas_latex
         )
+        ocr_raw_text = ""
+        if not skip_ocr_supplement:
+            ocr_raw_text = await self._extract_ocr_supplement(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                subject=subject,
+                model_key=model_key,
+                image_path=image_path,
+            )
         normalized_ocr = self.normalize_text(ocr_raw_text)
         if structured is not None:
             structured.ocr_raw_text = ocr_raw_text
