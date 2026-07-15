@@ -221,6 +221,28 @@ class LLMService:
         ]
         self._model_status_cache: dict[str, tuple[datetime, dict[str, str]]] = {}
         self._model_status_ttl_seconds = 300
+        self._chat_http_client: httpx.AsyncClient | None = None
+        self._vision_http_client: httpx.AsyncClient | None = None
+
+    async def _get_chat_http_client(self) -> httpx.AsyncClient:
+        if self._chat_http_client is None or getattr(self._chat_http_client, "is_closed", False):
+            timeout = httpx.Timeout(float(self.settings.llm_request_timeout_seconds))
+            self._chat_http_client = httpx.AsyncClient(timeout=timeout)
+        return self._chat_http_client
+
+    async def _get_vision_http_client(self) -> httpx.AsyncClient:
+        if self._vision_http_client is None or getattr(self._vision_http_client, "is_closed", False):
+            timeout = httpx.Timeout(float(self.settings.effective_chat_image_vision_timeout_seconds))
+            self._vision_http_client = httpx.AsyncClient(timeout=timeout)
+        return self._vision_http_client
+
+    async def aclose(self) -> None:
+        clients = (self._chat_http_client, self._vision_http_client)
+        self._chat_http_client = None
+        self._vision_http_client = None
+        for client in clients:
+            if client is not None and not getattr(client, "is_closed", False):
+                await client.aclose()
 
     def chat_model_options(self) -> list[dict[str, str]]:
         configured = self._database_chat_model_options()
@@ -317,11 +339,10 @@ class LLMService:
             "max_completion_tokens": 8,
         }
         url = self._chat_completions_url(provider.base_url)
-        timeout = httpx.Timeout(float(self.settings.llm_request_timeout_seconds))
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
+            client = await self._get_chat_http_client()
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
             return True, ""
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -556,6 +577,7 @@ class LLMService:
                     max_completion_tokens=max_completion_tokens,
                     temperature=temperature,
                     timeout_seconds=self.settings.llm_request_timeout_seconds,
+                    client_kind="chat",
                 )
                 if text.strip():
                     self._reset_provider(provider)
@@ -772,58 +794,57 @@ class LLMService:
         if max_completion_tokens:
             payload["max_completion_tokens"] = max_completion_tokens
         url = self._chat_completions_url(provider.base_url)
-        timeout = httpx.Timeout(self.settings.llm_request_timeout_seconds)
         raw_event_count = 0
         content_event_count = 0
         reasoning_event_count = 0
         usage_event_count = 0
         finish_reasons: list[str] = []
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    payload = json.loads(data)
-                    raw_event_count += 1
-                    usage = self._parse_usage(payload)
-                    if usage is not None:
-                        usage_event_count += 1
+        client = await self._get_chat_http_client()
+        async with client.stream("POST", url, headers=headers, json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                payload = json.loads(data)
+                raw_event_count += 1
+                usage = self._parse_usage(payload)
+                if usage is not None:
+                    usage_event_count += 1
+                    yield LLMStreamEvent(
+                        type="usage",
+                        usage=usage,
+                        provider_name=provider.name,
+                        provider_model=provider.model,
+                    )
+                    continue
+                choice = payload.get("choices", [{}])[0]
+                finish_reason = choice.get("finish_reason")
+                if finish_reason:
+                    finish_reasons.append(str(finish_reason))
+                delta = _content_text(choice.get("delta", {}).get("content"))
+                message_content = _content_text(choice.get("message", {}).get("content"))
+                reasoning_content = _content_text(choice.get("delta", {}).get("reasoning")) or _content_text(
+                    choice.get("delta", {}).get("reasoning_content")
+                )
+                if reasoning_content:
+                    reasoning_event_count += 1
+                text = delta or message_content
+                if text and emitted_text and text.startswith(emitted_text):
+                    text = text[len(emitted_text) :]
+                if text:
+                    content_event_count += 1
+                    visible_text = content_filter.feed(text)
+                    if visible_text:
+                        emitted_text += visible_text
                         yield LLMStreamEvent(
-                            type="usage",
-                            usage=usage,
+                            type="chunk",
+                            content=visible_text,
                             provider_name=provider.name,
                             provider_model=provider.model,
                         )
-                        continue
-                    choice = payload.get("choices", [{}])[0]
-                    finish_reason = choice.get("finish_reason")
-                    if finish_reason:
-                        finish_reasons.append(str(finish_reason))
-                    delta = _content_text(choice.get("delta", {}).get("content"))
-                    message_content = _content_text(choice.get("message", {}).get("content"))
-                    reasoning_content = _content_text(choice.get("delta", {}).get("reasoning")) or _content_text(
-                        choice.get("delta", {}).get("reasoning_content")
-                    )
-                    if reasoning_content:
-                        reasoning_event_count += 1
-                    text = delta or message_content
-                    if text and emitted_text and text.startswith(emitted_text):
-                        text = text[len(emitted_text) :]
-                    if text:
-                        content_event_count += 1
-                        visible_text = content_filter.feed(text)
-                        if visible_text:
-                            emitted_text += visible_text
-                            yield LLMStreamEvent(
-                                type="chunk",
-                                content=visible_text,
-                                provider_name=provider.name,
-                                provider_model=provider.model,
-                            )
 
         final_visible_text = content_filter.flush()
         if final_visible_text:
@@ -961,6 +982,7 @@ class LLMService:
         max_completion_tokens: int | None = None,
         temperature: float = 0.1,
         timeout_seconds: float | None = None,
+        client_kind: Literal["chat", "vision"] = "vision",
     ) -> str:
         headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
         payload = {
@@ -973,10 +995,14 @@ class LLMService:
             payload["max_completion_tokens"] = max_completion_tokens
         url = self._chat_completions_url(provider.base_url)
         timeout = httpx.Timeout(timeout_seconds or self.settings.effective_chat_image_vision_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            body = response.json()
+        client = (
+            await self._get_chat_http_client()
+            if client_kind == "chat"
+            else await self._get_vision_http_client()
+        )
+        response = await client.post(url, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
         message = body.get("choices", [{}])[0].get("message", {})
         return _content_text(message.get("content", ""))
 

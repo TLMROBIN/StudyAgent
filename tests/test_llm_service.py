@@ -547,9 +547,10 @@ def test_image_completion_uses_vision_specific_timeout(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        async def post(self, url, *, headers, json):
+        async def post(self, url, *, headers, json, timeout):
             captured["url"] = url
             captured["payload"] = json
+            captured["request_timeout"] = timeout
             return FakeResponse()
 
     monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
@@ -560,6 +561,8 @@ def test_image_completion_uses_vision_specific_timeout(monkeypatch):
     assert captured["url"] == "https://vision.example/v1/chat/completions"
     assert captured["timeout"].connect == 60
     assert captured["timeout"].read == 60
+    assert captured["request_timeout"].connect == 60
+    assert captured["request_timeout"].read == 60
 
 
 def test_image_completion_uses_chat_image_vision_timeout_setting(monkeypatch):
@@ -590,7 +593,8 @@ def test_image_completion_uses_chat_image_vision_timeout_setting(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        async def post(self, url, *, headers, json):
+        async def post(self, url, *, headers, json, timeout):
+            captured["request_timeout"] = timeout
             return FakeResponse()
 
     monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
@@ -600,6 +604,43 @@ def test_image_completion_uses_chat_image_vision_timeout_setting(monkeypatch):
     assert result == "题干：如图所示。"
     assert captured["timeout"].connect == 77
     assert captured["timeout"].read == 77
+    assert captured["request_timeout"].connect == 77
+    assert captured["request_timeout"].read == 77
+
+
+def test_llm_service_reuses_purpose_specific_http_clients_and_closes_them(monkeypatch):
+    service = LLMService()
+    clients: list[object] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+            self.is_closed = False
+            clients.append(self)
+
+        async def aclose(self):
+            self.is_closed = True
+
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    async def exercise_pool():
+        chat_first = await service._get_chat_http_client()
+        chat_second = await service._get_chat_http_client()
+        vision_first = await service._get_vision_http_client()
+        vision_second = await service._get_vision_http_client()
+        assert chat_first is chat_second
+        assert vision_first is vision_second
+        assert chat_first is not vision_first
+        await service.aclose()
+
+    asyncio.run(exercise_pool())
+
+    assert len(clients) == 2
+    assert clients[0].timeout.connect == service.settings.llm_request_timeout_seconds
+    assert clients[1].timeout.connect == service.settings.effective_chat_image_vision_timeout_seconds
+    assert all(client.is_closed for client in clients)
+    assert service._chat_http_client is None
+    assert service._vision_http_client is None
 
 
 def test_stream_events_pass_subject_llm_params_to_payload(monkeypatch):

@@ -17,6 +17,7 @@ from backend.security import get_password_hash
 from backend.services.auth_service import auth_service
 from backend.services.chat_image_understanding_service import stop_paddleocr_worker, warmup_paddleocr_worker
 from backend.services.gpu_runtime import log_gpu_runtime_status
+from backend.services.llm_service import llm_service
 from backend.services.metrics_service import render_metrics
 from backend.services.rag_service import rag_service
 from backend.services.socratic_service import socratic_service
@@ -82,10 +83,15 @@ async def lifespan(_: FastAPI):
         log_gpu_runtime_status("backend", requested_device=settings.mineru_device, python_bin=settings.mineru_python_bin)
     warmup_task = asyncio.create_task(asyncio.to_thread(warmup_embedding_model))
     ocr_warmup_task = asyncio.create_task(asyncio.to_thread(warmup_chat_image_ocr_worker))
-    yield
-    warmup_task.cancel()
-    ocr_warmup_task.cancel()
-    stop_paddleocr_worker()
+    try:
+        yield
+    finally:
+        warmup_task.cancel()
+        ocr_warmup_task.cancel()
+        try:
+            stop_paddleocr_worker()
+        finally:
+            await llm_service.aclose()
 
 
 settings = get_settings()
