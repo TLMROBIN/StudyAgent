@@ -1,8 +1,9 @@
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
@@ -27,8 +28,20 @@ class TokenResponse(BaseModel):
 
 
 class StudentLoginRequest(BaseModel):
-    username: str = Field(validation_alias=AliasChoices("username", "student_no"))
+    username: str
     password: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_student_no(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or "student_no" not in data:
+            return data
+
+        normalized = dict(data)
+        if "username" not in normalized:
+            normalized["username"] = normalized["student_no"]
+        normalized.pop("student_no", None)
+        return normalized
 
 
 class StaffLoginRequest(BaseModel):
