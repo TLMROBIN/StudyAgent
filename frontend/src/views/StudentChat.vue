@@ -111,6 +111,10 @@ const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
 const historyOpen = ref(false)
 const settingsOpen = ref(false)
+const resolveDialogVisible = ref(false)
+const resolveSubmitting = ref(false)
+const resolveReflection = ref('')
+const currentConversationResolved = ref(false)
 const passwordDialogVisible = ref(false)
 const passwordChanging = ref(false)
 const deletingConversationIds = ref<Set<number>>(new Set())
@@ -173,6 +177,23 @@ const serviceStatusLabel = computed(() => {
   }
   return modelStatusLoading.value ? '正在检测答疑服务' : '答疑服务状态待确认'
 })
+const sessionStageLabel = computed(() => (
+  currentConversationResolved.value ? '已完成本次思考' : stageLabel(guidanceStage.value)
+))
+const resolveReflectionLength = computed(() => resolveReflection.value.trim().length)
+const canSkipReflection = computed(() => resolveReflectionLength.value === 0)
+const canSubmitReflection = computed(() => (
+  resolveReflectionLength.value >= 20 && resolveReflectionLength.value <= 500
+))
+const resolveReflectionHint = computed(() => {
+  if (resolveReflectionLength.value === 0) {
+    return '可以直接跳过；如果写下关键思路，请至少填写 20 字。'
+  }
+  if (resolveReflectionLength.value < 20) {
+    return `还差 ${20 - resolveReflectionLength.value} 字，或清空后选择跳过反思。`
+  }
+  return '这段总结会帮助你以后回看自己的思路。'
+})
 const canSend = computed(() => (
   Boolean(form.message.trim() || pendingImageFile.value)
   && selectedModelStatus.value !== 'unavailable'
@@ -216,6 +237,11 @@ function handleMessageInputFocus() {
 async function loadConversations() {
   const { data } = await api.get<ConversationSummary[]>('/chat/history')
   conversations.value = data
+  if (currentConversationId.value) {
+    currentConversationResolved.value = Boolean(
+      data.find((item) => item.id === currentConversationId.value)?.resolved,
+    )
+  }
 }
 
 async function loadNotifications() {
@@ -301,6 +327,7 @@ async function openConversation(id: number) {
   form.roleId = null
   previousSubject.value = data.subject
   guidanceStage.value = data.guidance_stage
+  currentConversationResolved.value = data.resolved
   messages.value = data.messages.map((item) => ({
     role: item.role,
     content: item.content,
@@ -316,40 +343,83 @@ async function openConversation(id: number) {
   queueScrollToBottom()
 }
 
-async function toggleResolved() {
-  if (!currentConversationId.value) {
+function resetResolveDialog() {
+  if (resolveSubmitting.value) {
     return
   }
-  let reflection: string | null = null
+  resolveDialogVisible.value = false
+  resolveReflection.value = ''
+}
+
+function openResolveDialog() {
+  if (!currentConversationId.value || currentConversationResolved.value || sending.value) {
+    return
+  }
+  resolveReflection.value = ''
+  resolveDialogVisible.value = true
+}
+
+async function completeConversation(skipReflection: boolean) {
+  if (!currentConversationId.value || resolveSubmitting.value) {
+    return
+  }
+  if (skipReflection ? !canSkipReflection.value : !canSubmitReflection.value) {
+    return
+  }
+  const reflection = skipReflection ? null : resolveReflection.value.trim()
+  resolveSubmitting.value = true
   try {
-    const result = await ElMessageBox.prompt(
-      '可以用自己的话写下关键思路（可跳过，不影响完成对话）。',
-      '完成本次思考',
-      {
-        confirmButtonText: '提交并完成',
-        cancelButtonText: '跳过反思',
-        inputType: 'textarea',
-        inputPlaceholder: '例如：我先确定了受力方向，再利用平衡条件判断……',
-        inputValidator: (value) => {
-          const length = (value || '').trim().length
-          return length === 0 || (length >= 20 && length <= 500) || '反思须为 20–500 字，或留空跳过'
-        },
-      },
-    )
-    reflection = result.value?.trim() || null
-  } catch {
-    reflection = null
+    const { data } = await api.post<ChatConversationRead>(`/chat/${currentConversationId.value}/resolve`, {
+      resolved: true,
+      reflection,
+    })
+    currentConversationResolved.value = data.resolved
+    resolveReflection.value = ''
+    resolveDialogVisible.value = false
+    if (data.incentive?.points_awarded) {
+      ElMessage.success(`完成思考，成长积分 +${data.incentive.points_awarded}`)
+    } else {
+      ElMessage.success('已完成本次思考')
+    }
+    await loadIncentiveSummary()
+    try {
+      await loadConversations()
+    } catch (refreshError) {
+      console.error(refreshError)
+      ElMessage.warning('完成状态已保存，但学习记录暂未刷新。稍后打开历史记录时可再试。')
+    }
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('暂时无法完成本次思考，请稍后重试。你的反思内容仍保留在这里。')
+  } finally {
+    resolveSubmitting.value = false
   }
-  const { data } = await api.post<{ incentive?: IncentiveGrant | null }>(`/chat/${currentConversationId.value}/resolve`, {
-    resolved: true,
-    reflection,
-  })
-  if (data.incentive?.points_awarded) {
-    ElMessage.success(`完成思考，成长积分 +${data.incentive.points_awarded}`)
+}
+
+async function restoreConversation() {
+  if (!currentConversationId.value || !currentConversationResolved.value || sending.value || resolveSubmitting.value) {
+    return
   }
-  await loadIncentiveSummary()
-  await loadConversations()
-  ElMessage.success('已标记为已解决')
+  resolveSubmitting.value = true
+  try {
+    const { data } = await api.post<ChatConversationRead>(`/chat/${currentConversationId.value}/resolve`, {
+      resolved: false,
+      reflection: null,
+    })
+    currentConversationResolved.value = data.resolved
+    ElMessage.success('已恢复为继续思考')
+    try {
+      await loadConversations()
+    } catch (refreshError) {
+      console.error(refreshError)
+      ElMessage.warning('恢复状态已保存，但学习记录暂未刷新。稍后打开历史记录时可再试。')
+    }
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('暂时无法恢复这次思考，请稍后重试。')
+  } finally {
+    resolveSubmitting.value = false
+  }
 }
 
 async function loadIncentiveSummary() {
@@ -362,6 +432,7 @@ async function loadIncentiveSummary() {
 
 function startNewConversation(options: { subject?: string } = {}) {
   currentConversationId.value = null
+  currentConversationResolved.value = false
   messages.value = []
   guidanceStage.value = 'initial_guidance'
   if (options.subject) {
@@ -1254,6 +1325,7 @@ onBeforeUnmount(() => {
     modelStatusTimer = null
   }
   stopStreaming(false)
+  resetResolveDialog()
   resetCropDialog()
   resetPendingImage()
   clearLocalAttachmentUrls()
@@ -1279,7 +1351,7 @@ onMounted(async () => {
         <div class="study-session-heading">
           <div class="study-session-title-row">
             <h1>把问题一步步想清楚</h1>
-            <span class="study-stage-chip">{{ stageLabel(guidanceStage) }}</span>
+            <span class="study-stage-chip" :data-complete="currentConversationResolved">{{ sessionStageLabel }}</span>
           </div>
           <p>从你卡住的地方开始，我会用问题陪你找到下一步。</p>
         </div>
@@ -1287,19 +1359,20 @@ onMounted(async () => {
           <el-select
             v-model="form.subject"
             class="session-subject-select"
-            :disabled="sending"
+            :disabled="sending || resolveSubmitting"
             placeholder="选择学科"
             aria-label="当前答疑学科"
             @change="handleSubjectChange"
           >
             <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
           </el-select>
-          <button type="button" class="study-tool-button" @click="historyOpen = true">
+          <button type="button" class="study-tool-button" :disabled="resolveSubmitting" @click="historyOpen = true">
             历史<span v-if="conversations.length" class="study-tool-count">{{ conversations.length }}</span>
           </button>
           <button
             type="button"
             class="study-tool-button"
+            :disabled="resolveSubmitting"
             :aria-expanded="settingsOpen"
             aria-controls="study-session-settings"
             @click="settingsOpen = !settingsOpen"
@@ -1310,12 +1383,18 @@ onMounted(async () => {
             v-if="currentConversationId"
             type="button"
             class="study-tool-button"
-            :disabled="sending"
-            @click="toggleResolved"
+            :class="{ 'study-tool-button--resolved': currentConversationResolved }"
+            :disabled="sending || resolveSubmitting"
+            @click="currentConversationResolved ? restoreConversation() : openResolveDialog()"
           >
-            标记已解决
+            {{ currentConversationResolved ? '恢复继续思考' : '完成本次思考' }}
           </button>
-          <button type="button" class="primary-button study-new-question" :disabled="sending" @click="startNewConversation()">
+          <button
+            type="button"
+            class="primary-button study-new-question"
+            :disabled="sending || resolveSubmitting"
+            @click="startNewConversation()"
+          >
             新问题
           </button>
         </div>
@@ -1714,6 +1793,65 @@ onMounted(async () => {
         </div>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="resolveDialogVisible"
+      class="resolve-dialog"
+      title="完成本次思考"
+      width="min(92vw, 540px)"
+      destroy-on-close
+      :close-on-click-modal="false"
+      :close-on-press-escape="!resolveSubmitting"
+      :show-close="!resolveSubmitting"
+      @closed="resetResolveDialog"
+    >
+      <div class="resolve-dialog__content">
+        <p>如果愿意，可以用自己的话写下关键思路；也可以明确跳过反思，不会影响完成本次对话。</p>
+        <label for="resolve-reflection">关键思路（可选）</label>
+        <el-input
+          id="resolve-reflection"
+          v-model="resolveReflection"
+          type="textarea"
+          :rows="5"
+          maxlength="500"
+          show-word-limit
+          resize="none"
+          :disabled="resolveSubmitting"
+          placeholder="例如：我先确定受力方向，再利用平衡条件判断……"
+          aria-label="本次思考的关键思路"
+        />
+        <p
+          class="resolve-dialog__hint"
+          :class="{ 'resolve-dialog__hint--warning': resolveReflectionLength > 0 && !canSubmitReflection }"
+          aria-live="polite"
+        >
+          {{ resolveReflectionHint }}
+        </p>
+      </div>
+      <template #footer>
+        <div class="resolve-dialog__actions">
+          <button type="button" class="ghost-button" :disabled="resolveSubmitting" @click="resetResolveDialog">
+            取消
+          </button>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="resolveSubmitting || !canSkipReflection"
+            @click="completeConversation(true)"
+          >
+            跳过反思并完成
+          </button>
+          <button
+            type="button"
+            class="primary-button"
+            :disabled="resolveSubmitting || !canSubmitReflection"
+            @click="completeConversation(false)"
+          >
+            {{ resolveSubmitting ? '正在保存...' : '提交反思并完成' }}
+          </button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="cropDialogVisible"

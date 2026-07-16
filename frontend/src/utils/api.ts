@@ -77,9 +77,15 @@ export interface AgentRolePublic {
 }
 
 export interface ChatConversationRead {
+  id: number
   subject: string
+  topic: string
   guidance_stage: string
+  resolved: boolean
+  duration_seconds: number
+  created_at: string
   messages: ChatMessageRead[]
+  incentive?: IncentiveGrant | null
 }
 
 export interface StreamChatRequest {

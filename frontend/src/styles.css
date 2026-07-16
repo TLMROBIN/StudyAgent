@@ -806,6 +806,11 @@ textarea {
   padding: 4px 10px;
 }
 
+.study-stage-chip[data-complete="true"] {
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  background: rgba(15, 118, 110, 0.12);
+}
+
 .study-session-tools {
   display: flex;
   align-items: center;
@@ -853,6 +858,12 @@ textarea {
 .study-tool-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.study-tool-button--resolved {
+  border-color: rgba(15, 118, 110, 0.26);
+  background: rgba(15, 118, 110, 0.07);
+  color: var(--brand);
 }
 
 .study-tool-count {
@@ -1990,6 +2001,55 @@ textarea {
   gap: 16px;
 }
 
+.resolve-dialog .el-dialog__body {
+  padding-top: 8px;
+}
+
+.resolve-dialog__content {
+  display: grid;
+  gap: 12px;
+}
+
+.resolve-dialog__content > p,
+.resolve-dialog__hint {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.resolve-dialog__content > label {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.resolve-dialog__hint {
+  min-height: 24px;
+  font-size: 13px;
+}
+
+.resolve-dialog__hint--warning {
+  color: #9a3412;
+}
+
+.resolve-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.resolve-dialog__actions .ghost-button,
+.resolve-dialog__actions .primary-button {
+  min-height: 44px;
+  border-radius: 10px;
+}
+
+.resolve-dialog__actions .ghost-button:first-child {
+  margin-inline-end: auto;
+}
+
 .preview-chunk-card {
   display: grid;
   gap: 14px;
@@ -2434,6 +2494,20 @@ textarea {
 
   .starter-prompt {
     max-width: none;
+  }
+
+  .resolve-dialog__actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .resolve-dialog__actions .ghost-button,
+  .resolve-dialog__actions .primary-button {
+    width: 100%;
+  }
+
+  .resolve-dialog__actions .ghost-button:first-child {
+    margin-inline-end: 0;
   }
 }
 
