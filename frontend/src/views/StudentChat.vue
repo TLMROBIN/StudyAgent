@@ -15,9 +15,12 @@ import {
   fetchActiveNotifications,
   fetchChatModelStatuses,
   fetchChatModels,
+  fetchIncentiveSummary,
   fetchQuestionRecommendations,
   streamChat,
   type KnowledgeAsset,
+  type IncentiveGrant,
+  type IncentiveSummary,
   type NotificationItem,
   type QuestionRecommendation,
 } from '../utils/api'
@@ -89,6 +92,16 @@ const passwordForm = reactive({
 const conversations = ref<ConversationSummary[]>([])
 const messages = ref<ChatMessageRead[]>([])
 const notifications = ref<NotificationItem[]>([])
+const incentiveSummary = ref<IncentiveSummary>({
+  total_points: 0,
+  level: 1,
+  next_level_points: null,
+  current_streak_days: 0,
+  longest_streak_days: 0,
+  badges: [],
+  counters: {},
+  has_unread_praise: false,
+})
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
 const passwordDialogVisible = ref(false)
@@ -312,9 +325,44 @@ async function toggleResolved() {
   if (!currentConversationId.value) {
     return
   }
-  await api.post(`/chat/${currentConversationId.value}/resolve`, { resolved: true })
+  let reflection: string | null = null
+  try {
+    const result = await ElMessageBox.prompt(
+      '可以用自己的话写下关键思路（可跳过，不影响完成对话）。',
+      '完成本次思考',
+      {
+        confirmButtonText: '提交并完成',
+        cancelButtonText: '跳过反思',
+        inputType: 'textarea',
+        inputPlaceholder: '例如：我先确定了受力方向，再利用平衡条件判断……',
+        inputValidator: (value) => {
+          const length = (value || '').trim().length
+          return length === 0 || (length >= 20 && length <= 500) || '反思须为 20–500 字，或留空跳过'
+        },
+      },
+    )
+    reflection = result.value?.trim() || null
+  } catch {
+    reflection = null
+  }
+  const { data } = await api.post<{ incentive?: IncentiveGrant | null }>(`/chat/${currentConversationId.value}/resolve`, {
+    resolved: true,
+    reflection,
+  })
+  if (data.incentive?.points_awarded) {
+    ElMessage.success(`完成思考，成长积分 +${data.incentive.points_awarded}`)
+  }
+  await loadIncentiveSummary()
   await loadConversations()
   ElMessage.success('已标记为已解决')
+}
+
+async function loadIncentiveSummary() {
+  try {
+    incentiveSummary.value = await fetchIncentiveSummary()
+  } catch {
+    // 激励默认关闭或临时不可用时不影响答疑主链路。
+  }
 }
 
 function startNewConversation(options: { subject?: string } = {}) {
@@ -1152,6 +1200,16 @@ async function sendMessage() {
             last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
           }
         }
+        if (event === 'incentive') {
+          const grant = data as unknown as IncentiveGrant
+          if (grant.points_awarded > 0) {
+            ElMessage.success(`认真思考已记录，成长积分 +${grant.points_awarded}`)
+          }
+          if (grant.new_badges?.length) {
+            ElMessage.success(`获得新徽章：${grant.new_badges.join('、')}`)
+          }
+          void loadIncentiveSummary()
+        }
       },
       { signal: streamAbortController.signal, retryAttempts: 2, retryDelayMs: 1200 },
     )
@@ -1161,6 +1219,7 @@ async function sendMessage() {
       queueScrollToBottom()
     }
     await loadConversations()
+    await loadIncentiveSummary()
     await loadChatModels()
     resetRecommendations()
   } catch (error) {
@@ -1205,6 +1264,7 @@ onMounted(async () => {
     void refreshChatModelStatuses()
   }, MODEL_STATUS_REFRESH_MS)
   await loadConversations()
+  await loadIncentiveSummary()
 })
 </script>
 
@@ -1222,6 +1282,11 @@ onMounted(async () => {
           <button class="ghost-button" @click="loadConversations">刷新</button>
         </div>
       </div>
+      <RouterLink to="/student/growth" class="incentive-summary-card">
+        <div><span>成长积分</span><strong>{{ incentiveSummary.total_points }}</strong></div>
+        <div><span>等级</span><strong>L{{ incentiveSummary.level }}</strong></div>
+        <div><span>连续学习</span><strong>{{ incentiveSummary.current_streak_days }} 天</strong></div>
+      </RouterLink>
       <div class="conversation-list">
         <article
           v-for="item in conversations"

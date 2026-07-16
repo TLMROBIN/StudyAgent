@@ -789,3 +789,110 @@ function buildStreamChatFormData(payload: StreamChatRequest): FormData {
 
   return formData
 }
+
+export interface IncentiveSummary {
+  total_points: number
+  level: number
+  next_level_points: number | null
+  current_streak_days: number
+  longest_streak_days: number
+  badges: string[]
+  counters: Record<string, number | string[]>
+  has_unread_praise: boolean
+}
+
+export interface IncentiveGrant {
+  points_awarded: number
+  awarded_events: string[]
+  new_badges: string[]
+  level_up: number | null
+  level: number
+  total_points: number
+  streak: number
+}
+
+export interface IncentiveReport {
+  period: 'week' | 'month'
+  event_counts: Record<string, number>
+  subject_points: Record<string, number>
+  daily_points: Array<{ date: string; points: number }>
+  followup_rate: number
+  early_resolve_rate: number
+  narrative: string
+}
+
+export interface IncentivePraise {
+  id: number
+  content: string
+  teacher_name: string
+  points: number
+  created_at: string
+}
+
+export interface TeacherIncentivePortrait {
+  student_id: number
+  student_name: string
+  classroom_label: string | null
+  total_points: number
+  level: number
+  current_streak_days: number
+  weekly_learning_days: number
+  weekly_followups: number
+  quality_resolves: number
+  last_praise_at: string | null
+}
+
+export interface IncentiveReflectionPage {
+  student_id: number
+  student_name: string
+  items: Array<{
+    id: number
+    conversation_id: number | null
+    subject: string | null
+    reflection: string
+    created_at: string
+  }>
+  total: number
+  page: number
+  page_size: number
+}
+
+export async function fetchIncentiveSummary(): Promise<IncentiveSummary> {
+  const { data } = await api.get<IncentiveSummary>('/incentive/me/summary')
+  return data
+}
+
+export async function fetchIncentiveReport(period: 'week' | 'month'): Promise<IncentiveReport> {
+  const { data } = await api.get<IncentiveReport>('/incentive/me/report', { params: { period } })
+  return data
+}
+
+export async function fetchIncentivePraises(): Promise<IncentivePraise[]> {
+  const { data } = await api.get<IncentivePraise[]>('/incentive/me/praises')
+  return data
+}
+
+export async function markIncentivePraisesRead(): Promise<IncentiveSummary> {
+  const { data } = await api.post<IncentiveSummary>('/incentive/me/praises/read')
+  return data
+}
+
+export async function fetchTeacherIncentivePortraits(classroomId?: number): Promise<TeacherIncentivePortrait[]> {
+  const { data } = await api.get<TeacherIncentivePortrait[]>('/incentive/teacher/portraits', {
+    params: typeof classroomId === 'number' ? { classroom_id: classroomId } : undefined,
+  })
+  return data
+}
+
+export async function fetchStudentReflections(studentId: number): Promise<IncentiveReflectionPage> {
+  const { data } = await api.get<IncentiveReflectionPage>(`/incentive/teacher/students/${studentId}/reflections`)
+  return data
+}
+
+export async function praiseStudent(studentId: number, content: string): Promise<IncentivePraise> {
+  const { data } = await api.post<IncentivePraise>('/incentive/teacher/praise', {
+    student_id: studentId,
+    content,
+  })
+  return data
+}

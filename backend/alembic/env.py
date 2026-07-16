@@ -5,7 +5,7 @@ from sqlalchemy import engine_from_config, pool
 
 from backend.config import get_settings
 from backend.database import Base
-from backend.models import agent_config, audit_log, conversation, knowledge, learning_profile, llm_provider, user  # noqa: F401
+from backend.models import agent_config, agent_role, audit_log, conversation, incentive, knowledge, learning_profile, llm_provider, user  # noqa: F401
 
 config = context.config
 settings = get_settings()

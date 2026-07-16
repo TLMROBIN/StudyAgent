@@ -3,7 +3,7 @@ import { computed, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from './stores/auth'
-import { fetchFeedbackUnreadSummary, type FeedbackUnreadSummary } from './utils/api'
+import { fetchFeedbackUnreadSummary, fetchIncentiveSummary, type FeedbackUnreadSummary } from './utils/api'
 import { forceLoginRedirect } from './utils/navigation'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'studyagent-sidebar-collapsed'
@@ -31,6 +31,7 @@ const unreadSummary = ref<FeedbackUnreadSummary>({
   unread_release_notes: 0,
   has_unread: false,
 })
+const hasUnreadPraise = ref(false)
 
 const requiresAuth = computed(() => route.matched.some((record) => record.meta.requiresAuth))
 const showShell = computed(() => route.path !== '/login')
@@ -42,6 +43,12 @@ const navigationItems = computed<NavigationItem[]>(() => {
 
   if (auth.user?.role === 'student') {
     items.push({ to: '/student', label: '学生答疑', shortLabel: '答疑' })
+    items.push({
+      to: '/student/growth',
+      label: '我的成长',
+      shortLabel: '成长',
+      showUnreadDot: hasUnreadPraise.value,
+    })
     items.push({
       to: '/student/feedback',
       label: '意见反馈',
@@ -101,6 +108,7 @@ watch(
         unread_release_notes: 0,
         has_unread: false,
       }
+      hasUnreadPraise.value = false
       return
     }
     fetchFeedbackUnreadSummary()
@@ -113,6 +121,13 @@ watch(
           unread_release_notes: 0,
           has_unread: false,
         }
+      })
+    fetchIncentiveSummary()
+      .then((summary) => {
+        hasUnreadPraise.value = summary.has_unread_praise
+      })
+      .catch(() => {
+        hasUnreadPraise.value = false
       })
   },
   { immediate: true },

@@ -86,6 +86,8 @@ KEY_TABLES = {
     "release_notes",
     "agent_roles",
     "agent_role_revisions",
+    "student_incentive_events",
+    "student_incentive_profiles",
 }
 
 
@@ -313,10 +315,14 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
     command.downgrade(cfg, "-1")
     assert _current_revision(db_path) == prev
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
-    assert "agent_role_revision_id" not in _column_names(db_path, "messages"), "回退一步后角色消息列应被删除"
-    assert "agent_roles" not in _table_names(db_path), "回退一步后角色表应被删除"
+    assert "agent_role_revision_id" in _column_names(db_path, "messages"), "回退激励迁移不应影响角色消息列"
+    assert "agent_roles" in _table_names(db_path), "回退激励迁移不应影响角色表"
+    assert "student_incentive_events" not in _table_names(db_path), "回退一步后激励流水表应被删除"
+    assert "student_incentive_profiles" not in _table_names(db_path), "回退一步后激励画像表应被删除"
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
     assert "agent_role_revision_id" in _column_names(db_path, "messages"), "重新 upgrade 后角色消息列应被重建"
     assert "agent_roles" in _table_names(db_path), "重新 upgrade 后角色表应被重建"
+    assert "student_incentive_events" in _table_names(db_path), "重新 upgrade 后激励流水表应被重建"
+    assert "student_incentive_profiles" in _table_names(db_path), "重新 upgrade 后激励画像表应被重建"

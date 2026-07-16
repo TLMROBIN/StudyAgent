@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
 import logging
@@ -31,6 +31,7 @@ from backend.models.conversation import (
 )
 from backend.models.llm_model import LLMModelConfig, QuotaBillingMode
 from backend.models.knowledge import KnowledgeChunk
+from backend.models.incentive import StudentIncentiveEvent
 from backend.models.schemas import (
     ChatModelOptionRead,
     ChatModelQuotaRead,
@@ -82,10 +83,12 @@ from backend.services.physics_guidance_service import physics_guidance_service
 from backend.services.socratic_service import socratic_service
 from backend.services.subject_guidance_service import SUBJECT_STRATEGY_RULES, SubjectTeachingMode, subject_guidance_service
 from backend.services.intent_classify_service import intent_classify_service
+from backend.services.incentive_service import QualitySignalFilter, incentive_service
 from backend.services.subject_profile_service import subject_profile_service
 from backend.services.suggested_reply_service import suggested_reply_service
 from backend.services.store_service import BaseStore, store
 from backend.subjects import is_valid_subject
+from backend.time_utils import now_utc
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -404,6 +407,11 @@ def _get_active_agent_config(db: DbSession) -> AgentConfig | None:
     return active_config
 
 
+def invalidate_active_agent_config_cache() -> None:
+    global _active_agent_config_cache
+    _active_agent_config_cache = (None, 0.0, None)
+
+
 def _rag_session_cache_key(conversation_id: int) -> str:
     return f"rag_session:{conversation_id}"
 
@@ -589,6 +597,7 @@ def _instant_stream(
     assets: list[dict[str, Any]] | None = None,
     suggested_replies: list[str] | None = None,
     role_snapshot: ResolvedRoleSnapshot | None = None,
+    incentive: dict[str, Any] | None = None,
 ):
     async def stream():
         sse_active_connections.inc()
@@ -612,6 +621,12 @@ def _instant_stream(
                     "suggested_replies": list(suggested_replies or []),
                 },
             )
+            if incentive and (
+                incentive.get("points_awarded")
+                or incentive.get("new_badges")
+                or incentive.get("level_up")
+            ):
+                yield _sse_event("incentive", incentive)
         finally:
             sse_active_connections.dec()
 
@@ -1019,6 +1034,56 @@ def _chinese_material_response(result: dict[str, Any]) -> str:
     )
 
 
+def _record_turn_incentives(
+    db: DbSession,
+    *,
+    student_id: int,
+    conversation_id: int,
+    turn_index: int,
+    subject: str,
+    followup_answered: bool,
+    practice_review_turn: bool,
+    response_text: str,
+    incentive_params: dict[str, Any] | None,
+    llm_quality: str | None = None,
+) -> dict[str, Any] | None:
+    params = incentive_params or {}
+    if not params.get("enabled"):
+        return None
+    if followup_answered and params.get("followup_min_interval_seconds", 0) > 0:
+        recent_followup = db.scalar(
+            select(StudentIncentiveEvent.id).where(
+                StudentIncentiveEvent.student_id == student_id,
+                StudentIncentiveEvent.event_type == "followup_answered",
+                StudentIncentiveEvent.created_at
+                >= now_utc() - timedelta(seconds=params["followup_min_interval_seconds"]),
+            ).limit(1)
+        )
+        followup_answered = recent_followup is None
+    verdict = incentive_service.extract_practice_verdict(response_text) if practice_review_turn else None
+    drafts = incentive_service.evaluate_turn(
+        student_id=student_id,
+        conversation_id=conversation_id,
+        turn_index=turn_index,
+        subject=subject,
+        followup_answered=followup_answered,
+        practice_verdict=verdict,
+        first_learning_turn_today=True,
+        params=params,
+    )
+    if llm_quality:
+        for draft in drafts:
+            draft.payload["llm_quality"] = llm_quality
+    if not drafts:
+        return None
+    return incentive_service.record_events(
+        db,
+        student_id=student_id,
+        drafts=drafts,
+        params=params,
+    ).as_dict()
+
+
 def _persist_direct_assistant_response(
     db: DbSession,
     *,
@@ -1030,7 +1095,11 @@ def _persist_direct_assistant_response(
     response_text: str,
     assets: list[dict[str, Any]] | None = None,
     active_practice: dict[str, Any] | None = None,
-) -> tuple[str, list[dict[str, Any]]]:
+    student_id: int | None = None,
+    followup_answered: bool = False,
+    practice_review_turn: bool = False,
+    incentive_params: dict[str, Any] | None = None,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
     response_assets = list(assets or [])
     conversation.subject = subject
     conversation.guidance_stage = guidance_stage
@@ -1040,7 +1109,7 @@ def _persist_direct_assistant_response(
     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
     if existing_assistant:
         db.commit()
-        return existing_assistant.content, list(existing_assistant.assets or [])
+        return existing_assistant.content, list(existing_assistant.assets or []), None
 
     assistant_message = Message(
         conversation_id=conversation.id,
@@ -1052,9 +1121,23 @@ def _persist_direct_assistant_response(
         llm_model_key=selected_model_key,
     )
     db.add(assistant_message)
+    db.flush()
+    grant = None
+    if student_id is not None:
+        grant = _record_turn_incentives(
+            db,
+            student_id=student_id,
+            conversation_id=conversation.id,
+            turn_index=user_turn_index,
+            subject=subject,
+            followup_answered=followup_answered,
+            practice_review_turn=practice_review_turn,
+            response_text=response_text,
+            incentive_params=incentive_params,
+        )
     guidance_stage_total.labels(stage=guidance_stage.value).inc()
     db.commit()
-    return response_text, response_assets
+    return response_text, response_assets, grant
 
 
 def _complete_early_special_response(
@@ -1074,9 +1157,11 @@ def _complete_early_special_response(
     context_chunks: int = 0,
     active_practice: dict[str, Any] | None = None,
     role_snapshot: ResolvedRoleSnapshot,
+    incentive_params: dict[str, Any] | None = None,
+    followup_answered: bool = False,
 ) -> StreamingResponse:
     bypassed_role = role_snapshot.bypassed()
-    response_text, response_assets = _persist_direct_assistant_response(
+    response_text, response_assets, grant = _persist_direct_assistant_response(
         db,
         conversation=conversation,
         user_turn_index=user_turn_index,
@@ -1086,6 +1171,9 @@ def _complete_early_special_response(
         response_text=response_text,
         assets=assets,
         active_practice=active_practice,
+        student_id=current_user.id,
+        followup_answered=followup_answered,
+        incentive_params=incentive_params,
     )
     if payload.request_id:
         request_replay_service.mark_completed(
@@ -1109,6 +1197,7 @@ def _complete_early_special_response(
             context_chunks=context_chunks,
             assets=response_assets,
             role_snapshot=bypassed_role,
+            incentive=grant,
         ),
         media_type="text/event-stream",
     )
@@ -1327,11 +1416,62 @@ def resolve_conversation(
     )
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    grant: dict[str, Any] | None = None
+    first_resolve = payload.resolved and not conversation.resolved
     conversation.resolved = payload.resolved
     db.add(conversation)
+    if first_resolve:
+        active_config = _get_active_agent_config(db)
+        params = incentive_service.resolve_config(active_config.guidance_params if active_config else None)
+        if params.get("enabled"):
+            snapshot = incentive_service.conversation_signal_snapshot(db, conversation.id)
+            had_followup = bool(
+                db.scalar(
+                    select(StudentIncentiveEvent.id).where(
+                        StudentIncentiveEvent.student_id == current_user.id,
+                        StudentIncentiveEvent.conversation_id == conversation.id,
+                        StudentIncentiveEvent.event_type == "followup_answered",
+                    ).limit(1)
+                )
+            )
+            reflection = payload.reflection
+            if reflection:
+                recent_reflections = db.scalars(
+                    select(StudentIncentiveEvent)
+                    .where(
+                        StudentIncentiveEvent.student_id == current_user.id,
+                        StudentIncentiveEvent.event_type == "reflection_submitted",
+                    )
+                    .order_by(StudentIncentiveEvent.created_at.desc())
+                    .limit(5)
+                ).all()
+                if any(
+                    incentive_service.reflections_are_similar(
+                        str((item.payload or {}).get("reflection") or ""),
+                        reflection,
+                    )
+                    for item in recent_reflections
+                ):
+                    reflection = None
+            drafts = incentive_service.evaluate_resolve(
+                conversation_id=conversation.id,
+                subject=conversation.subject,
+                user_turn_count=snapshot["user_turn_count"],
+                had_followup=had_followup,
+                had_fallback=snapshot["had_fallback"],
+                reflection=reflection,
+                params=params,
+            )
+            if drafts:
+                grant = incentive_service.record_events(
+                    db,
+                    student_id=current_user.id,
+                    drafts=drafts,
+                    params=params,
+                ).as_dict()
     db.commit()
     db.refresh(conversation)
-    return ConversationRead.model_validate(conversation)
+    return ConversationRead.model_validate(conversation).model_copy(update={"incentive": grant})
 
 
 @router.delete("/{conversation_id}")
@@ -1697,6 +1837,8 @@ async def stream_chat(
         prompt_question = followup_context["prompt_question"]
         retrieval_query = followup_context["retrieval_query"]
 
+    active_config = _get_active_agent_config(db)
+    incentive_params = incentive_service.resolve_config(active_config.guidance_params if active_config else None)
     early_stage = socratic_service.infer_stage(len(history_pairs) // 2)
     if not has_image_turn and not practice_review_turn:
         if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
@@ -1724,6 +1866,8 @@ async def stream_chat(
                 selected_model_key=selected_model_key,
                 response_text=response_text,
                 role_snapshot=role_snapshot,
+                incentive_params=incentive_params,
+                followup_answered=followup_context is not None,
             )
         if subject == "数学" and subject_guidance_service.is_math_practice_request(prompt_question):
             response_text, response_assets, practice_context_chunks, active_practice = _build_math_practice_response(
@@ -1750,6 +1894,8 @@ async def stream_chat(
                 context_chunks=practice_context_chunks,
                 active_practice=active_practice,
                 role_snapshot=role_snapshot,
+                incentive_params=incentive_params,
+                followup_answered=followup_context is not None,
             )
         if subject == "英语" and subject_profile_service.is_vocabulary_request(prompt_question):
             result = subject_profile_service.add_english_vocabulary(
@@ -1770,6 +1916,8 @@ async def stream_chat(
                 selected_model_key=selected_model_key,
                 response_text=_english_vocabulary_response(result),
                 role_snapshot=role_snapshot,
+                incentive_params=incentive_params,
+                followup_answered=followup_context is not None,
             )
         if subject == "语文" and subject_profile_service.is_chinese_material_request(prompt_question):
             result = subject_profile_service.add_chinese_material(
@@ -1790,6 +1938,8 @@ async def stream_chat(
                 selected_model_key=selected_model_key,
                 response_text=_chinese_material_response(result),
                 role_snapshot=role_snapshot,
+                incentive_params=incentive_params,
+                followup_answered=followup_context is not None,
             )
         if subject == "物理" and physics_error_profile_service.is_record_request(prompt_question):
             user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
@@ -1820,6 +1970,8 @@ async def stream_chat(
                 selected_model_key=selected_model_key,
                 response_text=response_text,
                 role_snapshot=role_snapshot,
+                incentive_params=incentive_params,
+                followup_answered=followup_context is not None,
             )
         if subject == "物理" and physics_guidance_service.is_practice_request(prompt_question):
             response_text, response_assets, practice_context_chunks, active_practice = _build_physics_practice_response(
@@ -1846,9 +1998,10 @@ async def stream_chat(
                 context_chunks=practice_context_chunks,
                 active_practice=active_practice,
                 role_snapshot=role_snapshot,
+                incentive_params=incentive_params,
+                followup_answered=followup_context is not None,
             )
 
-    active_config = _get_active_agent_config(db)
     rag_agent_version = active_config.version if active_config else 0
     rag_topic_seed = _rag_topic_seed(
         retrieval_query,
@@ -1929,7 +2082,7 @@ async def stream_chat(
         )
         profile_summary = subject_profile_service.profile_summary(db, student_id=current_user.id, subject=subject)
         response_text = _subject_error_record_response(subject, event.error_type, event.knowledge_point, profile_summary)
-        response_text, response_assets = _persist_direct_assistant_response(
+        response_text, response_assets, grant = _persist_direct_assistant_response(
             db,
             conversation=conversation,
             user_turn_index=user_turn_index,
@@ -1937,6 +2090,9 @@ async def stream_chat(
             guidance_stage=prompt.stage,
             selected_model_key=selected_model_key,
             response_text=response_text,
+            student_id=current_user.id,
+            followup_answered=followup_context is not None,
+            incentive_params=incentive_params,
         )
         if payload.request_id:
             request_replay_service.mark_completed(
@@ -1959,6 +2115,7 @@ async def stream_chat(
                 request=request,
                 assets=response_assets,
                 role_snapshot=bypassed_role,
+                incentive=grant,
             ),
             media_type="text/event-stream",
         )
@@ -1971,7 +2128,7 @@ async def stream_chat(
             student_grade=current_user.grade,
             issued_turn_index=user_turn_index,
         )
-        response_text, response_assets = _persist_direct_assistant_response(
+        response_text, response_assets, grant = _persist_direct_assistant_response(
             db,
             conversation=conversation,
             user_turn_index=user_turn_index,
@@ -1981,6 +2138,9 @@ async def stream_chat(
             response_text=response_text,
             assets=response_assets,
             active_practice=active_practice,
+            student_id=current_user.id,
+            followup_answered=followup_context is not None,
+            incentive_params=incentive_params,
         )
         if payload.request_id:
             request_replay_service.mark_completed(
@@ -2004,6 +2164,7 @@ async def stream_chat(
                 context_chunks=practice_context_chunks,
                 assets=response_assets,
                 role_snapshot=bypassed_role,
+                incentive=grant,
             ),
             media_type="text/event-stream",
         )
@@ -2014,7 +2175,7 @@ async def stream_chat(
             source_text=prompt_question,
         )
         response_text = _english_vocabulary_response(result)
-        response_text, response_assets = _persist_direct_assistant_response(
+        response_text, response_assets, grant = _persist_direct_assistant_response(
             db,
             conversation=conversation,
             user_turn_index=user_turn_index,
@@ -2022,6 +2183,9 @@ async def stream_chat(
             guidance_stage=prompt.stage,
             selected_model_key=selected_model_key,
             response_text=response_text,
+            student_id=current_user.id,
+            followup_answered=followup_context is not None,
+            incentive_params=incentive_params,
         )
         if payload.request_id:
             request_replay_service.mark_completed(
@@ -2044,6 +2208,7 @@ async def stream_chat(
                 request=request,
                 assets=response_assets,
                 role_snapshot=bypassed_role,
+                incentive=grant,
             ),
             media_type="text/event-stream",
         )
@@ -2054,7 +2219,7 @@ async def stream_chat(
             source_text=prompt_question,
         )
         response_text = _chinese_material_response(result)
-        response_text, response_assets = _persist_direct_assistant_response(
+        response_text, response_assets, grant = _persist_direct_assistant_response(
             db,
             conversation=conversation,
             user_turn_index=user_turn_index,
@@ -2062,6 +2227,9 @@ async def stream_chat(
             guidance_stage=prompt.stage,
             selected_model_key=selected_model_key,
             response_text=response_text,
+            student_id=current_user.id,
+            followup_answered=followup_context is not None,
+            incentive_params=incentive_params,
         )
         if payload.request_id:
             request_replay_service.mark_completed(
@@ -2084,6 +2252,7 @@ async def stream_chat(
                 request=request,
                 assets=response_assets,
                 role_snapshot=bypassed_role,
+                incentive=grant,
             ),
             media_type="text/event-stream",
         )
@@ -2099,24 +2268,18 @@ async def stream_chat(
         )
         profile_summary = physics_error_profile_service.profile_summary(db, student_id=current_user.id, subject=subject)
         response_text = _physics_error_record_response(event.error_type, event.knowledge_point, profile_summary)
-        conversation.subject = subject
-        conversation.guidance_stage = prompt.stage
-        db.add(conversation)
-        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
-        if existing_assistant:
-            response_text = existing_assistant.content
-        else:
-            assistant_message = Message(
-                conversation_id=conversation.id,
-                role=MessageRole.ASSISTANT,
-                content=response_text,
-                turn_index=user_turn_index,
-                guidance_stage=prompt.stage,
-                llm_model_key=selected_model_key,
-            )
-            db.add(assistant_message)
-            guidance_stage_total.labels(stage=prompt.stage.value).inc()
-        db.commit()
+        response_text, response_assets, grant = _persist_direct_assistant_response(
+            db,
+            conversation=conversation,
+            user_turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=prompt.stage,
+            selected_model_key=selected_model_key,
+            response_text=response_text,
+            student_id=current_user.id,
+            followup_answered=followup_context is not None,
+            incentive_params=incentive_params,
+        )
         if payload.request_id:
             request_replay_service.mark_completed(
                 user_id=current_user.id,
@@ -2136,6 +2299,7 @@ async def stream_chat(
                 content=response_text,
                 request=request,
                 role_snapshot=bypassed_role,
+                incentive=grant,
             ),
             media_type="text/event-stream",
         )
@@ -2148,27 +2312,20 @@ async def stream_chat(
             student_grade=current_user.grade,
             issued_turn_index=user_turn_index,
         )
-        conversation.subject = subject
-        conversation.guidance_stage = prompt.stage
-        conversation.active_practice = active_practice
-        db.add(conversation)
-        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
-        if existing_assistant:
-            response_text = existing_assistant.content
-            response_assets = list(existing_assistant.assets or [])
-        else:
-            assistant_message = Message(
-                conversation_id=conversation.id,
-                role=MessageRole.ASSISTANT,
-                content=response_text,
-                assets=response_assets,
-                turn_index=user_turn_index,
-                guidance_stage=prompt.stage,
-                llm_model_key=selected_model_key,
-            )
-            db.add(assistant_message)
-            guidance_stage_total.labels(stage=prompt.stage.value).inc()
-        db.commit()
+        response_text, response_assets, grant = _persist_direct_assistant_response(
+            db,
+            conversation=conversation,
+            user_turn_index=user_turn_index,
+            subject=subject,
+            guidance_stage=prompt.stage,
+            selected_model_key=selected_model_key,
+            response_text=response_text,
+            assets=response_assets,
+            active_practice=active_practice,
+            student_id=current_user.id,
+            followup_answered=followup_context is not None,
+            incentive_params=incentive_params,
+        )
         if payload.request_id:
             request_replay_service.mark_completed(
                 user_id=current_user.id,
@@ -2191,6 +2348,7 @@ async def stream_chat(
                 context_chunks=practice_context_chunks,
                 assets=response_assets,
                 role_snapshot=bypassed_role,
+                incentive=grant,
             ),
             media_type="text/event-stream",
         )
@@ -2223,6 +2381,7 @@ async def stream_chat(
         if cache_lookup.answer:
             response_text = cache_lookup.answer
             suggested_replies: list[str] = []
+            grant: dict[str, Any] | None = None
             conversation.subject = subject
             conversation.guidance_stage = prompt.stage
             db.add(conversation)
@@ -2250,6 +2409,18 @@ async def stream_chat(
                     agent_role_snapshot=role_snapshot.public_snapshot() if role_snapshot.applied else None,
                 )
                 db.add(assistant_message)
+                db.flush()
+                grant = _record_turn_incentives(
+                    db,
+                    student_id=current_user.id,
+                    conversation_id=conversation.id,
+                    turn_index=user_turn_index,
+                    subject=subject,
+                    followup_answered=followup_context is not None,
+                    practice_review_turn=False,
+                    response_text=response_text,
+                    incentive_params=incentive_params,
+                )
                 guidance_stage_total.labels(stage=prompt.stage.value).inc()
             db.commit()
             if payload.request_id:
@@ -2274,6 +2445,7 @@ async def stream_chat(
                     context_chunks=len(retrieval.chunks),
                     suggested_replies=suggested_replies,
                     role_snapshot=role_snapshot,
+                    incentive=grant,
                 ),
                 media_type="text/event-stream",
             )
@@ -2321,6 +2493,7 @@ async def stream_chat(
         emitted_text = ""
         emitted_visible = False
         mode_parser = LeadingModeTagParser() if prompt.fact_mode_offered else None
+        quality_filter = QualitySignalFilter() if incentive_params.get("llm_signal_enabled") else None
         resolved_mode: str | None = None
         pending_buffer = ""
         llm_stream = None
@@ -2332,6 +2505,10 @@ async def stream_chat(
         usage_recorded = False
         ticket_released = False
         suggested_replies: list[str] = []
+        turn_persisted = False
+        assistant_message_id: int | None = None
+        practice_review_persisted = False
+        incentive_grant: dict[str, Any] | None = None
         sse_active_connections.inc()
 
         async def release_ticket_once() -> None:
@@ -2396,6 +2573,8 @@ async def stream_chat(
                     parsed_mode, provider_chunk = mode_parser.feed(provider_chunk)
                     if parsed_mode is not None:
                         resolved_mode = parsed_mode
+                if quality_filter is not None:
+                    provider_chunk = quality_filter.feed(provider_chunk)
                 pending_buffer += provider_chunk
                 segments, pending_buffer = _split_stream_buffer(pending_buffer)
                 for segment in segments:
@@ -2435,6 +2614,8 @@ async def stream_chat(
             if mode_parser is not None and resolved_mode is None:
                 pending_buffer += mode_parser.flush()
                 resolved_mode = mode_parser.resolved_mode
+            if quality_filter is not None and not disconnected:
+                pending_buffer += quality_filter.flush()
 
             if not disconnected and pending_buffer:
                 segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
@@ -2487,8 +2668,55 @@ async def stream_chat(
                     history_pairs=history_pairs,
                     model_key=selected_model_key,
                 )
+                conversation.subject = subject
+                conversation.guidance_stage = prompt.stage
+                practice_review_persisted = practice_review_turn and bool(emitted_text)
+                if practice_review_persisted:
+                    conversation.active_practice = None
+                db.add(conversation)
+                existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+                if existing_assistant:
+                    emitted_text = existing_assistant.content
+                    suggested_replies = list(existing_assistant.suggested_replies or [])
+                    assistant_message_id = existing_assistant.id
+                else:
+                    assistant_message = Message(
+                        conversation_id=conversation.id,
+                        role=MessageRole.ASSISTANT,
+                        content=emitted_text,
+                        suggested_replies=suggested_replies,
+                        turn_index=user_turn_index,
+                        guidance_stage=prompt.stage,
+                        llm_model_key=selected_model_key,
+                        agent_role_revision_id=role_snapshot.revision_id if role_snapshot.applied else None,
+                        agent_role_snapshot=role_snapshot.public_snapshot() if role_snapshot.applied else None,
+                    )
+                    db.add(assistant_message)
+                    db.flush()
+                    assistant_message_id = assistant_message.id
+                    incentive_grant = _record_turn_incentives(
+                        db,
+                        student_id=current_user.id,
+                        conversation_id=conversation.id,
+                        turn_index=user_turn_index,
+                        subject=subject,
+                        followup_answered=followup_context is not None,
+                        practice_review_turn=practice_review_turn,
+                        response_text=emitted_text,
+                        incentive_params=incentive_params,
+                        llm_quality=quality_filter.signal if quality_filter is not None else None,
+                    )
+                    guidance_stage_total.labels(stage=prompt.stage.value).inc()
+                db.commit()
+                turn_persisted = True
                 if suggested_replies:
                     yield _sse_event("suggested_replies", {"suggested_replies": suggested_replies})
+                if incentive_grant and (
+                    incentive_grant.get("points_awarded")
+                    or incentive_grant.get("new_badges")
+                    or incentive_grant.get("level_up")
+                ):
+                    yield _sse_event("incentive", incentive_grant)
         finally:
             if llm_stream is not None:
                 with suppress(Exception):
@@ -2496,14 +2724,14 @@ async def stream_chat(
             await release_ticket_once()
 
             try:
-                assistant_message_id: int | None = None
-                conversation.subject = subject
-                conversation.guidance_stage = prompt.stage
-                practice_review_persisted = should_send_done and practice_review_turn and bool(emitted_text)
-                if practice_review_persisted:
-                    conversation.active_practice = None
-                db.add(conversation)
-                if emitted_text:
+                if not turn_persisted:
+                    conversation.subject = subject
+                    conversation.guidance_stage = prompt.stage
+                    practice_review_persisted = should_send_done and practice_review_turn and bool(emitted_text)
+                    if practice_review_persisted:
+                        conversation.active_practice = None
+                    db.add(conversation)
+                if emitted_text and not turn_persisted:
                     emitted_text = emitted_text.strip()
                     existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
                     if existing_assistant:
@@ -2525,8 +2753,22 @@ async def stream_chat(
                         db.add(assistant_message)
                         db.flush()
                         assistant_message_id = assistant_message.id
+                        if should_send_done:
+                            incentive_grant = _record_turn_incentives(
+                                db,
+                                student_id=current_user.id,
+                                conversation_id=conversation.id,
+                                turn_index=user_turn_index,
+                                subject=subject,
+                                followup_answered=followup_context is not None,
+                                practice_review_turn=practice_review_turn,
+                                response_text=emitted_text,
+                                incentive_params=incentive_params,
+                                llm_quality=quality_filter.signal if quality_filter is not None else None,
+                            )
                         guidance_stage_total.labels(stage=prompt.stage.value).inc()
-                db.commit()
+                if not turn_persisted:
+                    db.commit()
                 if practice_review_persisted:
                     chat_practice_review_total.labels(subject=subject).inc()
                 if should_send_done and resolved_mode == "fact":

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import MetricTile from '../components/MetricTile.vue'
 import { buildSubjectPieModel } from '../utils/subjectPieChart'
@@ -9,6 +9,10 @@ import {
   archiveAdminNotification,
   createAdminNotification,
   fetchAdminNotifications,
+  fetchStudentReflections,
+  fetchTeacherIncentivePortraits,
+  praiseStudent,
+  type TeacherIncentivePortrait,
   type NotificationItem,
   updateAdminNotification,
 } from '../utils/api'
@@ -63,6 +67,7 @@ const overview = ref<OverviewData>({
 })
 const classStats = ref<ClassroomStat[]>([])
 const portraits = ref<StudentPortrait[]>([])
+const incentivePortraits = ref<TeacherIncentivePortrait[]>([])
 const notifications = ref<NotificationItem[]>([])
 const loading = ref(false)
 const trendLoading = ref(false)
@@ -252,11 +257,51 @@ async function loadDashboard() {
     overview.value = overviewData
     classStats.value = classData
     portraits.value = portraitData
+    incentivePortraits.value = await fetchTeacherIncentivePortraits()
   } catch (error) {
     console.error(error)
     ElMessage.error('统计数据加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function sendPraise(item: TeacherIncentivePortrait) {
+  try {
+    const result = await ElMessageBox.prompt(
+      `请描述 ${item.student_name} 做得好的思考过程。`,
+      '过程性表扬',
+      {
+        confirmButtonText: '发表扬',
+        cancelButtonText: '取消',
+        inputType: 'textarea',
+        inputPlaceholder: '例如：你今天能主动检查条件并修正思路，这种认真推理很可贵。',
+        inputValidator: (value) => (value || '').trim().length >= 5 || '请至少写 5 个字',
+      },
+    )
+    await praiseStudent(item.student_id, result.value.trim())
+    ElMessage.success('表扬已发送')
+    incentivePortraits.value = await fetchTeacherIncentivePortraits()
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      console.error(error)
+    }
+  }
+}
+
+async function showReflections(item: TeacherIncentivePortrait) {
+  try {
+    const page = await fetchStudentReflections(item.student_id)
+    const content = page.items.length
+      ? page.items.map((entry) => `${entry.subject || '未分类'} · ${new Date(entry.created_at).toLocaleDateString()}\n${entry.reflection}`).join('\n\n')
+      : '这位学生还没有提交反思。'
+    await ElMessageBox.alert(content, `${item.student_name}的学习反思`, {
+      confirmButtonText: '关闭',
+      customClass: 'reflection-review-dialog',
+    })
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('反思记录加载失败')
   }
 }
 
@@ -524,6 +569,34 @@ onMounted(() => {
           </div>
         </article>
         <p v-if="!classStats.length" class="panel-subcopy">暂无班级统计数据。</p>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Learning Participation</p>
+          <h2>班级学习参与度</h2>
+        </div>
+      </div>
+      <div class="table-like">
+        <article v-for="item in incentivePortraits.slice(0, 50)" :key="item.student_id" class="table-row table-row-wrap">
+          <div class="table-main">
+            <strong>{{ item.student_name }}</strong>
+            <span>{{ item.classroom_label || '未分班' }}</span>
+          </div>
+          <div class="detail-chip-group">
+            <span class="detail-chip">L{{ item.level }} · {{ item.total_points }} 分</span>
+            <span class="detail-chip">连续 {{ item.current_streak_days }} 天</span>
+            <span class="detail-chip">本周学习 {{ item.weekly_learning_days }} 天</span>
+            <span class="detail-chip">本周跟随 {{ item.weekly_followups }}</span>
+            <span class="detail-chip">质量解决 {{ item.quality_resolves }}</span>
+          </div>
+          <div class="row-actions">
+            <button class="ghost-button" @click="showReflections(item)">看反思</button>
+            <button class="primary-button" @click="sendPraise(item)">发表扬</button>
+          </div>
+        </article>
+        <p v-if="!incentivePortraits.length" class="panel-subcopy">激励机制尚未启用或暂无学习记录。</p>
       </div>
     </section>
     <section class="panel">

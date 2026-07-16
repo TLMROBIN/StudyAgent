@@ -11,6 +11,7 @@ from backend.models.feedback import (
     StudentFeedbackReadState,
 )
 from backend.models.knowledge import DocumentStatus, ImportTask, KnowledgeChunk, KnowledgeDocument
+from backend.models.incentive import StudentIncentiveEvent, StudentIncentiveProfile
 from backend.models.learning_profile import StudentErrorEvent, StudentSkillProfile
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
@@ -36,6 +37,8 @@ __all__ = [
     "ReleaseNote",
     "ReleaseNoteReadState",
     "StudentErrorEvent",
+    "StudentIncentiveEvent",
+    "StudentIncentiveProfile",
     "StudentSkillProfile",
     "GuidanceStage",
     "ImportTask",

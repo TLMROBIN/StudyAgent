@@ -151,6 +151,55 @@ def apply_runtime_schema_updates() -> None:
         table_names.add("agent_role_revisions")
         planned_new_tables.add("agent_role_revisions")
 
+    if "student_incentive_events" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE student_incentive_events (
+                id INTEGER NOT NULL PRIMARY KEY,
+                student_id INTEGER NOT NULL,
+                subject VARCHAR(32),
+                conversation_id INTEGER,
+                event_type VARCHAR(32) NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
+                payload JSON NOT NULL DEFAULT '{}',
+                dedup_key VARCHAR(128) UNIQUE,
+                created_by INTEGER,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES users (id) ON DELETE CASCADE,
+                FOREIGN KEY(conversation_id) REFERENCES conversations (id) ON DELETE SET NULL,
+                FOREIGN KEY(created_by) REFERENCES users (id) ON DELETE SET NULL
+            )
+            """
+        )
+        table_names.add("student_incentive_events")
+        planned_new_tables.add("student_incentive_events")
+
+    if "student_incentive_profiles" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE student_incentive_profiles (
+                id INTEGER NOT NULL PRIMARY KEY,
+                student_id INTEGER NOT NULL UNIQUE,
+                total_points INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 1,
+                current_streak_days INTEGER NOT NULL DEFAULT 0,
+                longest_streak_days INTEGER NOT NULL DEFAULT 0,
+                last_valid_learning_date DATE,
+                daily_points INTEGER NOT NULL DEFAULT 0,
+                daily_points_date DATE,
+                badges JSON NOT NULL DEFAULT '[]',
+                counters JSON NOT NULL DEFAULT '{}',
+                last_praise_read_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(student_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+            """
+        )
+        table_names.add("student_incentive_profiles")
+        planned_new_tables.add("student_incentive_profiles")
+
     if "release_notes" in table_names and "release_note_read_states" not in table_names:
         statements.append(
             """
@@ -199,6 +248,17 @@ def apply_runtime_schema_updates() -> None:
         "agent_role_revisions": [
             ("ix_agent_role_revisions_role_id", "role_id"),
             ("ix_agent_role_revisions_content_hash", "content_hash"),
+        ],
+        "student_incentive_events": [
+            ("ix_student_incentive_events_student_id", "student_id"),
+            ("ix_student_incentive_events_subject", "subject"),
+            ("ix_student_incentive_events_conversation_id", "conversation_id"),
+            ("ix_student_incentive_events_event_type", "event_type"),
+            ("ix_student_incentive_events_student_created", "student_id, created_at"),
+            ("ix_student_incentive_events_student_type", "student_id, event_type"),
+        ],
+        "student_incentive_profiles": [
+            ("ix_student_incentive_profiles_student_id", "student_id"),
         ],
     }
     for table_name, indexes in feedback_indexes.items():
