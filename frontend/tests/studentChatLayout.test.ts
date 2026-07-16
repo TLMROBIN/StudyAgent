@@ -18,24 +18,30 @@ function ruleFor(selector: string) {
   return match[1].replace(/\s+/g, ' ')
 }
 
-const bubbleRule = ruleFor('.bubble')
-assert.match(bubbleRule, /flex:\s*0 0 auto/, 'chat bubbles should not collapse under flex sizing')
-assert.match(bubbleRule, /width:\s*auto/, 'chat bubbles should use stable intrinsic sizing')
+const messageRowRule = ruleFor('.message-row')
+assert.match(messageRowRule, /flex:\s*0 0 auto/, 'message rows should not collapse under flex sizing')
+assert.match(messageRowRule, /width:\s*auto/, 'message rows should use stable intrinsic sizing')
 assert.doesNotMatch(
-  bubbleRule,
+  messageRowRule,
   /width:\s*fit-content/,
-  'fit-content creates unstable right-aligned bubble widths in Chrome on narrow tablets',
+  'fit-content creates unstable right-aligned message widths in Chrome on narrow tablets',
 )
 assert.doesNotMatch(
-  bubbleRule,
+  messageRowRule,
   /(?:^|;\s*)width:\s*min\(78%,\s*720px\)/,
-  'chat bubbles should not use a fixed half-panel width',
+  'message rows should not use a fixed half-panel width',
 )
-assert.match(bubbleRule, /max-width:\s*min\(78%,\s*720px\)/, 'long chat bubbles should wrap at the readable width cap')
-assert.match(bubbleRule, /overflow-wrap:\s*anywhere/, 'long tokens should wrap before they push a bubble off screen')
+assert.match(messageRowRule, /max-width:\s*min\(78%,\s*720px\)/, 'long messages should wrap at the readable width cap')
+assert.match(messageRowRule, /min-width:\s*0/, 'message rows should be allowed to shrink inside the chat stream')
 
-const userBubbleRule = ruleFor('.bubble.user')
-assert.match(userBubbleRule, /align-self:\s*flex-end/, 'student bubbles should stay right aligned')
+const bubbleRule = ruleFor('.bubble')
+assert.match(bubbleRule, /width:\s*100%/, 'chat bubbles should fill their message row')
+assert.match(bubbleRule, /min-width:\s*0/, 'chat bubbles should stay inside their message row')
+assert.match(bubbleRule, /overflow-wrap:\s*anywhere/, 'long tokens should wrap before they push a bubble off screen')
+assert.match(bubbleRule, /box-sizing:\s*border-box/, 'bubble padding should stay inside the message row width')
+
+const userMessageRowRule = ruleFor('.message-row.user')
+assert.match(userMessageRowRule, /align-self:\s*flex-end/, 'student messages should stay right aligned')
 
 const messageBodyRule = ruleFor('.message-body')
 assert.match(messageBodyRule, /max-width:\s*100%/, 'message bodies should stay inside the bubble width cap')
@@ -89,6 +95,11 @@ assert.match(
 )
 
 const studentChatSource = readFileSync(resolve(testDir, '../src/views/StudentChat.vue'), 'utf8')
+assert.match(
+  studentChatSource,
+  /<div v-for="\(item, index\) in messages"[^>]*:class="\['message-row', item\.role\]">\s*<article :class="\['bubble', item\.role\]">/,
+  'each chat bubble should remain a direct child of its message row',
+)
 assert.match(
   studentChatSource,
   /class="chat-subject-select"/,
