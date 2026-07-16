@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.config import Settings, get_settings
 from backend.services.embed_service import EmbedService, embed_service
+from backend.subjects import SUBJECT_SET, is_valid_subject
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ SUBJECT_COLLECTION_NAMES = {
     "历史": "history",
     "地理": "geography",
 }
+if set(SUBJECT_COLLECTION_NAMES) != SUBJECT_SET:
+    raise RuntimeError("SUBJECT_COLLECTION_NAMES must match the supported subject set")
 
 
 @dataclass
@@ -118,7 +121,9 @@ class VectorStoreService:
         return self._client
 
     def _collection_name(self, subject: str) -> str:
-        safe_subject = SUBJECT_COLLECTION_NAMES.get(subject, subject.lower())
+        if not is_valid_subject(subject):
+            raise ValueError(f"Unsupported subject: {subject!r}")
+        safe_subject = SUBJECT_COLLECTION_NAMES[subject]
         return f"{self.settings.chromadb_collection_prefix}-{safe_subject}"
 
     def _build_metadata(self, chunk: "KnowledgeChunk") -> dict[str, Any]:

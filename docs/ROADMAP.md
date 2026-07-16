@@ -14,7 +14,7 @@
 | 阶段 | 状态 | 实际情况备注 |
 |------|------|------|
 | 阶段 1：Redis 真实接入 | ✅ 完成 | `backend/services/store_service.py` 中 `RedisStore` 完整实现，含基于 Lua 脚本的分布式配额计数 |
-| 阶段 2：真实 RAG / ChromaDB 链路 | ✅ 完成 | `backend/services/vector_store_service.py` 支持 HTTP / 持久化两种模式，6 个学科集合，upsert/query 闭环可用 |
+| 阶段 2：真实 RAG / ChromaDB 链路 | ✅ 完成 | `backend/services/vector_store_service.py` 支持 HTTP / 持久化两种模式，9 个学科集合，upsert/query 闭环可用 |
 | 阶段 3：Celery 导入闭环 | ✅ 完成 | `backend/tasks/ingest.py`（571 行）：上传 → 校验 → MinerU/文本解析 → 分块 → 向量化 → ChromaDB 入库全链路打通；**超出原计划**：含 MinerU GPU preflight（`backend/services/mineru_service.py:504` `collect_cuda_requirement_snapshot()`）及 GPU watchdog（`scripts/gpu_runtime_watchdog.sh` + systemd 单元） |
 | 阶段 4：真实流式聊天 | ✅ 完成 | **已验证为真流式**（此前"伪流式"结论过时）：`backend/services/llm_service.py:613` 以 `stream: True` 发起请求，`client.stream()` + `aiter_lines()` 逐 token 接收（:620-623）；`backend/routers/chat.py:1513-1560` 逐事件转发，按句子边界分块（`_split_stream_buffer`，chat.py:120）；含心跳保活（chat.py:1521-1523）、断线检测释放（chat.py:1514-1518）、逐段安全校验与安全改写（chat.py:1538-1554 `filter_service.validate_answer`） |
 | 阶段 5：管理端补齐 | 🔶 部分完成 | 审计日志查看、统计概览等管理接口已就绪（`/api/admin/audit-logs`、`/api/stats/overview` 等，见 locustfile.py 压测覆盖）；**题库推荐仅 Phase 1 骨架**：`backend/routers/chat.py:827` `/api/chat/recommendations` 只有 `keyword` / `context` 两种模式（`backend/models/schemas.py:214-232`），基于向量相似度 + 年级/难度过滤，结果硬编码上限 3 条，无排序/个性化算法 |

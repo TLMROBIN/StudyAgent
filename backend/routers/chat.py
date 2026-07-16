@@ -77,6 +77,7 @@ from backend.services.intent_classify_service import intent_classify_service
 from backend.services.subject_profile_service import subject_profile_service
 from backend.services.suggested_reply_service import suggested_reply_service
 from backend.services.store_service import BaseStore, store
+from backend.subjects import is_valid_subject
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -1342,6 +1343,8 @@ def recommend_questions(
     db: DbSession,
     current_user: CurrentUser,
 ) -> list[QuestionRecommendationRead]:
+    if not is_valid_subject(payload.subject):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     recommendation_query = _resolve_recommendation_query(db, current_user, payload)
     decision = filter_service.check_question(recommendation_query, payload.subject)
     if not decision.allowed:
@@ -1374,6 +1377,8 @@ async def stream_chat(
     *,
     image_upload: UploadFile | None = None,
 ):
+    if not is_valid_subject(payload.subject):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     started = perf_counter()
     chat_request_total.inc()
     has_image_turn = image_upload is not None
