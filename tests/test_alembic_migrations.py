@@ -84,6 +84,8 @@ KEY_TABLES = {
     "student_feedback",
     "student_feedback_attachments",
     "release_notes",
+    "agent_roles",
+    "agent_role_revisions",
 }
 
 
@@ -255,6 +257,8 @@ def test_upgrade_head(alembic_ctx) -> None:
     assert not missing, f"head 状态缺少关键表：{sorted(missing)}"
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
     assert "active_practice" in _column_names(db_path, "conversations")
+    assert "agent_role_revision_id" in _column_names(db_path, "messages")
+    assert "agent_role_snapshot" in _column_names(db_path, "messages")
 
     assert set(failures) == KNOWN_BROKEN_UPGRADES_ON_FRESH_DB, (
         "全新库上失败的迁移与已知风险清单不一致。\n"
@@ -304,12 +308,15 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
 
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
     assert "active_practice" in _column_names(db_path, "conversations")
+    assert "agent_role_revision_id" in _column_names(db_path, "messages")
 
     command.downgrade(cfg, "-1")
     assert _current_revision(db_path) == prev
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
-    assert "active_practice" not in _column_names(db_path, "conversations"), "回退一步后 conversations.active_practice 应被删除"
+    assert "agent_role_revision_id" not in _column_names(db_path, "messages"), "回退一步后角色消息列应被删除"
+    assert "agent_roles" not in _table_names(db_path), "回退一步后角色表应被删除"
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
-    assert "active_practice" in _column_names(db_path, "conversations"), "重新 upgrade 后 conversations.active_practice 应被重建"
+    assert "agent_role_revision_id" in _column_names(db_path, "messages"), "重新 upgrade 后角色消息列应被重建"
+    assert "agent_roles" in _table_names(db_path), "重新 upgrade 后角色表应被重建"

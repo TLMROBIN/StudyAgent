@@ -996,6 +996,31 @@ textarea {
   max-width: 100%;
 }
 
+.chat-controls > .chat-role-select {
+  flex: 1 1 190px;
+  min-width: 180px;
+  max-width: 100%;
+}
+
+.chat-role-option {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.chat-role-option strong {
+  flex: 0 0 auto;
+}
+
+.chat-role-option span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-controls > .el-textarea,
 .chat-controls > .el-input {
   flex: 1 1 100%;

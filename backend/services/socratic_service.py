@@ -5,6 +5,7 @@ import re
 
 from backend.grade_utils import format_grade_label
 from backend.models.conversation import GuidanceStage, IMAGE_ONLY_MESSAGE_PLACEHOLDER
+from backend.services.agent_role_service import ROLE_SAFETY_RIDER
 from backend.services.physics_guidance_service import PhysicsGuidanceStrategy, physics_guidance_service
 from backend.services.subject_guidance_service import (
     SubjectGuidanceStrategy,
@@ -122,6 +123,7 @@ class SocraticService:
         practice_context: dict | None = None,
         subject_supplement: str | None = None,
         subject_mode_override: SubjectTeachingMode | None = None,
+        role_prompt: str | None = None,
     ) -> PromptPackage:
         turn_count = len(history) // 2
         stage = self.infer_stage(turn_count)
@@ -139,6 +141,11 @@ class SocraticService:
         normalized_system_prompt = (system_prompt or "").strip()
         if normalized_system_prompt and normalized_system_prompt != self.base_prompt:
             system_sections.append(normalized_system_prompt)
+        if role_prompt and role_prompt.strip():
+            normalized_role_prompt = role_prompt.strip()
+            if ROLE_SAFETY_RIDER not in normalized_role_prompt:
+                normalized_role_prompt = f"{normalized_role_prompt}\n{ROLE_SAFETY_RIDER}"
+            system_sections.append(normalized_role_prompt)
         if subject_supplement and subject_supplement.strip():
             system_sections.append(subject_supplement.strip())
         system_sections.extend([

@@ -8,6 +8,7 @@ from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_se
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
 from backend.models.user import UserRole
+from backend.subjects import SUBJECT_SET
 from backend.time_utils import serialize_datetime_for_api
 
 
@@ -140,6 +141,7 @@ class MessageRead(BaseModel):
     turn_index: int
     guidance_stage: GuidanceStage
     llm_model_key: str | None = None
+    agent_role_snapshot: dict[str, Any] | None = None
     created_at: datetime
 
     @field_validator("suggested_replies", mode="before")
@@ -170,6 +172,7 @@ class ConversationArchiveMessageRead(BaseModel):
     turn_index: int
     guidance_stage: GuidanceStage
     llm_model_key: str | None = None
+    agent_role_snapshot: dict[str, Any] | None = None
     created_at: datetime
 
 
@@ -207,6 +210,7 @@ class ChatRequest(BaseModel):
     conversation_id: int | None = None
     request_id: str | None = None
     llm_model: str | None = Field(default="minimax-m27", max_length=64)
+    role_id: int | None = Field(default=None, gt=0)
 
 
 class ChatModelQuotaRead(BaseModel):
@@ -445,6 +449,145 @@ class AgentConfigRead(BaseModel):
     filter_rules: dict[str, Any]
     is_active: bool
     created_at: datetime
+
+
+AgentRoleTone = Literal["warm", "rigorous", "humorous", "calm", "poetic"]
+AgentRoleExplanationPace = Literal[
+    "concise_steps",
+    "guided_questions",
+    "intuition_then_concept",
+    "example_then_summary",
+]
+AgentRoleAnalogyStyle = Literal[
+    "daily_life",
+    "experiment",
+    "thought_experiment",
+    "literary_imagery",
+    "historical_context",
+    "minimal",
+]
+AgentRoleFormality = Literal["conversational", "natural", "formal"]
+AgentRoleSentenceLength = Literal["short", "medium", "varied"]
+AgentRoleTrait = Literal[
+    "simple_analogies",
+    "student_restate",
+    "evidence_first",
+    "thought_experiments",
+    "literary_imagery",
+    "concise_language",
+    "gentle_humor",
+]
+
+
+class AgentRoleStyleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tone: AgentRoleTone = "warm"
+    explanation_pace: AgentRoleExplanationPace = "guided_questions"
+    analogy_style: AgentRoleAnalogyStyle = "daily_life"
+    formality: AgentRoleFormality = "natural"
+    sentence_length: AgentRoleSentenceLength = "medium"
+    traits: list[AgentRoleTrait] = Field(default_factory=list, max_length=3)
+
+    @field_validator("traits")
+    @classmethod
+    def validate_unique_traits(cls, value: list[AgentRoleTrait]) -> list[AgentRoleTrait]:
+        if len(value) != len(set(value)):
+            raise ValueError("traits must be unique")
+        return value
+
+
+class AgentRoleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=2, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
+    display_name: str = Field(min_length=1, max_length=64)
+    emoji: str | None = Field(default=None, max_length=16)
+    description: str = Field(default="", max_length=255)
+    subjects: list[str] | None = None
+    sort_order: int = Field(default=0, ge=-10000, le=10000)
+    style_config: AgentRoleStyleConfig = Field(default_factory=AgentRoleStyleConfig)
+
+    @field_validator("name", "display_name", "emoji", "description", mode="before")
+    @classmethod
+    def strip_text_fields(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("subjects")
+    @classmethod
+    def validate_subjects(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = list(dict.fromkeys(subject.strip() for subject in value if subject.strip()))
+        unsupported = sorted(set(normalized) - SUBJECT_SET)
+        if unsupported:
+            raise ValueError(f"unsupported subjects: {', '.join(unsupported)}")
+        return normalized or None
+
+
+class AgentRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=64)
+    emoji: str | None = Field(default=None, max_length=16)
+    description: str = Field(default="", max_length=255)
+    subjects: list[str] | None = None
+    sort_order: int = Field(default=0, ge=-10000, le=10000)
+    style_config: AgentRoleStyleConfig
+
+    @field_validator("display_name", "emoji", "description", mode="before")
+    @classmethod
+    def strip_text_fields(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("subjects")
+    @classmethod
+    def validate_subjects(cls, value: list[str] | None) -> list[str] | None:
+        return AgentRoleCreate.validate_subjects(value)
+
+
+class AgentRoleEnabledUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_enabled: bool
+
+
+class AgentRoleRevisionRead(BaseModel):
+    id: int
+    revision: int
+    style_config: AgentRoleStyleConfig
+    renderer_version: str
+    content_hash: str
+    created_at: datetime
+
+
+class AgentRoleRead(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    emoji: str | None = None
+    description: str
+    subjects: list[str] | None = None
+    current_revision_id: int
+    is_enabled: bool
+    sort_order: int
+    current_revision: AgentRoleRevisionRead
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRolePublicRead(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    emoji: str | None = None
+    description: str
+    subjects: list[str] | None = None
+
+
+class AgentRoleImportResult(BaseModel):
+    created: int
+    skipped: int
 
 
 class NotificationWrite(BaseModel):

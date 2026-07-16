@@ -105,6 +105,8 @@ class Message(TimestampMixin, Base):
     turn_index: Mapped[int] = mapped_column(Integer, default=0)
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
     llm_model_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    agent_role_revision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    agent_role_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     attachment: Mapped["ChatMessageAttachment | None"] = relationship(

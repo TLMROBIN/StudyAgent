@@ -55,6 +55,25 @@ export interface ChatMessageRead {
   attachment?: ChatMessageAttachment | null
   assets?: KnowledgeAsset[]
   suggested_replies?: string[]
+  agent_role_snapshot?: AgentRoleSnapshot | null
+}
+
+export interface AgentRoleSnapshot {
+  role_id: number
+  name: string
+  display_name: string
+  revision_id: number
+  revision: number
+  content_hash: string
+}
+
+export interface AgentRolePublic {
+  id: number
+  name: string
+  display_name: string
+  emoji?: string | null
+  description: string
+  subjects?: string[] | null
 }
 
 export interface ChatConversationRead {
@@ -69,6 +88,7 @@ export interface StreamChatRequest {
   conversation_id?: number | null
   request_id?: string | null
   llm_model?: string | null
+  role_id?: number | null
   image?: File | null
 }
 
@@ -757,6 +777,10 @@ function buildStreamChatFormData(payload: StreamChatRequest): FormData {
 
   if (typeof payload.llm_model === 'string' && payload.llm_model) {
     formData.append('llm_model', payload.llm_model)
+  }
+
+  if (typeof payload.role_id === 'number') {
+    formData.append('role_id', String(payload.role_id))
   }
 
   if (payload.image instanceof File) {

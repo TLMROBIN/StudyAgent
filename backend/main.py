@@ -10,9 +10,9 @@ from backend.config import get_settings
 from backend.database import Base, SessionLocal, apply_runtime_schema_updates, engine
 from backend.middleware.auth import RequestContextMiddleware
 from backend.middleware.rate_limit import SlidingWindowRateLimitMiddleware
-from backend.models import agent_config, audit_log, conversation, feedback, knowledge, llm_provider, notification, user  # noqa: F401
+from backend.models import agent_config, agent_role, audit_log, conversation, feedback, knowledge, llm_provider, notification, user  # noqa: F401
 from backend.observability import setup_logging
-from backend.routers import admin, agent_config as agent_config_router, auth, chat, feedback as feedback_router, knowledge as knowledge_router, llm_provider as llm_provider_router, llm_usage as llm_usage_router, notifications as notifications_router, release_notes as release_notes_router, stats
+from backend.routers import admin, agent_config as agent_config_router, agent_role as agent_role_router, auth, chat, feedback as feedback_router, knowledge as knowledge_router, llm_provider as llm_provider_router, llm_usage as llm_usage_router, notifications as notifications_router, release_notes as release_notes_router, stats
 from backend.security import get_password_hash
 from backend.services.auth_service import auth_service
 from backend.services.chat_image_understanding_service import stop_paddleocr_worker, warmup_paddleocr_worker
@@ -112,6 +112,7 @@ app.include_router(chat.router)
 app.include_router(knowledge_router.router)
 app.include_router(stats.router)
 app.include_router(agent_config_router.router)
+app.include_router(agent_role_router.router)
 app.include_router(llm_provider_router.router)
 app.include_router(llm_usage_router.router)
 app.include_router(notifications_router.router)
