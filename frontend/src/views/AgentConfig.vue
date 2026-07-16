@@ -10,6 +10,7 @@ interface AgentConfigItem {
   system_prompt: string
   guidance_params: Record<string, unknown>
   subject_prompts: Record<string, string>
+  filter_rules?: Record<string, unknown>
   is_active: boolean
 }
 
@@ -20,6 +21,13 @@ const form = reactive({
   system_prompt: '',
   max_questions_per_turn: 2,
   fallback_after_turns: 3,
+  incentive_enabled: false,
+  incentive_daily_cap: 60,
+  incentive_followup_points: 2,
+  incentive_early_resolved_points: 15,
+  incentive_fallback_resolved_points: 5,
+  incentive_practice_points: 8,
+  incentive_reflection_points: 5,
 })
 // 每科追加提示词与可选 max_questions 覆盖（留空=继承全局）
 const subjectPrompts = reactive<Record<string, string>>(
@@ -39,6 +47,31 @@ const subjectPromptDefaults = ref<Record<string, string> | null>(null)
 async function loadConfigs() {
   const { data } = await api.get<AgentConfigItem[]>(agentConfigCollectionPath)
   configs.value = data
+  const active = data.find((item) => item.is_active)
+  if (active) {
+    const incentive = (active.guidance_params?.incentive || {}) as Record<string, unknown>
+    const points = (incentive.points || {}) as Record<string, unknown>
+    const bySubject = (active.guidance_params?.by_subject || {}) as Record<string, Record<string, unknown>>
+    form.system_prompt = active.system_prompt
+    form.max_questions_per_turn = Number(active.guidance_params?.max_questions_per_turn || 2)
+    form.fallback_after_turns = Number(active.guidance_params?.fallback_after_turns || 3)
+    form.incentive_enabled = incentive.enabled === true
+    form.incentive_daily_cap = Number(incentive.daily_total_cap ?? 60)
+    form.incentive_followup_points = Number(points.followup_answered ?? 2)
+    form.incentive_early_resolved_points = Number(points.early_resolved ?? 15)
+    form.incentive_fallback_resolved_points = Number(points.resolved_after_fallback ?? 5)
+    form.incentive_practice_points = Number(points.practice_passed ?? 8)
+    form.incentive_reflection_points = Number(points.reflection_submitted ?? 5)
+    for (const subject of SUBJECTS) {
+      subjectPrompts[subject] = active.subject_prompts?.[subject] || ''
+      const override = bySubject[subject] || {}
+      const llmParams = (override.llm_params || {}) as Record<string, unknown>
+      subjectMaxQuestions[subject] = typeof override.max_questions_per_turn === 'number'
+        ? override.max_questions_per_turn
+        : null
+      subjectTemperature[subject] = typeof llmParams.temperature === 'number' ? llmParams.temperature : null
+    }
+  }
 }
 
 async function ensureDefaultsLoaded(): Promise<Record<string, string>> {
@@ -78,29 +111,62 @@ async function fillAllSubjectDefaults() {
 }
 
 async function createConfig() {
-  const guidanceParams: Record<string, unknown> = {
+  const active = configs.value.find((item) => item.is_active)
+  const guidanceParams: Record<string, unknown> = structuredClone(active?.guidance_params || {})
+  Object.assign(guidanceParams, {
     max_questions_per_turn: form.max_questions_per_turn,
     fallback_after_turns: form.fallback_after_turns,
+  })
+  const previousIncentive = (guidanceParams.incentive || {}) as Record<string, unknown>
+  const previousPoints = (previousIncentive.points || {}) as Record<string, unknown>
+  guidanceParams.incentive = {
+    ...previousIncentive,
+    enabled: form.incentive_enabled,
+    daily_total_cap: form.incentive_daily_cap,
+    points: {
+      ...previousPoints,
+      followup_answered: form.incentive_followup_points,
+      early_resolved: form.incentive_early_resolved_points,
+      resolved_after_fallback: form.incentive_fallback_resolved_points,
+      practice_passed: form.incentive_practice_points,
+      reflection_submitted: form.incentive_reflection_points,
+    },
   }
-  const bySubject: Record<string, Record<string, unknown>> = {}
+  const bySubject = structuredClone(
+    (guidanceParams.by_subject || {}) as Record<string, Record<string, unknown>>,
+  )
   for (const subject of SUBJECTS) {
-    const override: Record<string, unknown> = {}
+    const override: Record<string, unknown> = { ...(bySubject[subject] || {}) }
     const value = subjectMaxQuestions[subject]
     if (typeof value === 'number' && value >= 1 && value <= 3) {
       override.max_questions_per_turn = value
+    } else {
+      delete override.max_questions_per_turn
     }
+    const llmParams = { ...((override.llm_params || {}) as Record<string, unknown>) }
     const temperature = subjectTemperature[subject]
     if (typeof temperature === 'number' && temperature >= 0 && temperature <= 1.5) {
-      override.llm_params = { temperature }
+      llmParams.temperature = temperature
+    } else {
+      delete llmParams.temperature
+    }
+    if (Object.keys(llmParams).length > 0) {
+      override.llm_params = llmParams
+    } else {
+      delete override.llm_params
     }
     if (Object.keys(override).length > 0) {
       bySubject[subject] = override
+    } else {
+      delete bySubject[subject]
     }
   }
   if (Object.keys(bySubject).length > 0) {
     guidanceParams.by_subject = bySubject
+  } else {
+    delete guidanceParams.by_subject
   }
-  const promptsPayload: Record<string, string> = {}
+  const promptsPayload: Record<string, string> = { ...(active?.subject_prompts || {}) }
   for (const subject of SUBJECTS) {
     const text = (subjectPrompts[subject] ?? '').trim()
     if (text) {
@@ -111,14 +177,8 @@ async function createConfig() {
     system_prompt: form.system_prompt,
     guidance_params: guidanceParams,
     subject_prompts: promptsPayload,
-    filter_rules: {},
+    filter_rules: active?.filter_rules || {},
   })
-  form.system_prompt = ''
-  for (const subject of SUBJECTS) {
-    subjectPrompts[subject] = ''
-    subjectMaxQuestions[subject] = null
-    subjectTemperature[subject] = null
-  }
   ElMessage.success('已创建新版本')
   await loadConfigs()
 }
@@ -160,6 +220,24 @@ onMounted(async () => {
           <el-input-number v-model="form.fallback_after_turns" :min="1" :max="6" />
         </label>
       </div>
+      <section class="incentive-config">
+        <div class="panel-header panel-header--wrap">
+          <div>
+            <p class="eyebrow">Student Incentive</p>
+            <h3>学生成长激励</h3>
+            <p class="panel-subcopy">默认关闭。完成部署与回归验证后，再通过新配置版本显式开启。</p>
+          </div>
+          <el-switch v-model="form.incentive_enabled" active-text="启用" inactive-text="关闭" />
+        </div>
+        <div class="param-row">
+          <label>每日总积分上限<el-input-number v-model="form.incentive_daily_cap" :min="0" :max="500" /></label>
+          <label>跟随引导<el-input-number v-model="form.incentive_followup_points" :min="0" :max="50" /></label>
+          <label>兜底前解决<el-input-number v-model="form.incentive_early_resolved_points" :min="0" :max="100" /></label>
+          <label>兜底后解决<el-input-number v-model="form.incentive_fallback_resolved_points" :min="0" :max="100" /></label>
+          <label>练习通过<el-input-number v-model="form.incentive_practice_points" :min="0" :max="100" /></label>
+          <label>提交反思<el-input-number v-model="form.incentive_reflection_points" :min="0" :max="100" /></label>
+        </div>
+      </section>
       <el-collapse class="subject-collapse">
         <el-collapse-item
           v-for="subject in SUBJECTS"
@@ -240,6 +318,15 @@ onMounted(async () => {
   gap: 6px;
   font-size: 13px;
   color: var(--el-text-color-regular, #606266);
+}
+.incentive-config {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(53, 112, 99, .05);
 }
 .subject-collapse {
   margin: 12px 0;

@@ -128,6 +128,14 @@ class StudentChatUser(StudyAgentUser):
     def conversation_history(self):
         self.client.get("/api/chat/history", headers=self._authorized_headers(), name="/api/chat/history")
 
+    @task(1)
+    def incentive_summary(self):
+        self.client.get(
+            "/api/incentive/me/summary",
+            headers=self._authorized_headers(),
+            name="/api/incentive/me/summary",
+        )
+
     @task(3)
     def chat_stream(self):
         if not self.enable_stream:

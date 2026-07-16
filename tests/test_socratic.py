@@ -85,6 +85,28 @@ def test_build_prompt_adds_practice_review_context():
     assert "已知 $2x+3=11$，求 $x$。" in system_text
     assert "参考答案：4" in system_text
     assert "两边先减 3，再除以 2。" in system_text
+    assert "【判定】正确" in system_text
+
+
+def test_build_prompt_adds_hidden_quality_signal_only_when_enabled():
+    disabled = socratic_service.build_prompt(
+        question="为什么有惯性",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+        guidance_params={"incentive": {"llm_signal_enabled": False}},
+    )
+    enabled = socratic_service.build_prompt(
+        question="为什么有惯性",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="",
+        guidance_params={"incentive": {"llm_signal_enabled": True}},
+    )
+    assert "[[sig:answer_quality=" not in disabled.messages[0]["content"]
+    assert "[[sig:answer_quality=high]]" in enabled.messages[0]["content"]
 
 
 def test_build_prompt_does_not_force_disclaimer_for_high_confidence_image_turn():

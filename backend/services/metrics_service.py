@@ -70,6 +70,11 @@ chat_intent_classify_total = Counter(
     ["result"],
 )
 chat_practice_review_total = Counter("chat_practice_review_total", "Practice answer review turns", ["subject"])
+incentive_events_total = Counter(
+    "incentive_events_total",
+    "Student incentive ledger events persisted",
+    ["event_type", "awarded"],
+)
 chat_image_vision_call_failures_total = Counter(
     "chat_image_vision_call_failures_total",
     "Vision model calls failed during chat image understanding",

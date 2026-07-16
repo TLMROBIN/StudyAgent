@@ -152,6 +152,16 @@ class MessageRead(BaseModel):
         return [str(item).strip() for item in value if str(item).strip()]
 
 
+class IncentiveGrantRead(BaseModel):
+    points_awarded: int = 0
+    awarded_events: list[str] = Field(default_factory=list)
+    new_badges: list[str] = Field(default_factory=list)
+    level_up: int | None = None
+    level: int = 1
+    total_points: int = 0
+    streak: int = 0
+
+
 class ConversationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -163,6 +173,7 @@ class ConversationRead(BaseModel):
     duration_seconds: int
     created_at: datetime
     messages: list[MessageRead] = []
+    incentive: IncentiveGrantRead | None = None
 
 
 class ConversationArchiveMessageRead(BaseModel):
@@ -260,6 +271,13 @@ class QuestionRecommendationRequest(BaseModel):
 
 class ResolveConversationRequest(BaseModel):
     resolved: bool = True
+    reflection: str | None = Field(default=None, min_length=20, max_length=500)
+
+    @field_validator("reflection")
+    @classmethod
+    def normalize_reflection(cls, value: str | None) -> str | None:
+        normalized = (value or "").strip()
+        return normalized or None
 
 
 class KnowledgeDocumentRead(BaseModel):
@@ -939,3 +957,80 @@ class UserImportResult(BaseModel):
     skipped_existing: int
     invalid: int
     issues: list[UserImportIssue] = []
+
+
+class IncentiveSummaryRead(BaseModel):
+    total_points: int = 0
+    level: int = 1
+    next_level_points: int | None = None
+    current_streak_days: int = 0
+    longest_streak_days: int = 0
+    badges: list[str] = Field(default_factory=list)
+    counters: dict[str, Any] = Field(default_factory=dict)
+    has_unread_praise: bool = False
+
+
+class IncentiveDailyPointRead(BaseModel):
+    date: str
+    points: int
+
+
+class IncentiveReportRead(BaseModel):
+    period: Literal["week", "month"]
+    event_counts: dict[str, int] = Field(default_factory=dict)
+    subject_points: dict[str, int] = Field(default_factory=dict)
+    daily_points: list[IncentiveDailyPointRead] = Field(default_factory=list)
+    followup_rate: float = 0.0
+    early_resolve_rate: float = 0.0
+    narrative: str
+
+
+class IncentivePraiseCreate(BaseModel):
+    student_id: int = Field(gt=0)
+    content: str = Field(min_length=5, max_length=240)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_praise_content(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("Praise must contain at least 5 characters")
+        return normalized
+
+
+class IncentivePraiseRead(BaseModel):
+    id: int
+    content: str
+    teacher_name: str
+    points: int
+    created_at: datetime
+
+
+class TeacherIncentivePortraitRead(BaseModel):
+    student_id: int
+    student_name: str
+    classroom_label: str | None = None
+    total_points: int = 0
+    level: int = 1
+    current_streak_days: int = 0
+    weekly_learning_days: int = 0
+    weekly_followups: int = 0
+    quality_resolves: int = 0
+    last_praise_at: datetime | None = None
+
+
+class IncentiveReflectionRead(BaseModel):
+    id: int
+    conversation_id: int | None = None
+    subject: str | None = None
+    reflection: str
+    created_at: datetime
+
+
+class IncentiveReflectionPage(BaseModel):
+    student_id: int
+    student_name: str
+    items: list[IncentiveReflectionRead] = Field(default_factory=list)
+    total: int
+    page: int
+    page_size: int

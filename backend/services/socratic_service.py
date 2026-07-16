@@ -169,6 +169,13 @@ class SocraticService:
             f"每次回复最多提出 {max_questions} 个引导问题，且必须聚焦同一个思考点；"
             "不要在一条回复中并列多个问题让学生逐一回答，需要追问时分多轮进行。"
         )
+        incentive_params = effective_params.get("incentive")
+        if isinstance(incentive_params, dict) and incentive_params.get("llm_signal_enabled") is True:
+            system_sections.append(
+                "回复正文结束后另起一行输出且只输出一个内部质量标记："
+                "[[sig:answer_quality=high]]、[[sig:answer_quality=medium]] 或 "
+                "[[sig:answer_quality=low]]。该标记不得出现在正文其他位置。"
+            )
         if physics_strategy:
             system_sections.append(physics_strategy.prompt_section)
             if physics_strategy.teaching_mode.value == "concept_intuition":
@@ -206,7 +213,8 @@ class SocraticService:
         if practice_context:
             practice_parts = [
                 "判卷模式：学生正在回答上一轮系统发出的练习题。请先判断学生答案是否正确，"
-                "再用参考答案和关键步骤解释原因；此模式下可以明确说明正确答案，但不要代做新的题目。",
+                "再用参考答案和关键步骤解释原因；此模式下可以明确说明正确答案，但不要代做新的题目。"
+                "回复第一行必须严格写为【判定】正确、【判定】部分正确或【判定】不正确三者之一。",
             ]
             question_text = str(practice_context.get("question_text") or "").strip()
             answer_text = str(practice_context.get("answer_text") or "").strip()

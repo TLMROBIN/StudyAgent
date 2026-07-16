@@ -87,6 +87,9 @@ def activate_agent_config(config_id: int, db: DbSession, current_user: CurrentAd
     db.add(item)
     db.commit()
     db.refresh(item)
+    from backend.routers.chat import invalidate_active_agent_config_cache
+
+    invalidate_active_agent_config_cache()
     audit_service.log(
         db,
         actor=current_user,

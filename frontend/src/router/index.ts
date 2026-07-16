@@ -15,6 +15,7 @@ const Login = () => import('../views/Login.vue')
 const ModelManage = () => import('../views/ModelManage.vue')
 const StudentChat = () => import('../views/StudentChat.vue')
 const StudentFeedback = () => import('../views/StudentFeedback.vue')
+const StudentGrowth = () => import('../views/StudentGrowth.vue')
 const UserManage = () => import('../views/UserManage.vue')
 
 const router = createRouter({
@@ -24,6 +25,7 @@ const router = createRouter({
     { path: '/login', component: Login, meta: { public: true } },
     { path: '/student', component: StudentChat, meta: { requiresAuth: true, roles: ['student'] } },
     { path: '/student/feedback', component: StudentFeedback, meta: { requiresAuth: true, roles: ['student'] } },
+    { path: '/student/growth', component: StudentGrowth, meta: { requiresAuth: true, roles: ['student'] } },
     { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/knowledge', component: KnowledgeManage, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/feedback', component: AdminFeedback, meta: { requiresAuth: true, roles: ['admin'] } },
