@@ -247,6 +247,12 @@ class ChatModelStatusRead(BaseModel):
     message: str = ""
 
 
+class ChatSubjectOptionRead(BaseModel):
+    name: str
+    knowledge_base_available: bool = False
+    question_bank_available: bool = False
+
+
 class QuestionRecommendationRequest(BaseModel):
     subject: str
     recommendation_mode: Literal["context", "keyword"] = "keyword"

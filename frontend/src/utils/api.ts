@@ -121,6 +121,12 @@ export interface ChatModelStatus {
   message: string
 }
 
+export interface ChatSubjectOption {
+  name: string
+  knowledge_base_available: boolean
+  question_bank_available: boolean
+}
+
 export interface LLMProviderAccount {
   id: number
   provider_name: string
@@ -440,6 +446,11 @@ export async function fetchChatModelStatuses(): Promise<ChatModelStatus[]> {
   return data
 }
 
+export async function fetchChatSubjects(): Promise<ChatSubjectOption[]> {
+  const { data } = await api.get<ChatSubjectOption[]>('/chat/subjects')
+  return data
+}
+
 export async function fetchActiveNotifications(): Promise<NotificationItem[]> {
   const { data } = await api.get<NotificationItem[]>('/notifications/active')
   return data
@@ -652,6 +663,16 @@ function isSessionExpiredError(error: unknown): boolean {
   return error instanceof Error && error.name === 'SessionExpiredError'
 }
 
+class StreamResponseError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'StreamResponseError'
+    this.status = status
+  }
+}
+
 export async function streamChat(
   payload: StreamChatRequest,
   onEvent: (event: StreamEvent) => void,
@@ -697,7 +718,7 @@ export async function streamChat(
           }
         }
         const detail = await response.text().catch(() => '')
-        throw new Error(extractResponseDetail(detail, response.status))
+        throw new StreamResponseError(extractResponseDetail(detail, response.status), response.status)
       }
 
       reader = response.body.getReader()

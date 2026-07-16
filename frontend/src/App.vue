@@ -184,7 +184,7 @@ function toggleSidebar() {
               <span class="sidebar-brand-name" aria-hidden="true">StudyAgent</span>
               <span class="sidebar-brand-mark" aria-hidden="true">SA</span>
             </p>
-            <h1 class="brand-title">{{ sidebarIsCollapsed ? '答疑' : '高中学科答疑' }}</h1>
+            <p class="brand-title">{{ sidebarIsCollapsed ? '答疑' : '高中学科答疑' }}</p>
             <p v-if="!sidebarIsCollapsed" class="brand-copy">专属知识库 + 苏格拉底引导，先帮你想清楚，再帮你做出来。</p>
           </div>
           <button v-if="!forceCompactStudentShell" class="sidebar-toggle" @click="toggleSidebar">
@@ -210,7 +210,7 @@ function toggleSidebar() {
           <strong>{{ sidebarIsCollapsed ? sidebarUserBadge : auth.user.full_name }}</strong>
           <span v-if="!sidebarIsCollapsed">{{ auth.user.role }}</span>
         </div>
-        <button class="ghost-button sidebar-logout" @click="handleLogout">
+        <button type="button" class="ghost-button sidebar-logout" aria-label="退出登录" @click="handleLogout">
           {{ sidebarIsCollapsed ? '退出' : '退出登录' }}
         </button>
       </div>

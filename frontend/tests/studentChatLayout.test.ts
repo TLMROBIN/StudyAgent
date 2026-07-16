@@ -89,8 +89,12 @@ assert.match(
 assert.match(studentChatSource, /return replies\.slice\(0, 3\)/, 'suggested replies should stay within the working-memory limit')
 assert.match(studentChatSource, /class="chat-empty-state"/, 'first use should provide a meaningful empty state')
 assert.match(studentChatSource, /STARTER_PROMPTS/, 'first use should provide concrete starting prompts')
-assert.match(studentChatSource, /role="log"[\s\S]*?aria-live="polite"/, 'chat updates should be announced accessibly')
-assert.match(studentChatSource, /class="sr-only" aria-live="polite"/, 'streaming state should have a dedicated live region')
+assert.match(studentChatSource, /role="log"[\s\S]*?aria-live="off"/, 'chat chunks should not trigger repeated live announcements')
+assert.match(
+  studentChatSource,
+  /class="sr-only" aria-live="polite" aria-atomic="true">\{\{ screenReaderAnnouncement \}\}/,
+  'streaming state and final replies should use one atomic live region',
+)
 assert.doesNotMatch(studentChatSource, /Student Workspace/, 'student surface should not use generic English eyebrow copy')
 assert.doesNotMatch(studentChatSource, /class="student-notice-bar"/, 'school notices should not use the old marquee container')
 assert.doesNotMatch(styles, /notice-marquee/, 'school notices should not animate continuously')

@@ -30,12 +30,13 @@ from backend.models.conversation import (
     normalize_conversation_seed,
 )
 from backend.models.llm_model import LLMModelConfig, QuotaBillingMode
-from backend.models.knowledge import KnowledgeChunk
+from backend.models.knowledge import DocumentStatus, KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.models.incentive import StudentIncentiveEvent
 from backend.models.schemas import (
     ChatModelOptionRead,
     ChatModelQuotaRead,
     ChatModelStatusRead,
+    ChatSubjectOptionRead,
     ChatRequest,
     ConversationRead,
     QuestionRecommendationRead,
@@ -87,7 +88,7 @@ from backend.services.incentive_service import QualitySignalFilter, incentive_se
 from backend.services.subject_profile_service import subject_profile_service
 from backend.services.suggested_reply_service import suggested_reply_service
 from backend.services.store_service import BaseStore, store
-from backend.subjects import is_valid_subject
+from backend.subjects import SUBJECTS, is_valid_subject
 from backend.time_utils import now_utc
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -109,6 +110,7 @@ ANSWER_SUBMISSION_RE = re.compile(r"[A-Da-d]|\d|[=≈]|^是|^不是|^对|^错|^�
 ANSWER_REQUEST_RE = re.compile(r"直接(告诉|给|说)|答案是什么|是多少|不会|不知道|怎么做")
 SHORT_FOLLOWUP_BLOCK_RE = re.compile(r"怎么|为什么|什么是|讲|解释|求|计算|证明|答案|不会|不知道|直接|再来|出一道|推荐")
 SHORT_FOLLOWUP_PROMPT_MARKERS = ("？", "?", "请你", "你先", "试着", "能不能", "能否", "哪些", "什么条件", "是否", "吗")
+QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
 
 
 def _looks_like_answer_submission(text: str) -> bool:
@@ -1359,6 +1361,31 @@ def list_chat_models(db: DbSession, current_user: CurrentUser) -> list[ChatModel
 @router.get("/models/status", response_model=list[ChatModelStatusRead])
 async def list_chat_model_statuses(current_user: CurrentUser) -> list[ChatModelStatusRead]:
     return [ChatModelStatusRead(**item) for item in await llm_service.chat_model_statuses()]
+
+
+@router.get("/subjects", response_model=list[ChatSubjectOptionRead])
+def list_chat_subjects(db: DbSession, current_user: CurrentUser) -> list[ChatSubjectOptionRead]:
+    rows = db.execute(
+        select(KnowledgeDocument.subject, KnowledgeDocument.resource_type)
+        .join(KnowledgeChunk, KnowledgeChunk.document_id == KnowledgeDocument.id)
+        .where(
+            KnowledgeDocument.status == DocumentStatus.COMPLETED,
+            KnowledgeChunk.is_disabled.is_(False),
+        )
+        .distinct()
+    ).all()
+    resource_types_by_subject: dict[str, set[str]] = {}
+    for subject, resource_type in rows:
+        resource_types_by_subject.setdefault(subject, set()).add(str(resource_type or ""))
+
+    return [
+        ChatSubjectOptionRead(
+            name=subject,
+            knowledge_base_available=bool(resource_types_by_subject.get(subject)),
+            question_bank_available=bool(resource_types_by_subject.get(subject, set()) & QUESTION_RESOURCE_TYPES),
+        )
+        for subject in SUBJECTS
+    ]
 
 
 @router.get("/history", response_model=list[ConversationRead])
