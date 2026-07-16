@@ -55,10 +55,15 @@ const recommendationDifficultyOptions = [
   { value: 'advanced', label: '更难题' },
 ] as const
 const GUIDANCE_STAGE_LABELS: Record<string, string> = {
-  initial_guidance: '初始引导',
-  scaffold_hint: '逐步提示',
-  fallback_walkthrough: '兜底讲解',
+  initial_guidance: '先梳理题意',
+  scaffold_hint: '正在搭起解题思路',
+  fallback_walkthrough: '等你完成最后一步',
 }
+const STARTER_PROMPTS = [
+  '我已经读完题目，但还不知道第一步该做什么。',
+  '我试过一种方法，卡在这里了：',
+  '请先帮我检查已知条件，不要直接给答案。',
+]
 const subjects = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
 const DEFAULT_CHAT_MODELS: ChatModelOption[] = [
   { key: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', description: '通用快捷' },
@@ -79,7 +84,7 @@ const difficultyOptions = [
 const IMAGE_ONLY_PLACEHOLDER = '[图片提问]'
 const MODEL_STATUS_REFRESH_MS = 300000
 const form = reactive({
-  subject: '数学',
+  subject: '物理',
   message: '',
   llmModel: 'deepseek-v4-flash',
   roleId: null as number | null,
@@ -104,6 +109,8 @@ const incentiveSummary = ref<IncentiveSummary>({
 })
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
+const historyOpen = ref(false)
+const settingsOpen = ref(false)
 const passwordDialogVisible = ref(false)
 const passwordChanging = ref(false)
 const deletingConversationIds = ref<Set<number>>(new Set())
@@ -157,6 +164,15 @@ const visibleRecommendations = computed(() => (
 const selectedModelStatus = computed(() => chatModelStatuses.value[form.llmModel]?.status || 'unknown')
 const selectedModel = computed(() => chatModels.value.find((item) => item.key === form.llmModel) || null)
 const selectedModelQuotaExhausted = computed(() => Boolean(selectedModel.value?.quota?.quota_exhausted))
+const serviceStatusLabel = computed(() => {
+  if (selectedModelQuotaExhausted.value || selectedModelStatus.value === 'unavailable') {
+    return '正在切换可用服务'
+  }
+  if (selectedModelStatus.value === 'available') {
+    return '答疑服务可用'
+  }
+  return modelStatusLoading.value ? '正在检测答疑服务' : '答疑服务状态待确认'
+})
 const canSend = computed(() => (
   Boolean(form.message.trim() || pendingImageFile.value)
   && selectedModelStatus.value !== 'unavailable'
@@ -169,6 +185,7 @@ const notificationText = computed(() => {
   }
   return notifications.value.map((item) => `${item.title}：${item.content}`).join('   /   ')
 })
+const notificationTitle = computed(() => notifications.value[0]?.title || '学校通知')
 const canRequestRecommendations = computed(() => {
   if (recommendationMode.value === 'keyword') {
     return recommendationKeyword.value.trim().length >= 2
@@ -217,8 +234,10 @@ async function loadChatModels() {
     if (!chatModels.value.some((item) => item.key === form.llmModel)) {
       form.llmModel = chatModels.value[0]?.key || 'deepseek-v4-flash'
     }
+    selectBestAvailableModel()
   } catch {
     chatModels.value = DEFAULT_CHAT_MODELS
+    selectBestAvailableModel()
   }
 }
 
@@ -241,6 +260,7 @@ async function refreshChatModelStatuses() {
   try {
     const statuses = await fetchChatModelStatuses()
     chatModelStatuses.value = Object.fromEntries(statuses.map((item) => [item.key, item]))
+    selectBestAvailableModel()
   } catch {
     chatModelStatuses.value = {}
   } finally {
@@ -256,47 +276,21 @@ function chatModelStatus(modelKey: string): ChatModelStatus {
   }
 }
 
-function chatModelStatusLabel(modelKey: string): string {
-  const status = chatModelStatus(modelKey)
-  const model = chatModels.value.find((item) => item.key === modelKey)
-  if (model?.quota?.quota_exhausted) {
-    return model.quota.message || '额度已用完'
-  }
-  if (status.status === 'available') {
-    return '可用'
-  }
-  if (status.status === 'unavailable') {
-    return status.message || '不可用'
-  }
-  return modelStatusLoading.value ? '检测中' : '状态未知'
-}
-
 function isChatModelUnavailable(modelKey: string): boolean {
   const model = chatModels.value.find((item) => item.key === modelKey)
   return chatModelStatus(modelKey).status === 'unavailable' || Boolean(model?.quota?.quota_exhausted)
 }
 
-function chatModelQuotaLabel(model: ChatModelOption): string {
-  const quota = model.quota
-  if (!quota) {
-    return ''
+function selectBestAvailableModel() {
+  const current = chatModels.value.find((item) => item.key === form.llmModel)
+  if (current && !isChatModelUnavailable(current.key)) {
+    return
   }
-  if (quota.message) {
-    return quota.message
+  const next = chatModels.value.find((item) => !isChatModelUnavailable(item.key))
+  if (next) {
+    form.llmModel = next.key
   }
-  if (model.billing_mode === 'request_count' && typeof quota.remaining_requests === 'number') {
-    return `今日剩余 ${quota.remaining_requests} / ${quota.daily_request_limit ?? '-'} 次`
-  }
-  if (model.billing_mode === 'token_usage' && typeof quota.remaining_tokens === 'number') {
-    return `今日剩余 ${quota.remaining_tokens.toLocaleString()} / ${quota.daily_token_limit ?? '-'} tokens`
-  }
-  if (model.billing_mode === 'free_local') {
-    return '本地模型'
-  }
-  return ''
 }
-
-
 
 async function openConversation(id: number) {
   currentConversationId.value = id
@@ -318,6 +312,7 @@ async function openConversation(id: number) {
   await loadAgentRoles(data.subject)
   await preloadMessageAttachments(messages.value)
   resetRecommendations()
+  historyOpen.value = false
   queueScrollToBottom()
 }
 
@@ -376,7 +371,16 @@ function startNewConversation(options: { subject?: string } = {}) {
   resetPendingImage()
   clearLocalAttachmentUrls()
   resetRecommendations()
+  historyOpen.value = false
   queueScrollToBottom()
+}
+
+function applyStarterPrompt(prompt: string) {
+  form.message = prompt
+  void nextTick(() => {
+    const root = messageInputRef.value?.$el || document.querySelector<HTMLElement>('.chat-message-input')
+    root?.querySelector<HTMLTextAreaElement>('textarea')?.focus()
+  })
 }
 
 function openPasswordDialog() {
@@ -1080,7 +1084,7 @@ function normalizeSuggestedReplies(value: unknown): string[] {
     replies.push(reply)
     seen.add(reply)
   })
-  return replies.slice(0, 5)
+  return replies.slice(0, 3)
 }
 
 function clearActiveSuggestedReplies() {
@@ -1269,64 +1273,135 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="page-grid student-page-grid">
-    <aside class="panel panel-tight student-history-panel">
-      <div class="panel-header panel-header--stack">
-        <div>
-          <p class="eyebrow">Student Workspace</p>
-          <h2>对话历史</h2>
+  <section class="student-page-grid student-study-page">
+    <section class="chat-panel study-surface">
+      <header class="study-session-header">
+        <div class="study-session-heading">
+          <div class="study-session-title-row">
+            <h1>把问题一步步想清楚</h1>
+            <span class="study-stage-chip">{{ stageLabel(guidanceStage) }}</span>
+          </div>
+          <p>从你卡住的地方开始，我会用问题陪你找到下一步。</p>
         </div>
-        <div class="row-actions">
-          <button class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
-          <button class="ghost-button" :disabled="sending" @click="openPasswordDialog">修改密码</button>
-          <button class="ghost-button" @click="loadConversations">刷新</button>
-        </div>
-      </div>
-      <RouterLink to="/student/growth" class="incentive-summary-card">
-        <div><span>成长积分</span><strong>{{ incentiveSummary.total_points }}</strong></div>
-        <div><span>等级</span><strong>L{{ incentiveSummary.level }}</strong></div>
-        <div><span>连续学习</span><strong>{{ incentiveSummary.current_streak_days }} 天</strong></div>
-      </RouterLink>
-      <div class="conversation-list">
-        <article
-          v-for="item in conversations"
-          :key="item.id"
-          class="conversation-card conversation-card--compact"
-        >
-          <button class="conversation-card__open" @click="openConversation(item.id)">
-            <strong class="conversation-card__topic">{{ conversationTopic(item) }}</strong>
-            <span class="conversation-card__meta">{{ item.subject }}</span>
-            <span>{{ stageLabel(item.guidance_stage) }}</span>
-            <span>{{ item.resolved ? '已解决' : '进行中' }}</span>
+        <div class="study-session-tools">
+          <el-select
+            v-model="form.subject"
+            class="session-subject-select"
+            :disabled="sending"
+            placeholder="选择学科"
+            aria-label="当前答疑学科"
+            @change="handleSubjectChange"
+          >
+            <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
+          </el-select>
+          <button type="button" class="study-tool-button" @click="historyOpen = true">
+            历史<span v-if="conversations.length" class="study-tool-count">{{ conversations.length }}</span>
           </button>
-          <div class="row-actions conversation-card__actions">
-            <button
-              class="ghost-button ghost-button--danger"
-              :disabled="sending || deletingConversationIds.has(item.id)"
-              @click="deleteConversation(item)"
+          <button
+            type="button"
+            class="study-tool-button"
+            :aria-expanded="settingsOpen"
+            aria-controls="study-session-settings"
+            @click="settingsOpen = !settingsOpen"
+          >
+            引导设置
+          </button>
+          <button
+            v-if="currentConversationId"
+            type="button"
+            class="study-tool-button"
+            :disabled="sending"
+            @click="toggleResolved"
+          >
+            标记已解决
+          </button>
+          <button type="button" class="primary-button study-new-question" :disabled="sending" @click="startNewConversation()">
+            新问题
+          </button>
+        </div>
+      </header>
+
+      <section
+        v-if="settingsOpen"
+        id="study-session-settings"
+        class="study-session-settings"
+        aria-label="答疑引导设置"
+      >
+        <div class="study-service-status" role="status" aria-live="polite">
+          <span class="study-service-dot" :data-status="selectedModelStatus"></span>
+          <div>
+            <strong>{{ serviceStatusLabel }}</strong>
+            <span>系统会自动选择当前最合适的答疑服务。</span>
+          </div>
+        </div>
+        <label v-if="agentRoles.length" class="study-setting-field">
+          <span>引导方式（可选）</span>
+          <el-select
+            v-model="form.roleId"
+            class="chat-role-select"
+            :disabled="sending"
+            clearable
+            placeholder="使用默认引导方式"
+            aria-label="选择引导方式"
+          >
+            <el-option
+              v-for="role in agentRoles"
+              :key="role.id"
+              :value="role.id"
+              :label="`${role.emoji || ''}${role.emoji ? ' ' : ''}${role.display_name}`"
             >
-              {{ deletingConversationIds.has(item.id) ? '删除中...' : '删除' }}
+              <div class="chat-role-option">
+                <strong>{{ role.emoji }} {{ role.display_name }}</strong>
+                <span>{{ role.description }}</span>
+              </div>
+            </el-option>
+          </el-select>
+        </label>
+      </section>
+
+      <details v-if="notifications.length" class="student-notice">
+        <summary>
+          <span class="student-notice__label">学校通知</span>
+          <span class="student-notice__preview">{{ notificationTitle }}</span>
+          <span class="student-notice__action">查看</span>
+        </summary>
+        <p>{{ notificationText }}</p>
+      </details>
+      <div v-else class="student-notice student-notice--empty" aria-label="学校通知">
+        <span class="student-notice__label">学校通知</span>
+        <span>暂无新通知，专心解决眼前的问题。</span>
+      </div>
+
+      <div
+        ref="chatStreamRef"
+        class="chat-stream"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        :aria-busy="sending"
+      >
+        <section v-if="!messages.length" class="chat-empty-state" aria-labelledby="chat-empty-title">
+          <div class="chat-empty-copy">
+            <h2 id="chat-empty-title">从你已经想到的地方开始</h2>
+            <p>可以发题目，也可以先说说你试过什么、具体卡在哪里。我不会直接给最终答案。</p>
+          </div>
+          <div class="starter-prompts" aria-label="起步示例">
+            <button
+              v-for="prompt in STARTER_PROMPTS"
+              :key="prompt"
+              type="button"
+              class="starter-prompt"
+              @click="applyStarterPrompt(prompt)"
+            >
+              {{ prompt }}
             </button>
           </div>
-        </article>
-      </div>
-    </aside>
-
-    <section class="panel chat-panel">
-      <div class="student-notice-bar" aria-label="学校通知">
-        <span class="student-notice-bar__label">通知</span>
-        <span
-          :class="[
-            'student-notice-bar__track',
-            { 'student-notice-bar__track--empty': !notifications.length },
-          ]"
-        >
-          <span class="student-notice-bar__text">{{ notificationText }}</span>
-        </span>
-      </div>
-      <div ref="chatStreamRef" class="chat-stream">
+        </section>
         <div v-for="(item, index) in messages" :key="index" :class="['message-row', item.role]">
-          <article :class="['bubble', item.role]">
+          <article
+            :class="['bubble', item.role]"
+            :aria-label="item.role === 'user' ? '你的消息' : '学习助手回复'"
+          >
             <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
             <div
               v-if="item.attachment?.content_type.startsWith('image/')"
@@ -1386,87 +1461,6 @@ onMounted(async () => {
           style="display: none"
           @change="handleImageSelection"
         />
-        <el-select
-          v-model="form.subject"
-          class="chat-subject-select"
-          :disabled="sending"
-          placeholder="选择学科"
-          aria-label="选择答疑学科"
-          @change="handleSubjectChange"
-        >
-          <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
-        </el-select>
-        <el-select
-          v-model="form.llmModel"
-          class="chat-model-select"
-          :disabled="sending"
-          placeholder="选择模型"
-          aria-label="选择对话模型"
-          popper-class="chat-model-select__popper"
-        >
-          <template #prefix>
-            <span class="chat-model-select__prefix">模型</span>
-          </template>
-          <template #label="{ value }">
-            <span class="chat-model-select__trigger">
-              <span class="chat-model-select__trigger-name">{{ chatModels.find((item) => item.key === value)?.name || value }}</span>
-              <span
-                :class="[
-                  'chat-model-select__trigger-status',
-                  `chat-model-select__trigger-status--${chatModelStatus(value).status}`,
-                ]"
-              >{{ chatModelStatusLabel(value) }}</span>
-            </span>
-          </template>
-          <el-option
-            v-for="model in chatModels"
-            :key="model.key"
-            :value="model.key"
-            :label="model.name"
-            :disabled="sending || isChatModelUnavailable(model.key)"
-            class="chat-model-option"
-          >
-            <div
-              :class="[
-                'chat-model-option__row',
-                `chat-model-option--${chatModelStatus(model.key).status}`,
-              ]"
-            >
-              <div class="chat-model-option__head">
-                <span class="chat-model-option__name">{{ model.name }}</span>
-                <span class="chat-model-status">{{ chatModelStatusLabel(model.key) }}</span>
-              </div>
-              <div v-if="model.description" class="chat-model-option__description">{{ model.description }}</div>
-              <div v-if="chatModelQuotaLabel(model)" class="chat-model-option__quota">
-                {{ chatModelQuotaLabel(model) }}
-              </div>
-            </div>
-          </el-option>
-        </el-select>
-        <el-select
-          v-if="agentRoles.length"
-          v-model="form.roleId"
-          class="chat-role-select"
-          :disabled="sending"
-          clearable
-          placeholder="默认教学风格"
-          aria-label="选择教学角色"
-        >
-          <template #prefix>
-            <span class="chat-model-select__prefix">角色</span>
-          </template>
-          <el-option
-            v-for="role in agentRoles"
-            :key="role.id"
-            :value="role.id"
-            :label="`${role.emoji || ''}${role.emoji ? ' ' : ''}${role.display_name}`"
-          >
-            <div class="chat-role-option">
-              <strong>{{ role.emoji }} {{ role.display_name }}</strong>
-              <span>{{ role.description }}</span>
-            </div>
-          </el-option>
-        </el-select>
         <el-input
           ref="messageInputRef"
           v-model="form.message"
@@ -1475,10 +1469,11 @@ onMounted(async () => {
           type="textarea"
           :rows="3"
           resize="none"
-          placeholder="输入你的问题，系统会先引导你整理思路"
+          placeholder="把题目发给我，也可以先说说你试过什么、卡在哪里"
+          aria-label="输入你的问题或当前思路"
           @focus="handleMessageInputFocus"
         />
-        <div v-if="pendingImagePreviewUrl" class="recommendation-card__images">
+        <div v-if="pendingImagePreviewUrl" class="composer-attachment-preview">
           <a
             class="recommendation-image"
             :href="pendingImagePreviewUrl"
@@ -1494,28 +1489,37 @@ onMounted(async () => {
             <img :src="pendingImagePreviewUrl" :alt="pendingImageFile?.name || '待发送图片'" />
             <span>{{ pendingImageFile?.name || '待发送图片' }}</span>
           </a>
-          <div class="row-actions">
-            <button class="ghost-button" :disabled="sending" @click="triggerCameraCapture">重新拍照</button>
-            <button class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">从相册替换</button>
-            <button class="ghost-button" :disabled="sending || !pendingImageFile" @click="pendingImageFile && openCropDialog(pendingImageFile)">裁剪</button>
-            <button class="ghost-button" :disabled="sending" @click="removePendingImage">移除图片</button>
+          <div class="row-actions composer-attachment-actions">
+            <button type="button" class="ghost-button" :disabled="sending" @click="triggerCameraCapture">重新拍照</button>
+            <button type="button" class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">从相册替换</button>
+            <button type="button" class="ghost-button" :disabled="sending || !pendingImageFile" @click="pendingImageFile && openCropDialog(pendingImageFile)">裁剪</button>
+            <button type="button" class="ghost-button ghost-button--danger" :disabled="sending" @click="removePendingImage">移除</button>
           </div>
         </div>
-        <p class="panel-subcopy">
-          支持上传 1 张图片，可直接拍照或从相册选择；只有当前新上传图片会进入聊天理解。
-        </p>
-        <p v-if="sending" class="stream-hint">正在流式生成，可随时停止。</p>
-        <div class="chat-actions">
-          <button class="ghost-button" :disabled="sending" @click="triggerCameraCapture">拍照</button>
-          <button class="ghost-button" :disabled="sending" @click="triggerGalleryPicker">
-            {{ pendingImageFile ? '从相册替换' : '从相册选择' }}
-          </button>
-          <button class="ghost-button" :disabled="!currentConversationId" @click="toggleResolved">标记已解决</button>
-          <button class="primary-button" :disabled="sending || !canSend" @click="sendMessage">
-            {{ sending ? '生成中...' : '发送问题' }}
-          </button>
-          <button v-if="sending" class="ghost-button" @click="stopStreaming()">停止生成</button>
+        <p v-if="sending" class="stream-hint" role="status" aria-live="polite">正在陪你梳理思路，可随时停止。</p>
+        <div class="chat-composer-footer">
+          <div class="chat-secondary-actions">
+            <el-dropdown :disabled="sending" trigger="click" placement="top-start">
+              <button type="button" class="ghost-button attachment-trigger" :disabled="sending">
+                {{ pendingImageFile ? '更换题图' : '添加题图' }}
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="triggerCameraCapture">拍照上传</el-dropdown-item>
+                  <el-dropdown-item @click="triggerGalleryPicker">从相册选择</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <span class="composer-helper">一次可上传 1 张题图</span>
+          </div>
+          <div class="chat-primary-actions">
+            <button v-if="sending" type="button" class="ghost-button" @click="stopStreaming()">停止生成</button>
+            <button type="button" class="primary-button send-question-button" :disabled="sending || !canSend" @click="sendMessage">
+              {{ sending ? '正在思考...' : '发送问题' }}
+            </button>
+          </div>
         </div>
+        <p class="sr-only" aria-live="polite">{{ sending ? '学习助手正在回复' : '可以继续输入问题' }}</p>
       </div>
 
       <section v-if="SHOW_RECOMMENDATION_PANEL" class="recommendation-panel">
@@ -1654,6 +1658,62 @@ onMounted(async () => {
         </div>
       </section>
     </section>
+
+    <el-drawer
+      v-model="historyOpen"
+      direction="ltr"
+      size="360px"
+      :with-header="false"
+      class="study-history-drawer"
+      aria-label="对话历史"
+    >
+      <div class="history-drawer-content">
+        <header class="history-drawer-header">
+          <div>
+            <h2>学习记录</h2>
+            <p>需要时再回来查看，不打断眼前的思考。</p>
+          </div>
+          <button type="button" class="study-tool-button" aria-label="关闭对话历史" @click="historyOpen = false">关闭</button>
+        </header>
+        <div class="history-drawer-actions">
+          <button type="button" class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
+          <button type="button" class="ghost-button" @click="loadConversations">刷新</button>
+          <button type="button" class="ghost-button" :disabled="sending" @click="openPasswordDialog">修改密码</button>
+        </div>
+        <RouterLink to="/student/growth" class="incentive-summary-card" @click="historyOpen = false">
+          <div><span>成长积分</span><strong>{{ incentiveSummary.total_points }}</strong></div>
+          <div><span>等级</span><strong>L{{ incentiveSummary.level }}</strong></div>
+          <div><span>连续学习</span><strong>{{ incentiveSummary.current_streak_days }} 天</strong></div>
+        </RouterLink>
+        <div v-if="!conversations.length" class="history-empty-state">
+          <strong>还没有学习记录</strong>
+          <span>发送第一个问题后，这里会保留你的思考过程。</span>
+        </div>
+        <div v-else class="conversation-list">
+          <article
+            v-for="item in conversations"
+            :key="item.id"
+            class="conversation-card conversation-card--compact"
+          >
+            <button class="conversation-card__open" :disabled="sending" @click="openConversation(item.id)">
+              <strong class="conversation-card__topic">{{ conversationTopic(item) }}</strong>
+              <span class="conversation-card__meta">{{ item.subject }} · {{ stageLabel(item.guidance_stage) }}</span>
+              <span>{{ item.resolved ? '已解决' : '继续思考' }}</span>
+            </button>
+            <div class="row-actions conversation-card__actions">
+              <button
+                type="button"
+                class="ghost-button ghost-button--danger"
+                :disabled="sending || deletingConversationIds.has(item.id)"
+                @click="deleteConversation(item)"
+              >
+                {{ deletingConversationIds.has(item.id) ? '删除中...' : '删除' }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+    </el-drawer>
 
     <el-dialog
       v-model="cropDialogVisible"

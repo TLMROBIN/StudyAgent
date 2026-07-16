@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-16T12:34:22.000Z",
+  "title": "Design System: StudyAgent",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "沉静松绿",
+        "canonical": "#0f766e",
+        "tonalRamp": ["oklch(18% 0.04 185)", "oklch(28% 0.06 185)", "oklch(38% 0.08 185)", "oklch(50% 0.09 185)", "oklch(62% 0.08 185)", "oklch(74% 0.06 185)", "oklch(86% 0.035 185)", "oklch(95% 0.015 185)"]
+      },
+      "primary-vivid": {
+        "role": "primary",
+        "displayName": "明亮松绿",
+        "canonical": "#0f9c90",
+        "tonalRamp": ["oklch(18% 0.045 185)", "oklch(28% 0.07 185)", "oklch(40% 0.095 185)", "oklch(57% 0.11 185)", "oklch(67% 0.09 185)", "oklch(77% 0.065 185)", "oklch(87% 0.035 185)", "oklch(96% 0.015 185)"]
+      },
+      "primary-action": {
+        "role": "primary",
+        "displayName": "行动松绿",
+        "canonical": "#108a7f",
+        "tonalRamp": ["oklch(18% 0.04 185)", "oklch(28% 0.065 185)", "oklch(39% 0.085 185)", "oklch(54% 0.10 185)", "oklch(65% 0.08 185)", "oklch(76% 0.055 185)", "oklch(87% 0.03 185)", "oklch(96% 0.012 185)"]
+      },
+      "secondary": {
+        "role": "secondary",
+        "displayName": "校订橙",
+        "canonical": "#db6b2c",
+        "tonalRamp": ["oklch(18% 0.05 50)", "oklch(28% 0.09 50)", "oklch(40% 0.14 50)", "oklch(60% 0.16 50)", "oklch(70% 0.13 50)", "oklch(80% 0.09 50)", "oklch(89% 0.05 50)", "oklch(96% 0.02 50)"]
+      },
+      "neutral-bg": {
+        "role": "neutral",
+        "displayName": "学习底色",
+        "canonical": "#f2efe6",
+        "tonalRamp": ["oklch(18% 0.012 90)", "oklch(30% 0.014 90)", "oklch(43% 0.015 90)", "oklch(57% 0.016 90)", "oklch(70% 0.015 90)", "oklch(82% 0.014 90)", "oklch(90% 0.012 90)", "oklch(95% 0.010 90)"]
+      },
+      "study-bg": {
+        "role": "neutral",
+        "displayName": "答疑学习底",
+        "canonical": "#f4f7f6",
+        "tonalRamp": ["oklch(18% 0.008 175)", "oklch(30% 0.010 175)", "oklch(43% 0.011 175)", "oklch(57% 0.012 175)", "oklch(70% 0.012 175)", "oklch(82% 0.010 175)", "oklch(91% 0.008 175)", "oklch(97% 0.006 175)"]
+      },
+      "study-surface": {
+        "role": "neutral",
+        "displayName": "答疑工作面",
+        "canonical": "#ffffff",
+        "tonalRamp": ["oklch(18% 0 0)", "oklch(30% 0 0)", "oklch(43% 0 0)", "oklch(57% 0 0)", "oklch(70% 0 0)", "oklch(82% 0 0)", "oklch(92% 0 0)", "oklch(100% 0 0)"]
+      },
+      "assistant-surface": {
+        "role": "neutral",
+        "displayName": "助手消息面",
+        "canonical": "#f7f9f8",
+        "tonalRamp": ["oklch(18% 0.006 175)", "oklch(30% 0.008 175)", "oklch(43% 0.009 175)", "oklch(57% 0.010 175)", "oklch(70% 0.010 175)", "oklch(82% 0.008 175)", "oklch(92% 0.006 175)", "oklch(98% 0.004 175)"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "柔和象牙白",
+        "canonical": "#fffaf0",
+        "tonalRamp": ["oklch(18% 0.012 90)", "oklch(30% 0.014 90)", "oklch(43% 0.016 90)", "oklch(57% 0.018 90)", "oklch(70% 0.018 90)", "oklch(82% 0.016 90)", "oklch(91% 0.014 90)", "oklch(97% 0.012 90)"]
+      },
+      "surface-panel": {
+        "role": "neutral",
+        "displayName": "半透明面板",
+        "canonical": "#fffcf6d1",
+        "tonalRamp": ["oklch(18% 0.008 90)", "oklch(30% 0.010 90)", "oklch(43% 0.012 90)", "oklch(57% 0.014 90)", "oklch(70% 0.014 90)", "oklch(82% 0.012 90)", "oklch(91% 0.010 90)", "oklch(98% 0.008 90)"]
+      },
+      "surface-panel-strong": {
+        "role": "neutral",
+        "displayName": "强调面板",
+        "canonical": "#fff8eaf5",
+        "tonalRamp": ["oklch(18% 0.012 85)", "oklch(30% 0.014 85)", "oklch(43% 0.017 85)", "oklch(57% 0.020 85)", "oklch(70% 0.020 85)", "oklch(82% 0.018 85)", "oklch(91% 0.014 85)", "oklch(97% 0.012 85)"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "深墨蓝黑",
+        "canonical": "#18212f",
+        "tonalRamp": ["oklch(16% 0.025 255)", "oklch(25% 0.03 255)", "oklch(36% 0.035 255)", "oklch(48% 0.035 255)", "oklch(61% 0.03 255)", "oklch(74% 0.024 255)", "oklch(86% 0.016 255)", "oklch(95% 0.008 255)"]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "次级蓝灰",
+        "canonical": "#617287",
+        "tonalRamp": ["oklch(18% 0.025 250)", "oklch(28% 0.035 250)", "oklch(40% 0.045 250)", "oklch(53% 0.045 250)", "oklch(65% 0.038 250)", "oklch(76% 0.028 250)", "oklch(87% 0.017 250)", "oklch(95% 0.008 250)"]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "轻墨分隔线",
+        "canonical": "#18212f1f",
+        "tonalRamp": ["oklch(16% 0.025 255)", "oklch(25% 0.03 255)", "oklch(36% 0.035 255)", "oklch(48% 0.035 255)", "oklch(61% 0.03 255)", "oklch(74% 0.024 255)", "oklch(86% 0.016 255)", "oklch(95% 0.008 255)"]
+      },
+      "dark-surface": {
+        "role": "neutral",
+        "displayName": "深色结构面",
+        "canonical": "#13212deb",
+        "tonalRamp": ["oklch(15% 0.025 245)", "oklch(24% 0.035 245)", "oklch(34% 0.04 245)", "oklch(46% 0.04 245)", "oklch(59% 0.035 245)", "oklch(72% 0.026 245)", "oklch(85% 0.016 245)", "oklch(95% 0.008 245)"]
+      },
+      "on-dark": {
+        "role": "neutral",
+        "displayName": "暗面文字",
+        "canonical": "#fff8ed",
+        "tonalRamp": ["oklch(18% 0.010 80)", "oklch(30% 0.012 80)", "oklch(43% 0.014 80)", "oklch(57% 0.016 80)", "oklch(70% 0.016 80)", "oklch(82% 0.014 80)", "oklch(91% 0.012 80)", "oklch(97% 0.010 80)"]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "错误红",
+        "canonical": "#dc2626",
+        "tonalRamp": ["oklch(18% 0.07 28)", "oklch(28% 0.12 28)", "oklch(40% 0.18 28)", "oklch(55% 0.22 28)", "oklch(66% 0.18 28)", "oklch(77% 0.12 28)", "oklch(88% 0.065 28)", "oklch(96% 0.025 28)"]
+      },
+      "danger-deep": {
+        "role": "tertiary",
+        "displayName": "深错误红",
+        "canonical": "#b91c1c",
+        "tonalRamp": ["oklch(16% 0.065 28)", "oklch(25% 0.11 28)", "oklch(35% 0.16 28)", "oklch(48% 0.20 28)", "oklch(61% 0.17 28)", "oklch(74% 0.11 28)", "oklch(87% 0.06 28)", "oklch(96% 0.022 28)"]
+      },
+      "success-soft": {
+        "role": "tertiary",
+        "displayName": "成功浅绿",
+        "canonical": "#d7efdc",
+        "tonalRamp": ["oklch(18% 0.035 145)", "oklch(29% 0.05 145)", "oklch(41% 0.065 145)", "oklch(55% 0.075 145)", "oklch(68% 0.065 145)", "oklch(80% 0.05 145)", "oklch(90% 0.035 145)", "oklch(96% 0.018 145)"]
+      }
+    },
+    "typographyMeta": {
+      "display": {"displayName": "Display", "purpose": "登录页核心标题和少量高层级叙事标题。"},
+      "headline": {"displayName": "Headline", "purpose": "页面与顶层面板标题。"},
+      "title": {"displayName": "Title", "purpose": "分组标题、对话标题和卡片标题。"},
+      "body": {"displayName": "Body", "purpose": "学生对话、说明文本和主要阅读内容。"},
+      "label": {"displayName": "Label", "purpose": "状态、操作标签与建议回复。"},
+      "mono": {"displayName": "Mono", "purpose": "代码、配置值和技术内容。"}
+    },
+    "shadows": [
+      {"name": "ambient-panel", "value": "0 24px 60px rgba(24, 33, 47, 0.12)", "purpose": "登录区和顶层面板的环境阴影。"},
+      {"name": "study-surface", "value": "0 8px 24px rgba(24, 33, 47, 0.06)", "purpose": "学生单任务答疑工作面与实色环境的轻量分离。"},
+      {"name": "confirmation-overlay", "value": "0 20px 50px rgba(24, 33, 47, 0.18)", "purpose": "删除确认等脱离页面流的浮层。"},
+      {"name": "focus-ring", "value": "0 0 0 3px rgba(15, 118, 110, 0.10)", "purpose": "输入框和交互控件的焦点反馈。"}
+    ],
+    "motion": [
+      {"name": "state-fast", "value": "200ms ease", "purpose": "导航、悬停与轻量状态反馈。"},
+      {"name": "shell-resize", "value": "240ms ease", "purpose": "侧栏宽度和页面留白同步变化。"},
+      {"name": "reduced-motion", "value": "0.01ms", "purpose": "系统偏好减少动态时，将动画与过渡降到近乎即时。"}
+    ],
+    "breakpoints": [
+      {"name": "mobile", "value": "640px"},
+      {"name": "tablet", "value": "1080px"},
+      {"name": "tablet-landscape", "value": "1280px"},
+      {"name": "short-tablet", "value": "620px height"}
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "主要提交与推进动作，触控优先。",
+      "html": "<button class=\"ds-btn-primary\">继续思考</button>",
+      "css": ".ds-btn-primary { min-height: 48px; padding: 12px 18px; border: 0; border-radius: 999px; background: linear-gradient(135deg, var(--brand, #0f766e), #108a7f); color: #fff; font: 700 16px/1.35 \"Noto Sans SC\", sans-serif; cursor: pointer; transition: filter 200ms ease, transform 150ms ease; } .ds-btn-primary:hover { filter: brightness(1.06); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: 3px solid rgba(15, 118, 110, 0.24); outline-offset: 3px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "次要动作，不与主操作争夺注意力。",
+      "html": "<button class=\"ds-btn-ghost\">稍后处理</button>",
+      "css": ".ds-btn-ghost { min-height: 44px; padding: 12px 18px; border: 0; border-radius: 999px; background: rgba(24, 33, 47, 0.08); color: var(--ink, #18212f); font: 600 16px/1.35 \"Noto Sans SC\", sans-serif; cursor: pointer; transition: background 200ms ease; } .ds-btn-ghost:hover { background: rgba(24, 33, 47, 0.12); } .ds-btn-ghost:focus-visible { outline: 3px solid rgba(15, 118, 110, 0.18); outline-offset: 3px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "清晰、低干扰的触控输入。",
+      "html": "<label class=\"ds-field\"><span>你的思路</span><input placeholder=\"先写下你已经想到的部分\" /></label>",
+      "css": ".ds-field { display: grid; gap: 8px; color: var(--ink, #18212f); font: 700 13px/1.35 \"Noto Sans SC\", sans-serif; } .ds-field input { min-height: 44px; padding: 11px 12px; border: 1px solid rgba(24, 33, 47, 0.12); border-radius: 8px; background: rgba(255, 255, 255, 0.76); color: var(--ink, #18212f); font: 400 16px/1.5 \"Noto Sans SC\", sans-serif; outline: none; } .ds-field input:focus { border-color: rgba(15, 118, 110, 0.55); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.10); } .ds-field input::placeholder { color: #617287; }"
+    },
+    {
+      "name": "Active Navigation",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "深色侧栏中的当前任务入口。",
+      "html": "<a class=\"ds-nav-active\" href=\"#\"><span class=\"ds-nav-short\">答疑</span><span>学生答疑</span></a>",
+      "css": ".ds-nav-active { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 14px 16px; border-radius: 18px; background: #0f766e; color: #fff8ed; font: 600 16px/1.35 \"Noto Sans SC\", sans-serif; text-decoration: none; transition: filter 200ms ease; } .ds-nav-active:hover { filter: brightness(1.06); } .ds-nav-active:focus-visible { outline: 3px solid rgba(255, 248, 237, 0.45); outline-offset: 2px; } .ds-nav-short { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 30px; padding: 0 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); font-size: 12px; font-weight: 700; }"
+    },
+    {
+      "name": "Suggested Reply",
+      "kind": "chip",
+      "refersTo": "suggested-reply",
+      "description": "给学生一个可触控但不替代思考的下一步。",
+      "html": "<button class=\"ds-suggestion\">我先画受力图试试</button>",
+      "css": ".ds-suggestion { min-height: 44px; max-width: 100%; padding: 9px 13px; border: 1px solid rgba(15, 118, 110, 0.34); border-radius: 12px; background: rgba(15, 118, 110, 0.055); color: var(--brand, #0f766e); font: 700 13px/1.35 \"Noto Sans SC\", sans-serif; text-align: left; cursor: pointer; transition: background 180ms cubic-bezier(0.25, 1, 0.5, 1), border-color 180ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-suggestion:hover, .ds-suggestion:focus-visible { border-color: rgba(15, 118, 110, 0.78); background: rgba(15, 118, 110, 0.10); outline: none; }"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "页面级内容分组，环境式而非漂浮式。",
+      "html": "<section class=\"ds-panel\"><h3>本次思考</h3><p>从已知条件出发，先判断哪些量保持不变。</p></section>",
+      "css": ".ds-panel { display: grid; gap: 12px; padding: 22px; border: 1px solid rgba(24, 33, 47, 0.12); border-radius: 28px; background: rgba(255, 252, 246, 0.82); color: var(--ink, #18212f); font: 400 16px/1.7 \"Noto Sans SC\", sans-serif; } .ds-panel h3, .ds-panel p { margin: 0; } .ds-panel h3 { font: 700 20px/1.35 \"IBM Plex Sans\", \"Noto Sans SC\", sans-serif; letter-spacing: -0.03em; } .ds-panel:focus-within { border-color: rgba(15, 118, 110, 0.32); }"
+    },
+    {
+      "name": "Student Chat Bubble",
+      "kind": "custom",
+      "refersTo": "chat-user",
+      "description": "学生消息，靠右且具有清楚的发送者语义。",
+      "html": "<article class=\"ds-bubble-user\"><small>我</small><div>我觉得应该先判断物体受到哪些力。</div></article>",
+      "css": ".ds-bubble-user { max-width: 720px; padding: 16px 18px; border-radius: 14px; background: #0f766e; color: #fff; font: 400 16px/1.7 \"Noto Sans SC\", sans-serif; overflow-wrap: anywhere; } .ds-bubble-user small { display: block; margin-bottom: 8px; color: rgba(255,255,255,0.78); font-size: 12px; }"
+    },
+    {
+      "name": "Assistant Chat Bubble",
+      "kind": "custom",
+      "refersTo": "chat-assistant",
+      "description": "助手引导，阅读感优先且不过度强调。",
+      "html": "<article class=\"ds-bubble-assistant\"><small>学习助手</small><div>很好。先把每个接触面可能提供的力分别列出来，好吗？</div></article>",
+      "css": ".ds-bubble-assistant { max-width: 720px; padding: 16px 18px; border: 1px solid rgba(24, 33, 47, 0.10); border-radius: 14px; background: #f7f9f8; color: var(--ink, #18212f); font: 400 16px/1.7 \"Noto Sans SC\", sans-serif; overflow-wrap: anywhere; } .ds-bubble-assistant small { display: block; margin-bottom: 8px; color: var(--muted, #617287); font-size: 12px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "安静的解题书桌",
+    "overview": "StudyAgent 的视觉系统像一张在课后安静展开的解题书桌：学生一坐下就知道从哪里开始，注意力自然落在问题、思路和下一步，而不是装饰或技术本身。整体气质平静、清晰、可信，以触控友好的操作尺度支持电脑和平板上的连续思考。学生答疑页关闭环境柔光和后台式多栏，把空间留给题目、思路与下一步。\n\n系统采用温和浅色环境、深墨蓝黑结构面与沉静松绿操作色。柔光负责营造专注感，清楚的层级和状态负责建立信任；校订橙只在提示、眉题和需要注意的内容中出现。界面可以温和，但不能低幼；可以有层次，但不能像培训机构营销页或冰冷企业后台。",
+    "keyCharacteristics": [
+      "触控优先，关键操作目标以 44–48px 为基线。",
+      "学生答疑界面宽松清晰，教师与管理界面允许更高信息密度。",
+      "学生答疑进入单任务模式：实色学习底、单一聊天表面、按需历史抽屉。",
+      "沉静松绿只用于主要行动、当前选择和积极状态。",
+      "环境柔光建立氛围，边界与间距建立结构。",
+      "动效只解释状态变化，并尊重减少动态效果设置。"
+    ],
+    "rules": [
+      {"name": "The One-Green Voice Rule", "body": "沉静松绿是唯一主要操作色；明亮松绿和行动松绿只能作为同一颜色家族的层次，不得发展成第二套主色。", "section": "colors"},
+      {"name": "The Orange Annotation Rule", "body": "校订橙用于提醒和批注语义，不用于主要提交按钮，也不用于大面积背景。", "section": "colors"},
+      {"name": "The Calm Type Rule", "body": "产品界面只使用这一套无衬线家族；标题最紧不得超过 -0.03em，按钮和正文不使用展示字体或夸张字距。", "section": "typography"},
+      {"name": "The Ambient Layer Rule", "body": "阴影只说明层级，不作为每张卡片的装饰；同一元素不要同时使用宽大阴影和高对比描边。", "section": "elevation"}
+    ],
+    "dos": [
+      "Do 让主要触控操作达到 44–48px，并在平板横屏和低高度视口中验证。",
+      "Do 用 #0f766e 表示主要行动、当前选择与积极状态，用 #db6b2c 表示提醒和批注。",
+      "Do 保持学生消息与助手消息的左右位置、颜色和语义一致。",
+      "Do 用文字、图标或形状补充成功、错误和选中状态，不只依赖颜色。",
+      "Do 让公式、长题干、表格和图片在缩放后仍可阅读或滚动查看。",
+      "Do 尊重减少动态效果设置，让通知滚动等运动能够停止或降级。",
+      "Do 让系统自动选择答疑服务，把历史、角色等次要决策放进按需入口。"
+    ],
+    "donts": [
+      "Don't 把界面做成培训机构营销页：不要用夸张口号、强推销感或“提分神器”制造焦虑。",
+      "Don't 做低幼游戏化：不要堆叠卡通元素或过度奖励动画，不让高中生感觉被当成小学生。",
+      "Don't 让学生端像冰冷企业后台：不要让密集表格和技术术语主导答疑体验。",
+      "Don't 用渐变文字、彩色侧边条或重复装饰卡片制造视觉层级。",
+      "Don't 为普通行和卡片添加宽大阴影；阴影只服务于真实层级。",
+      "Don't 扩散新的主色或让校订橙承担主要提交动作。",
+      "Don't 在学生主流程中暴露模型名、额度或内部引导阶段。"
+    ]
+  }
+}

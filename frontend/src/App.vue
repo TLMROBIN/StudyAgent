@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from './stores/auth'
@@ -26,6 +26,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const sidebarCollapsed = ref(readSidebarCollapsed())
+const compactStudentShell = ref(false)
 const unreadSummary = ref<FeedbackUnreadSummary>({
   unread_feedback_replies: 0,
   unread_release_notes: 0,
@@ -37,6 +38,8 @@ const requiresAuth = computed(() => route.matched.some((record) => record.meta.r
 const showShell = computed(() => route.path !== '/login')
 const shellActive = computed(() => showShell.value && !!auth.user)
 const studentChatActive = computed(() => route.path === '/student')
+const forceCompactStudentShell = computed(() => studentChatActive.value && compactStudentShell.value)
+const sidebarIsCollapsed = computed(() => sidebarCollapsed.value || forceCompactStudentShell.value)
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
 const navigationItems = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = []
@@ -84,6 +87,22 @@ const sidebarUserBadge = computed(() => {
     return '用户'
   }
   return name.slice(Math.max(0, name.length - 2))
+})
+
+let compactStudentShellQuery: MediaQueryList | null = null
+
+function syncCompactStudentShell() {
+  compactStudentShell.value = Boolean(compactStudentShellQuery?.matches)
+}
+
+onMounted(() => {
+  compactStudentShellQuery = window.matchMedia('(max-width: 1280px)')
+  syncCompactStudentShell()
+  compactStudentShellQuery.addEventListener('change', syncCompactStudentShell)
+})
+
+onBeforeUnmount(() => {
+  compactStudentShellQuery?.removeEventListener('change', syncCompactStudentShell)
 })
 
 watchEffect(() => {
@@ -150,22 +169,26 @@ function toggleSidebar() {
       {
         'app-root--shell': shellActive,
         'app-root--plain': !shellActive,
-        'app-root--sidebar-collapsed': shellActive && sidebarCollapsed,
+        'app-root--sidebar-collapsed': shellActive && sidebarIsCollapsed,
+        'app-root--student-chat': shellActive && studentChatActive,
       },
     ]"
   >
     <div class="ambient ambient-one"></div>
     <div class="ambient ambient-two"></div>
-    <aside v-if="shellActive" :class="['app-sidebar', { 'app-sidebar--collapsed': sidebarCollapsed }]">
+    <aside v-if="shellActive" :class="['app-sidebar', { 'app-sidebar--collapsed': sidebarIsCollapsed }]">
       <div class="sidebar-body">
         <div class="sidebar-head">
           <div class="sidebar-brand">
-            <p class="eyebrow">StudyAgent</p>
-            <h1 class="brand-title">{{ sidebarCollapsed ? '答疑' : '高中学科答疑' }}</h1>
-            <p v-if="!sidebarCollapsed" class="brand-copy">专属知识库 + 苏格拉底引导，先帮你想清楚，再帮你做出来。</p>
+            <p class="eyebrow" role="img" aria-label="StudyAgent">
+              <span class="sidebar-brand-name" aria-hidden="true">StudyAgent</span>
+              <span class="sidebar-brand-mark" aria-hidden="true">SA</span>
+            </p>
+            <h1 class="brand-title">{{ sidebarIsCollapsed ? '答疑' : '高中学科答疑' }}</h1>
+            <p v-if="!sidebarIsCollapsed" class="brand-copy">专属知识库 + 苏格拉底引导，先帮你想清楚，再帮你做出来。</p>
           </div>
-          <button class="sidebar-toggle" @click="toggleSidebar">
-            {{ sidebarCollapsed ? '展开' : '收起' }}
+          <button v-if="!forceCompactStudentShell" class="sidebar-toggle" @click="toggleSidebar">
+            {{ sidebarIsCollapsed ? '展开' : '收起' }}
           </button>
         </div>
         <nav class="nav-list">
@@ -177,18 +200,18 @@ function toggleSidebar() {
             :aria-label="item.label"
           >
             <span class="nav-link__short">{{ item.shortLabel }}</span>
-            <span v-if="!sidebarCollapsed" class="nav-link__label">{{ item.label }}</span>
+            <span v-if="!sidebarIsCollapsed" class="nav-link__label">{{ item.label }}</span>
             <span v-if="item.showUnreadDot" class="nav-unread-dot" aria-label="有未读内容"></span>
           </RouterLink>
         </nav>
       </div>
       <div class="sidebar-footer">
         <div class="profile-chip">
-          <strong>{{ sidebarCollapsed ? sidebarUserBadge : auth.user.full_name }}</strong>
-          <span v-if="!sidebarCollapsed">{{ auth.user.role }}</span>
+          <strong>{{ sidebarIsCollapsed ? sidebarUserBadge : auth.user.full_name }}</strong>
+          <span v-if="!sidebarIsCollapsed">{{ auth.user.role }}</span>
         </div>
         <button class="ghost-button sidebar-logout" @click="handleLogout">
-          {{ sidebarCollapsed ? '退出' : '退出登录' }}
+          {{ sidebarIsCollapsed ? '退出' : '退出登录' }}
         </button>
       </div>
     </aside>
