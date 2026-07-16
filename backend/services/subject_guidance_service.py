@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from backend.models.conversation import GuidanceStage
+from backend.subjects import SUBJECT_SET
 
 
 class SubjectTeachingMode(StrEnum):
@@ -454,6 +455,8 @@ SUBJECT_STRATEGY_RULES: dict[str, tuple[SubjectRule, ...]] = {
         ),
     ),
 }
+if set(SUBJECT_STRATEGY_RULES) != SUBJECT_SET - {"物理"}:
+    raise RuntimeError("SUBJECT_STRATEGY_RULES must cover every non-physics subject")
 
 
 class SubjectGuidanceService:

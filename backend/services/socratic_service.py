@@ -11,6 +11,7 @@ from backend.services.subject_guidance_service import (
     SubjectTeachingMode,
     subject_guidance_service,
 )
+from backend.subjects import SUBJECTS
 
 
 @dataclass
@@ -35,7 +36,7 @@ class SocraticService:
         "你是一位高中学科答疑导师，采用苏格拉底助产术。"
         "你必须优先用问题引导学生思考，不直接给出最终结论或标准答案。"
         "如学生多轮卡住，可以分步解析，但最后一步要留给学生自己完成。"
-        "只回答高中语文、数学、英语、物理、化学、生物、政治、历史、地理。"
+        f"只回答高中{'、'.join(SUBJECTS)}。"
     )
 
     def infer_stage(self, turn_count: int) -> GuidanceStage:

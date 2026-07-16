@@ -27,6 +27,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
+from backend.subjects import SUBJECT_SET
+
 logger = logging.getLogger(__name__)
 
 LAYER_QUESTION_BLOCKLIST = "question_blocklist"
@@ -374,6 +376,10 @@ def _compile_rule(entry: object) -> tuple[CompiledRule | None, str]:
         isinstance(subjects_raw, list) and all(isinstance(item, str) and item for item in subjects_raw),
         f"rule {rule_id}: subjects must be a list of non-empty strings",
     )
+    _require(
+        set(subjects_raw) <= SUBJECT_SET,
+        f"rule {rule_id}: subjects must be supported subjects",
+    )
     if not enabled:
         return None, rule_id
     try:
@@ -403,6 +409,10 @@ def compile_config(raw: object, *, source: str, config_path: str, error: str | N
 
     subjects_raw = raw.get("subjects")
     _require(isinstance(subjects_raw, dict) and subjects_raw, "subjects must be a non-empty object")
+    _require(
+        set(subjects_raw) == SUBJECT_SET,
+        "subjects keys must match the supported subject set",
+    )
     subjects: dict[str, tuple[str, ...]] = {}
     for subject, keywords in subjects_raw.items():
         _require(isinstance(subject, str) and subject.strip() != "", "subject name must be a non-empty string")

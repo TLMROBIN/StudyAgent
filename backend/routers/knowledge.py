@@ -54,6 +54,7 @@ from backend.tasks.ingest import (
     sync_task_state,
 )
 from backend.time_utils import now_beijing
+from backend.subjects import is_valid_subject
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 settings = get_settings()
@@ -1355,6 +1356,8 @@ async def upload_document(
     current_user: CurrentTeacher = None,
     request: Request = None,
 ) -> ImportTaskRead:
+    if not is_valid_subject(subject):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     raw_content_type, content_type = _validate_upload(file, resource_type=resource_type)
     resolved_chapter, resolved_section = _resolve_question_resource_structure(
         db,

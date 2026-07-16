@@ -1,4 +1,5 @@
 import katex from 'katex'
+import 'katex/contrib/mhchem'
 import type { KnowledgeAsset } from './api'
 
 type Segment =
