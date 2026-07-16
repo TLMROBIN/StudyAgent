@@ -22,6 +22,12 @@ chat_suggested_replies_seconds = Histogram(
     "chat_suggested_replies_seconds",
     "Chat suggested replies generation latency",
 )
+chat_role_resolution_seconds = Histogram("chat_role_resolution_seconds", "Chat teaching-role resolution latency")
+chat_role_request_total = Counter(
+    "chat_role_request_total",
+    "Chat teaching-role resolution outcomes",
+    ["status"],
+)
 chat_stream_disconnect_total = Counter("chat_stream_disconnect_total", "Disconnected chat streams")
 chat_stream_safety_rewrite_total = Counter(
     "chat_stream_safety_rewrite_total",

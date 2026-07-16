@@ -45,6 +45,25 @@ def test_build_prompt_deduplicates_base_system_prompt():
     assert prompt.messages[0]["content"].count(socratic_service.base_prompt) == 1
 
 
+def test_build_prompt_places_role_style_before_subject_rules_and_preserves_safety():
+    role_prompt = "<role_style_data>\n语气亲切、使用短句。\n</role_style_data>"
+    subject_prompt = "物理专项：先画受力图。"
+    prompt = socratic_service.build_prompt(
+        question="斜面上的摩擦力怎么判断",
+        subject="物理",
+        history=[],
+        retrieved_context="",
+        system_prompt="学校级系统规则",
+        role_prompt=role_prompt,
+        subject_supplement=subject_prompt,
+    )
+    system_text = prompt.messages[0]["content"]
+
+    assert system_text.index("学校级系统规则") < system_text.index(role_prompt)
+    assert system_text.index(role_prompt) < system_text.index(subject_prompt)
+    assert "不得直接给出具体习题的最终答案" in system_text
+
+
 def test_build_prompt_adds_practice_review_context():
     prompt = socratic_service.build_prompt(
         question="选B",

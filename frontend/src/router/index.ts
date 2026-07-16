@@ -7,6 +7,7 @@ import { forceLoginRedirect } from '../utils/navigation'
 const AdminDashboard = () => import('../views/AdminDashboard.vue')
 const AdminFeedback = () => import('../views/AdminFeedback.vue')
 const AgentConfig = () => import('../views/AgentConfig.vue')
+const AgentRoleManage = () => import('../views/AgentRoleManage.vue')
 const AuditLogs = () => import('../views/AuditLogs.vue')
 const ConversationArchive = () => import('../views/ConversationArchive.vue')
 const KnowledgeManage = () => import('../views/KnowledgeManage.vue')
@@ -29,6 +30,7 @@ const router = createRouter({
     { path: '/admin/conversations', component: ConversationArchive, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/audit', component: AuditLogs, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/agent', component: AgentConfig, meta: { requiresAuth: true, roles: ['admin'] } },
+    { path: '/admin/roles', component: AgentRoleManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/models', component: ModelManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/users', component: UserManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/:pathMatch(.*)*', redirect: '/login' },

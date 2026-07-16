@@ -18,7 +18,7 @@ from starlette.datastructures import Headers
 from backend.config import Settings
 from backend.database import Base, get_db
 from backend.dependencies import get_current_user
-from backend.models import agent_config, audit_log, conversation, knowledge, learning_profile, user  # noqa: F401
+from backend.models import agent_config, agent_role, audit_log, conversation, knowledge, learning_profile, user  # noqa: F401
 from pydantic import ValidationError
 
 from backend.models.audit_log import AuditLog
@@ -28,10 +28,11 @@ from backend.models.learning_profile import StudentErrorEvent, StudentSkillProfi
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
 from backend.models.llm_usage import LLMUsageEvent
-from backend.models.schemas import ChatRequest, QuestionRecommendationRequest
+from backend.models.schemas import AgentRoleCreate, ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
 from backend.routers import chat as chat_router
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult
+from backend.services.agent_role_service import agent_role_service
 from backend.services.embed_service import EmbedService
 from backend.services.rag_service import RagService, RetrievalResult
 from backend.services.store_service import MemoryStore
@@ -260,6 +261,120 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
         assert stored_messages[1].suggested_replies == suggested_replies
     finally:
         session.close()
+
+
+def test_chat_stream_applies_fixed_role_revision_and_persists_snapshot(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    captured_system_prompts: list[str] = []
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        captured_system_prompts.append(messages[0]["content"])
+        yield "先从力、质量和加速度之间的关系想一想。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    session = session_factory()
+    try:
+        role, revision = agent_role_service.create_role(
+            session,
+            AgentRoleCreate.model_validate({
+                "name": "feynman",
+                "display_name": "费曼老师",
+                "subjects": ["物理"],
+                "style_config": {
+                    "tone": "warm",
+                    "explanation_pace": "guided_questions",
+                    "analogy_style": "daily_life",
+                    "formality": "conversational",
+                    "sentence_length": "short",
+                    "traits": ["simple_analogies"],
+                },
+            }),
+            created_by=None,
+        )
+        role.is_enabled = True
+        session.add(role)
+        session.commit()
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="物理", message="牛顿第二定律该怎么理解", role_id=role.id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        meta = next(payload for event, payload in events if event == "meta")
+        stored = session.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+
+        assert meta["role_status"] == "applied"
+        assert meta["role_revision"] == 1
+        assert "优先使用贴近日常生活的简短类比" in captured_system_prompts[0]
+        assert stored.agent_role_revision_id == revision.id
+        assert stored.agent_role_snapshot["display_name"] == "费曼老师"
+        assert stored.agent_role_snapshot["revision"] == 1
+    finally:
+        session.close()
+
+
+def test_filter_refusal_marks_requested_role_as_bypassed(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    session = session_factory()
+    try:
+        role, _ = agent_role_service.create_role(
+            session,
+            AgentRoleCreate(name="calm", display_name="沉稳老师", style_config={"tone": "calm"}),
+            created_by=None,
+        )
+        role.is_enabled = True
+        session.add(role)
+        session.commit()
+
+        response = asyncio.run(
+            chat_router.stream_chat(
+                ChatRequest(subject="数学", message="你好，今天天气怎么样", role_id=role.id),
+                session,
+                current_user,
+                FakeRequest(),
+            )
+        )
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        meta = next(payload for event, payload in events if event == "meta")
+        stored = session.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+
+        assert meta["role_status"] == "bypassed"
+        assert meta["role_applied"] is False
+        assert stored.agent_role_revision_id is None
+        assert stored.agent_role_snapshot is None
+    finally:
+        session.close()
+
+
+def test_stream_role_id_validation_is_consistent_for_json_and_form():
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    client = _build_chat_test_client(session_factory, current_user)
+
+    form_response = client.post(
+        "/api/chat/stream",
+        data={"subject": "数学", "message": "函数怎么判断", "role_id": "invalid"},
+    )
+    json_response = client.post(
+        "/api/chat/stream",
+        json={"subject": "数学", "message": "函数怎么判断", "role_id": "invalid"},
+    )
+
+    assert form_response.status_code == 422
+    assert json_response.status_code == 422
 
 
 def test_suggested_replies_timeout_returns_empty(monkeypatch):

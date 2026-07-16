@@ -105,6 +105,52 @@ def apply_runtime_schema_updates() -> None:
         table_names.add("release_notes")
         planned_new_tables.add("release_notes")
 
+    if "agent_roles" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE agent_roles (
+                id INTEGER NOT NULL PRIMARY KEY,
+                name VARCHAR(64) NOT NULL UNIQUE,
+                display_name VARCHAR(64) NOT NULL,
+                emoji VARCHAR(16),
+                description VARCHAR(255) NOT NULL DEFAULT '',
+                subjects JSON,
+                current_revision_id INTEGER,
+                is_enabled BOOLEAN NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(created_by) REFERENCES users (id) ON DELETE SET NULL
+            )
+            """
+        )
+        table_names.add("agent_roles")
+        planned_new_tables.add("agent_roles")
+
+    if "agent_role_revisions" not in table_names:
+        statements.append(
+            """
+            CREATE TABLE agent_role_revisions (
+                id INTEGER NOT NULL PRIMARY KEY,
+                role_id INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                style_config JSON NOT NULL,
+                renderer_version VARCHAR(32) NOT NULL,
+                rendered_prompt TEXT NOT NULL,
+                content_hash VARCHAR(64) NOT NULL,
+                created_by INTEGER,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_agent_role_revisions_role_revision UNIQUE (role_id, revision),
+                FOREIGN KEY(role_id) REFERENCES agent_roles (id) ON DELETE CASCADE,
+                FOREIGN KEY(created_by) REFERENCES users (id) ON DELETE SET NULL
+            )
+            """
+        )
+        table_names.add("agent_role_revisions")
+        planned_new_tables.add("agent_role_revisions")
+
     if "release_notes" in table_names and "release_note_read_states" not in table_names:
         statements.append(
             """
@@ -143,6 +189,16 @@ def apply_runtime_schema_updates() -> None:
             ("ix_release_note_read_states_student_id", "student_id"),
             ("ix_release_note_read_states_release_note_id", "release_note_id"),
             ("ix_release_note_read_states_read_at", "read_at"),
+        ],
+        "agent_roles": [
+            ("ix_agent_roles_name", "name"),
+            ("ix_agent_roles_current_revision_id", "current_revision_id"),
+            ("ix_agent_roles_is_enabled", "is_enabled"),
+            ("ix_agent_roles_sort_order", "sort_order"),
+        ],
+        "agent_role_revisions": [
+            ("ix_agent_role_revisions_role_id", "role_id"),
+            ("ix_agent_role_revisions_content_hash", "content_hash"),
         ],
     }
     for table_name, indexes in feedback_indexes.items():
@@ -184,6 +240,12 @@ def apply_runtime_schema_updates() -> None:
             statements.append("ALTER TABLE messages ADD COLUMN llm_model_key VARCHAR(64)")
         if "suggested_replies" not in message_columns:
             statements.append("ALTER TABLE messages ADD COLUMN suggested_replies JSON")
+        if "agent_role_revision_id" not in message_columns:
+            statements.append("ALTER TABLE messages ADD COLUMN agent_role_revision_id INTEGER")
+        if "agent_role_snapshot" not in message_columns:
+            statements.append("ALTER TABLE messages ADD COLUMN agent_role_snapshot JSON")
+        if "agent_role_revision_id" not in message_columns or index_missing("messages", "ix_messages_agent_role_revision_id"):
+            statements.append("CREATE INDEX ix_messages_agent_role_revision_id ON messages (agent_role_revision_id)")
 
     if "llm_model_configs" in table_names:
         model_columns = {column["name"] for column in inspector.get_columns("llm_model_configs")}

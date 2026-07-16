@@ -6,6 +6,7 @@ import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
 import {
   api,
+  type AgentRolePublic,
   type ChatModelOption,
   type ChatModelStatus,
   type ChatConversationRead,
@@ -78,6 +79,7 @@ const form = reactive({
   subject: '数学',
   message: '',
   llmModel: 'deepseek-v4-flash',
+  roleId: null as number | null,
 })
 const passwordForm = reactive({
   currentPassword: '',
@@ -118,6 +120,7 @@ const cropDragging = ref(false)
 const cropApplying = ref(false)
 const previousSubject = ref(form.subject)
 const chatModels = ref<ChatModelOption[]>(DEFAULT_CHAT_MODELS)
+const agentRoles = ref<AgentRolePublic[]>([])
 const chatModelStatuses = ref<Record<string, ChatModelStatus>>({})
 const modelStatusLoading = ref(false)
 let streamAbortController: AbortController | null = null
@@ -206,6 +209,20 @@ async function loadChatModels() {
   }
 }
 
+async function loadAgentRoles(subject = form.subject) {
+  try {
+    const { data } = await api.get<AgentRolePublic[]>('/agent-roles/enabled', { params: { subject } })
+    agentRoles.value = data
+    if (form.roleId !== null && !data.some((item) => item.id === form.roleId)) {
+      form.roleId = null
+    }
+  } catch (error) {
+    console.error(error)
+    agentRoles.value = []
+    form.roleId = null
+  }
+}
+
 async function refreshChatModelStatuses() {
   modelStatusLoading.value = true
   try {
@@ -274,6 +291,7 @@ async function openConversation(id: number) {
   clearLocalAttachmentUrls()
   const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
   form.subject = data.subject
+  form.roleId = null
   previousSubject.value = data.subject
   guidanceStage.value = data.guidance_stage
   messages.value = data.messages.map((item) => ({
@@ -282,7 +300,9 @@ async function openConversation(id: number) {
     attachment: item.attachment || null,
     assets: item.assets || [],
     suggested_replies: normalizeSuggestedReplies(item.suggested_replies),
+    agent_role_snapshot: item.agent_role_snapshot || null,
   }))
+  await loadAgentRoles(data.subject)
   await preloadMessageAttachments(messages.value)
   resetRecommendations()
   queueScrollToBottom()
@@ -392,6 +412,8 @@ async function handleSubjectChange(nextSubject: string) {
   const oldSubject = previousSubject.value
   if (!currentConversationId.value || messages.value.length === 0) {
     previousSubject.value = nextSubject
+    form.roleId = null
+    await loadAgentRoles(nextSubject)
     return
   }
 
@@ -406,8 +428,11 @@ async function handleSubjectChange(nextSubject: string) {
       },
     )
     startNewConversation({ subject: nextSubject })
+    form.roleId = null
+    await loadAgentRoles(nextSubject)
   } catch {
     form.subject = oldSubject
+    await loadAgentRoles(oldSubject)
   }
 }
 
@@ -1063,12 +1088,14 @@ async function sendMessage() {
   queueScrollToBottom()
 
   try {
+    let roleFallbackNotified = false
     await streamChat(
       {
         subject: form.subject,
         message,
         conversation_id: currentConversationId.value,
         llm_model: form.llmModel,
+        role_id: form.roleId,
         image,
       },
       ({ event, data }) => {
@@ -1078,6 +1105,18 @@ async function sendMessage() {
           }
           if (typeof data.guidance_stage === 'string') {
             guidanceStage.value = data.guidance_stage
+          }
+          const roleStatus = typeof data.role_status === 'string' ? data.role_status : 'none'
+          if (
+            form.roleId !== null
+            && ['disabled', 'not_found', 'subject_mismatch', 'misconfigured'].includes(roleStatus)
+          ) {
+            form.roleId = null
+            if (!roleFallbackNotified) {
+              roleFallbackNotified = true
+              ElMessage.warning('所选教学角色当前不可用，已改用默认教学风格')
+            }
+            void loadAgentRoles()
           }
         }
         if (event === 'restart') {
@@ -1160,6 +1199,7 @@ onBeforeUnmount(() => {
 onMounted(async () => {
   void loadNotifications()
   await loadChatModels()
+  await loadAgentRoles()
   void refreshChatModelStatuses()
   modelStatusTimer = window.setInterval(() => {
     void refreshChatModelStatuses()
@@ -1335,6 +1375,30 @@ onMounted(async () => {
               <div v-if="chatModelQuotaLabel(model)" class="chat-model-option__quota">
                 {{ chatModelQuotaLabel(model) }}
               </div>
+            </div>
+          </el-option>
+        </el-select>
+        <el-select
+          v-if="agentRoles.length"
+          v-model="form.roleId"
+          class="chat-role-select"
+          :disabled="sending"
+          clearable
+          placeholder="默认教学风格"
+          aria-label="选择教学角色"
+        >
+          <template #prefix>
+            <span class="chat-model-select__prefix">角色</span>
+          </template>
+          <el-option
+            v-for="role in agentRoles"
+            :key="role.id"
+            :value="role.id"
+            :label="`${role.emoji || ''}${role.emoji ? ' ' : ''}${role.display_name}`"
+          >
+            <div class="chat-role-option">
+              <strong>{{ role.emoji }} {{ role.display_name }}</strong>
+              <span>{{ role.description }}</span>
             </div>
           </el-option>
         </el-select>

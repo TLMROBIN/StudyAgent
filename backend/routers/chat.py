@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -42,6 +43,11 @@ from backend.models.schemas import (
 )
 from backend.models.user import User, UserRole
 from backend.services.audit_service import audit_service
+from backend.services.agent_role_service import (
+    ResolvedRoleSnapshot,
+    agent_role_service,
+    snapshot_from_replay,
+)
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import FilterDecision, filter_service
@@ -56,6 +62,8 @@ from backend.services.metrics_service import (
     chat_practice_review_total,
     chat_queue_wait_seconds,
     chat_rag_retrieval_seconds,
+    chat_role_request_total,
+    chat_role_resolution_seconds,
     chat_request_total,
     chat_suggested_replies_seconds,
     chat_stream_disconnect_total,
@@ -580,6 +588,7 @@ def _instant_stream(
     context_chunks: int = 0,
     assets: list[dict[str, Any]] | None = None,
     suggested_replies: list[str] | None = None,
+    role_snapshot: ResolvedRoleSnapshot | None = None,
 ):
     async def stream():
         sse_active_connections.inc()
@@ -592,6 +601,7 @@ def _instant_stream(
                     "queue_waiting_before": 0,
                     "context_chunks": context_chunks,
                     "request_id": getattr(request.state, "request_id", None),
+                    **(role_snapshot or ResolvedRoleSnapshot.none()).meta_payload(),
                 },
             )
             yield _sse_event(
@@ -1063,7 +1073,9 @@ def _complete_early_special_response(
     assets: list[dict[str, Any]] | None = None,
     context_chunks: int = 0,
     active_practice: dict[str, Any] | None = None,
+    role_snapshot: ResolvedRoleSnapshot,
 ) -> StreamingResponse:
+    bypassed_role = role_snapshot.bypassed()
     response_text, response_assets = _persist_direct_assistant_response(
         db,
         conversation=conversation,
@@ -1086,6 +1098,7 @@ def _complete_early_special_response(
             guidance_stage=guidance_stage,
             final_content=response_text,
             assets=response_assets,
+            role_snapshot=bypassed_role.replay_snapshot(),
         )
     return StreamingResponse(
         _instant_stream(
@@ -1095,6 +1108,7 @@ def _complete_early_special_response(
             request=request,
             context_chunks=context_chunks,
             assets=response_assets,
+            role_snapshot=bypassed_role,
         ),
         media_type="text/event-stream",
     )
@@ -1133,7 +1147,7 @@ def _normalize_chat_message_content(message: str, *, has_attachment: bool) -> st
 
 async def _parse_stream_request_payload(request: Request) -> tuple[ChatRequest, UploadFile | None]:
     content_type = (request.headers.get("content-type") or "").lower()
-    if "multipart/form-data" in content_type:
+    if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
         form = await request.form()
         image_items = [item for item in form.getlist("image") if item]
         if len(image_items) > 1:
@@ -1143,17 +1157,27 @@ async def _parse_stream_request_payload(request: Request) -> tuple[ChatRequest, 
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid chat image upload")
         conversation_id_raw = str(form.get("conversation_id") or "").strip()
         request_id_raw = str(form.get("request_id") or "").strip()
-        payload = ChatRequest(
-            subject=str(form.get("subject") or "").strip(),
-            message=str(form.get("message") or ""),
-            conversation_id=int(conversation_id_raw) if conversation_id_raw else None,
-            request_id=request_id_raw or None,
-            llm_model=str(form.get("llm_model") or "").strip() or None,
-        )
+        role_id_raw = str(form.get("role_id") or "").strip()
+        try:
+            payload = ChatRequest.model_validate(
+                {
+                    "subject": str(form.get("subject") or "").strip(),
+                    "message": str(form.get("message") or ""),
+                    "conversation_id": conversation_id_raw or None,
+                    "request_id": request_id_raw or None,
+                    "llm_model": str(form.get("llm_model") or "").strip() or None,
+                    "role_id": role_id_raw or None,
+                }
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid chat payload") from exc
         return payload, image
 
     body = await request.json()
-    return ChatRequest.model_validate(body), None
+    try:
+        return ChatRequest.model_validate(body), None
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid chat payload") from exc
 
 
 def _build_filter_question(*, payload_message: str, understanding: ImageUnderstandingResult | None) -> str:
@@ -1399,6 +1423,7 @@ async def stream_chat(
         conversation_id=payload.conversation_id,
         image_sha256=image_sha256,
         llm_model=selected_model_key,
+        requested_role_id=payload.role_id,
     )
 
     replay_state = request_replay_service.load(user_id=current_user.id, request_id=payload.request_id)
@@ -1419,6 +1444,9 @@ async def stream_chat(
         if not conversation:
             replay_state = None
         elif replay_state.status == "completed" and replay_state.final_content:
+            completed_role = snapshot_from_replay(replay_state.role_snapshot, payload.role_id) or ResolvedRoleSnapshot.none(
+                payload.role_id
+            )
             return StreamingResponse(
                 _instant_stream(
                     conversation_id=conversation.id,
@@ -1427,9 +1455,19 @@ async def stream_chat(
                     request=request,
                     assets=list(replay_state.assets or []),
                     suggested_replies=list(replay_state.suggested_replies or []),
+                    role_snapshot=completed_role,
                 ),
                 media_type="text/event-stream",
             )
+
+    role_snapshot = snapshot_from_replay(replay_state.role_snapshot, payload.role_id) if replay_state else None
+    if role_snapshot is None:
+        role_started = perf_counter()
+        try:
+            role_snapshot = agent_role_service.resolve(db, payload.role_id, payload.subject)
+        finally:
+            chat_role_resolution_seconds.observe(perf_counter() - role_started)
+        chat_role_request_total.labels(status=role_snapshot.status).inc()
 
     if not conversation:
         conversation = _ensure_conversation(db, current_user.id, payload)
@@ -1456,6 +1494,7 @@ async def stream_chat(
                     final_content=existing_assistant.content,
                     assets=list(existing_assistant.assets or []),
                     suggested_replies=list(existing_assistant.suggested_replies or []),
+                    role_snapshot=role_snapshot.replay_snapshot(),
                 )
             return StreamingResponse(
                 _instant_stream(
@@ -1465,6 +1504,7 @@ async def stream_chat(
                     request=request,
                     assets=list(existing_assistant.assets or []),
                     suggested_replies=list(existing_assistant.suggested_replies or []),
+                    role_snapshot=role_snapshot,
                 ),
                 media_type="text/event-stream",
             )
@@ -1517,6 +1557,7 @@ async def stream_chat(
                 conversation_id=conversation.id,
                 turn_index=user_turn_index,
                 subject=payload.subject,
+                role_snapshot=role_snapshot.replay_snapshot(),
             )
 
     if has_image_turn and image_content and attachment_record:
@@ -1554,6 +1595,7 @@ async def stream_chat(
         payload_message=payload.message,
         understanding=image_understanding,
     ):
+        bypassed_role = role_snapshot.bypassed()
         short_circuit_text = _build_short_circuit_reply(payload.subject, image_understanding)
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
         if not existing_assistant:
@@ -1578,6 +1620,7 @@ async def stream_chat(
                 subject=payload.subject,
                 guidance_stage=conversation.guidance_stage,
                 final_content=short_circuit_text,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -1585,6 +1628,7 @@ async def stream_chat(
                 guidance_stage=conversation.guidance_stage.value,
                 content=short_circuit_text,
                 request=request,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -1598,6 +1642,7 @@ async def stream_chat(
     ):
         decision = FilterDecision(True, "practice_answer_submission", payload.subject or conversation.subject)
     if not decision.allowed:
+        bypassed_role = role_snapshot.bypassed()
         filter_blocked_total.inc()
         refusal = filter_service.refusal_text
         existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
@@ -1623,6 +1668,7 @@ async def stream_chat(
                 subject=payload.subject,
                 guidance_stage=conversation.guidance_stage,
                 final_content=refusal,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -1630,6 +1676,7 @@ async def stream_chat(
                 guidance_stage=conversation.guidance_stage.value,
                 content=refusal,
                 request=request,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -1676,6 +1723,7 @@ async def stream_chat(
                 guidance_stage=early_stage,
                 selected_model_key=selected_model_key,
                 response_text=response_text,
+                role_snapshot=role_snapshot,
             )
         if subject == "数学" and subject_guidance_service.is_math_practice_request(prompt_question):
             response_text, response_assets, practice_context_chunks, active_practice = _build_math_practice_response(
@@ -1701,6 +1749,7 @@ async def stream_chat(
                 assets=response_assets,
                 context_chunks=practice_context_chunks,
                 active_practice=active_practice,
+                role_snapshot=role_snapshot,
             )
         if subject == "英语" and subject_profile_service.is_vocabulary_request(prompt_question):
             result = subject_profile_service.add_english_vocabulary(
@@ -1720,6 +1769,7 @@ async def stream_chat(
                 guidance_stage=early_stage,
                 selected_model_key=selected_model_key,
                 response_text=_english_vocabulary_response(result),
+                role_snapshot=role_snapshot,
             )
         if subject == "语文" and subject_profile_service.is_chinese_material_request(prompt_question):
             result = subject_profile_service.add_chinese_material(
@@ -1739,6 +1789,7 @@ async def stream_chat(
                 guidance_stage=early_stage,
                 selected_model_key=selected_model_key,
                 response_text=_chinese_material_response(result),
+                role_snapshot=role_snapshot,
             )
         if subject == "物理" and physics_error_profile_service.is_record_request(prompt_question):
             user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
@@ -1768,6 +1819,7 @@ async def stream_chat(
                 guidance_stage=early_stage,
                 selected_model_key=selected_model_key,
                 response_text=response_text,
+                role_snapshot=role_snapshot,
             )
         if subject == "物理" and physics_guidance_service.is_practice_request(prompt_question):
             response_text, response_assets, practice_context_chunks, active_practice = _build_physics_practice_response(
@@ -1793,6 +1845,7 @@ async def stream_chat(
                 assets=response_assets,
                 context_chunks=practice_context_chunks,
                 active_practice=active_practice,
+                role_snapshot=role_snapshot,
             )
 
     active_config = _get_active_agent_config(db)
@@ -1861,7 +1914,9 @@ async def stream_chat(
         practice_context=conversation.active_practice if practice_review_turn else None,
         subject_supplement=subject_supplement,
         subject_mode_override=subject_mode_override,
+        role_prompt=role_snapshot.rendered_prompt if role_snapshot.applied else None,
     )
+    bypassed_role = role_snapshot.bypassed()
     if subject == "数学" and subject_profile_service.is_record_request(prompt_question, subject=subject):
         user_message = _user_message_for_turn(db, conversation.id, user_turn_index)
         event = subject_profile_service.record_error_event(
@@ -1894,6 +1949,7 @@ async def stream_chat(
                 guidance_stage=prompt.stage,
                 final_content=response_text,
                 assets=response_assets,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -1902,6 +1958,7 @@ async def stream_chat(
                 content=response_text,
                 request=request,
                 assets=response_assets,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -1936,6 +1993,7 @@ async def stream_chat(
                 guidance_stage=prompt.stage,
                 final_content=response_text,
                 assets=response_assets,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -1945,6 +2003,7 @@ async def stream_chat(
                 request=request,
                 context_chunks=practice_context_chunks,
                 assets=response_assets,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -1975,6 +2034,7 @@ async def stream_chat(
                 guidance_stage=prompt.stage,
                 final_content=response_text,
                 assets=response_assets,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -1983,6 +2043,7 @@ async def stream_chat(
                 content=response_text,
                 request=request,
                 assets=response_assets,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -2013,6 +2074,7 @@ async def stream_chat(
                 guidance_stage=prompt.stage,
                 final_content=response_text,
                 assets=response_assets,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -2021,6 +2083,7 @@ async def stream_chat(
                 content=response_text,
                 request=request,
                 assets=response_assets,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -2064,6 +2127,7 @@ async def stream_chat(
                 subject=subject,
                 guidance_stage=prompt.stage,
                 final_content=response_text,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -2071,6 +2135,7 @@ async def stream_chat(
                 guidance_stage=prompt.stage.value,
                 content=response_text,
                 request=request,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -2115,6 +2180,7 @@ async def stream_chat(
                 guidance_stage=prompt.stage,
                 final_content=response_text,
                 assets=response_assets,
+                role_snapshot=bypassed_role.replay_snapshot(),
             )
         return StreamingResponse(
             _instant_stream(
@@ -2124,6 +2190,7 @@ async def stream_chat(
                 request=request,
                 context_chunks=practice_context_chunks,
                 assets=response_assets,
+                role_snapshot=bypassed_role,
             ),
             media_type="text/event-stream",
         )
@@ -2151,6 +2218,7 @@ async def stream_chat(
             chunks=retrieval.chunks,
             llm_model=selected_model_key,
             teaching_mode=subject_mode_override.value if subject_mode_override else None,
+            role_revision_hash=role_snapshot.content_hash if role_snapshot.applied else None,
         )
         if cache_lookup.answer:
             response_text = cache_lookup.answer
@@ -2178,6 +2246,8 @@ async def stream_chat(
                     turn_index=user_turn_index,
                     guidance_stage=prompt.stage,
                     llm_model_key=selected_model_key,
+                    agent_role_revision_id=role_snapshot.revision_id if role_snapshot.applied else None,
+                    agent_role_snapshot=role_snapshot.public_snapshot() if role_snapshot.applied else None,
                 )
                 db.add(assistant_message)
                 guidance_stage_total.labels(stage=prompt.stage.value).inc()
@@ -2193,6 +2263,7 @@ async def stream_chat(
                     guidance_stage=prompt.stage,
                     final_content=response_text,
                     suggested_replies=suggested_replies,
+                    role_snapshot=role_snapshot.replay_snapshot(),
                 )
             return StreamingResponse(
                 _instant_stream(
@@ -2202,6 +2273,7 @@ async def stream_chat(
                     request=request,
                     context_chunks=len(retrieval.chunks),
                     suggested_replies=suggested_replies,
+                    role_snapshot=role_snapshot,
                 ),
                 media_type="text/event-stream",
             )
@@ -2280,6 +2352,7 @@ async def stream_chat(
                     "queue_waiting_before": ticket.waiting_before,
                     "context_chunks": len(retrieval.chunks),
                     "request_id": getattr(request.state, "request_id", None),
+                    **role_snapshot.meta_payload(),
                 },
             )
             quota_max_tokens = (
@@ -2446,6 +2519,8 @@ async def stream_chat(
                             turn_index=user_turn_index,
                             guidance_stage=prompt.stage,
                             llm_model_key=selected_model_key,
+                            agent_role_revision_id=role_snapshot.revision_id if role_snapshot.applied else None,
+                            agent_role_snapshot=role_snapshot.public_snapshot() if role_snapshot.applied else None,
                         )
                         db.add(assistant_message)
                         db.flush()
@@ -2515,6 +2590,7 @@ async def stream_chat(
                             guidance_stage=prompt.stage,
                             final_content=emitted_text,
                             suggested_replies=suggested_replies,
+                            role_snapshot=role_snapshot.replay_snapshot(),
                         )
             except Exception:
                 db.rollback()

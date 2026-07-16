@@ -21,6 +21,7 @@ class RequestReplayState:
     final_content: str | None = None
     assets: list[dict] | None = None
     suggested_replies: list[str] | None = None
+    role_snapshot: dict | None = None
 
 
 class RequestReplayService:
@@ -36,6 +37,7 @@ class RequestReplayService:
         conversation_id: int | None,
         image_sha256: str | None = None,
         llm_model: str | None = None,
+        requested_role_id: int | None = None,
     ) -> str:
         payload = {
             "subject": subject.strip(),
@@ -43,6 +45,7 @@ class RequestReplayService:
             "conversation_id": conversation_id,
             "image_sha256": image_sha256,
             "llm_model": (llm_model or "").strip(),
+            "requested_role_id": requested_role_id,
         }
         return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -63,6 +66,7 @@ class RequestReplayService:
         conversation_id: int,
         turn_index: int,
         subject: str,
+        role_snapshot: dict | None = None,
     ) -> None:
         self._save(
             user_id,
@@ -73,6 +77,7 @@ class RequestReplayService:
                 turn_index=turn_index,
                 status="accepted",
                 subject=subject,
+                role_snapshot=dict(role_snapshot) if role_snapshot else None,
             ),
         )
 
@@ -89,6 +94,7 @@ class RequestReplayService:
         final_content: str,
         assets: list[dict] | None = None,
         suggested_replies: list[str] | None = None,
+        role_snapshot: dict | None = None,
     ) -> None:
         self._save(
             user_id,
@@ -103,6 +109,7 @@ class RequestReplayService:
                 final_content=final_content,
                 assets=list(assets or []),
                 suggested_replies=list(suggested_replies or []),
+                role_snapshot=dict(role_snapshot) if role_snapshot else None,
             ),
         )
 

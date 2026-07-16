@@ -35,6 +35,7 @@ class QuestionCacheService:
         chunks: list[KnowledgeChunk],
         llm_model: str | None = None,
         teaching_mode: str | None = None,
+        role_revision_hash: str | None = None,
     ) -> QuestionCacheLookup:
         cache_key = self._build_key(
             subject=subject,
@@ -44,6 +45,7 @@ class QuestionCacheService:
             chunks=chunks,
             llm_model=llm_model,
             teaching_mode=teaching_mode,
+            role_revision_hash=role_revision_hash,
         )
         if not cache_key:
             return QuestionCacheLookup(cache_key=None, answer=None)
@@ -80,6 +82,7 @@ class QuestionCacheService:
         chunks: list[KnowledgeChunk],
         llm_model: str | None = None,
         teaching_mode: str | None = None,
+        role_revision_hash: str | None = None,
     ) -> str | None:
         normalized_question = self.normalize_question(question)
         if not normalized_question:
@@ -96,6 +99,8 @@ class QuestionCacheService:
         if teaching_mode:
             # 意图分类 override 生效时纳入 key，避免不同教学模式共享缓存答案
             payload["teaching_mode"] = teaching_mode
+        if role_revision_hash:
+            payload["role_revision_hash"] = role_revision_hash
         digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         return f"question_cache:{digest}"
 
