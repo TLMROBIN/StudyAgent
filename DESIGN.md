@@ -268,6 +268,14 @@ StudyAgent 使用环境式分层：背景的青绿与橙色柔光建立空间气
 - **Reversible state:** 已完成会话始终提供“恢复继续思考”，让学生能够纠正误操作或重新进入问题。
 - **Failure safety:** 保存失败时保留学生输入；保存成功但列表刷新失败时，必须明确说明状态已经保存，不能反向报告为提交失败。
 
+### Student Session Resilience
+
+- **Capability honesty:** 学科列表由后端返回，并明确区分“校本资料与题库可用”“校本资料可用”和“通用答疑”，不能让可选学科暗示能力完全相同。
+- **Draft continuity:** 未发送文字按学生、学科与会话保存在当前标签页；发送失败恢复输入，发送成功或主动停止后清理草稿。
+- **Stable recovery copy:** 技术错误只进入日志；学生端使用稳定中文说明发生了什么、下一步能做什么，并明确草稿是否保留。
+- **Single announcement channel:** 流式分块不逐字触发屏幕阅读器；开始、完成、停止和失败通过一个原子 live region 播报。
+- **Progressive session tools:** 学生会话顶栏最多同时呈现四项操作；引导设置、修改密码与情境化完成动作收进“更多”。
+
 ### Panels and Data
 
 - **Student surfaces:** 留出阅读与触控空间，用对话、建议回复和明确下一步维持思考节奏。

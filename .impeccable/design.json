@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-16T13:30:08.000Z",
+  "generatedAt": "2026-07-16T21:42:04.000Z",
   "title": "Design System: StudyAgent",
   "extensions": {
     "colorMeta": {
@@ -227,7 +227,8 @@
       {"name": "The Orange Annotation Rule", "body": "校订橙用于提醒和批注语义，不用于主要提交按钮，也不用于大面积背景。", "section": "colors"},
       {"name": "The Calm Type Rule", "body": "产品界面只使用这一套无衬线家族；标题最紧不得超过 -0.03em，按钮和正文不使用展示字体或夸张字距。", "section": "typography"},
       {"name": "The Ambient Layer Rule", "body": "阴影只说明层级，不作为每张卡片的装饰；同一元素不要同时使用宽大阴影和高对比描边。", "section": "elevation"},
-      {"name": "The Completion Integrity Rule", "body": "取消或关闭不得写入完成状态；跳过反思必须明确命名；完成状态必须允许恢复继续思考。", "section": "components"}
+      {"name": "The Completion Integrity Rule", "body": "取消或关闭不得写入完成状态；跳过反思必须明确命名；完成状态必须允许恢复继续思考。", "section": "components"},
+      {"name": "The Student Resilience Rule", "body": "学生草稿必须可恢复，学科能力必须如实标注，技术错误不得直出，动态状态统一通过单一播报通道反馈。", "section": "components"}
     ],
     "dos": [
       "Do 让主要触控操作达到 44–48px，并在平板横屏和低高度视口中验证。",
@@ -237,7 +238,9 @@
       "Do 让公式、长题干、表格和图片在缩放后仍可阅读或滚动查看。",
       "Do 尊重减少动态效果设置，让通知滚动等运动能够停止或降级。",
       "Do 让系统自动选择答疑服务，把历史、角色等次要决策放进按需入口。",
-      "Do 区分取消、跳过反思和提交反思，并在保存失败时保留学生输入。"
+      "Do 区分取消、跳过反思和提交反思，并在保存失败时保留学生输入。",
+      "Do 由后端返回学科能力，并把校本资料、题库与通用答疑的差异直接告诉学生。",
+      "Do 让学生会话顶栏最多同时呈现四项操作，其余动作渐进披露。"
     ],
     "donts": [
       "Don't 把界面做成培训机构营销页：不要用夸张口号、强推销感或“提分神器”制造焦虑。",
@@ -247,7 +250,8 @@
       "Don't 为普通行和卡片添加宽大阴影；阴影只服务于真实层级。",
       "Don't 扩散新的主色或让校订橙承担主要提交动作。",
       "Don't 在学生主流程中暴露模型名、额度或内部引导阶段。",
-      "Don't 把关闭弹窗或取消操作解释为完成，也不要让完成状态不可恢复。"
+      "Don't 把关闭弹窗或取消操作解释为完成，也不要让完成状态不可恢复。",
+      "Don't 将原始 Error.message、重复流式播报或不可恢复的未发送草稿交给学生。"
     ]
   }
 }

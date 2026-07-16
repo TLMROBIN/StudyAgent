@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
@@ -9,12 +9,14 @@ import {
   type AgentRolePublic,
   type ChatModelOption,
   type ChatModelStatus,
+  type ChatSubjectOption,
   type ChatConversationRead,
   type ChatMessageAttachment,
   type ChatMessageRead,
   fetchActiveNotifications,
   fetchChatModelStatuses,
   fetchChatModels,
+  fetchChatSubjects,
   fetchIncentiveSummary,
   fetchQuestionRecommendations,
   streamChat,
@@ -31,6 +33,8 @@ import {
   type CropRect,
 } from '../utils/imageCrop'
 import {
+  CHAT_IMAGE_TOO_LARGE_MESSAGE,
+  HEIC_EXPORT_MESSAGE,
   isSupportedChatImageFile,
   prepareChatImageUpload,
 } from '../utils/chatImageUpload'
@@ -64,10 +68,24 @@ const STARTER_PROMPTS = [
   '我试过一种方法，卡在这里了：',
   '请先帮我检查已知条件，不要直接给答案。',
 ]
-const subjects = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
+const DEFAULT_SUBJECT_NAMES = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
+const DEFAULT_CHAT_SUBJECTS: ChatSubjectOption[] = DEFAULT_SUBJECT_NAMES.map((name) => ({
+  name,
+  knowledge_base_available: false,
+  question_bank_available: false,
+}))
 const DEFAULT_CHAT_MODELS: ChatModelOption[] = [
   { key: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', description: '通用快捷' },
 ]
+const CHAT_DRAFT_STORAGE_PREFIX = 'studyagent-student-chat-draft:v1'
+const CHAT_DRAFT_POINTER_PREFIX = 'studyagent-student-chat-active-draft:v1'
+const SAFE_IMAGE_ERROR_MESSAGES = new Set([
+  '只支持上传 1 张图片',
+  CHAT_IMAGE_TOO_LARGE_MESSAGE,
+  HEIC_EXPORT_MESSAGE,
+  '当前浏览器不支持图片裁剪',
+  '图片裁剪失败，请重试',
+])
 const resourceTypeOptions = [
   { value: 'knowledge_note', label: '知识讲义' },
   { value: 'textbook', label: '教材' },
@@ -143,10 +161,14 @@ const cropSelection = reactive<CropRect>({ x: 0, y: 0, width: 1, height: 1 })
 const cropDragging = ref(false)
 const cropApplying = ref(false)
 const previousSubject = ref(form.subject)
+const chatSubjects = ref<ChatSubjectOption[]>(DEFAULT_CHAT_SUBJECTS)
 const chatModels = ref<ChatModelOption[]>(DEFAULT_CHAT_MODELS)
 const agentRoles = ref<AgentRolePublic[]>([])
 const chatModelStatuses = ref<Record<string, ChatModelStatus>>({})
 const modelStatusLoading = ref(false)
+const screenReaderAnnouncement = ref('')
+const activeDraftStorageKey = ref('')
+let hydratingDraft = false
 let streamAbortController: AbortController | null = null
 let modelStatusTimer: ReturnType<typeof window.setInterval> | null = null
 let stopRequested = false
@@ -168,6 +190,17 @@ const visibleRecommendations = computed(() => (
 const selectedModelStatus = computed(() => chatModelStatuses.value[form.llmModel]?.status || 'unknown')
 const selectedModel = computed(() => chatModels.value.find((item) => item.key === form.llmModel) || null)
 const selectedModelQuotaExhausted = computed(() => Boolean(selectedModel.value?.quota?.quota_exhausted))
+const selectedSubject = computed(() => (
+  chatSubjects.value.find((item) => item.name === form.subject)
+  || DEFAULT_CHAT_SUBJECTS.find((item) => item.name === form.subject)
+  || null
+))
+const selectedSubjectCapabilityLabel = computed(() => subjectCapabilityLabel(selectedSubject.value))
+const studentMessageCount = computed(() => messages.value.filter((item) => item.role === 'user').length)
+const showCompletionAction = computed(() => Boolean(
+  currentConversationId.value
+  && (currentConversationResolved.value || studentMessageCount.value >= 2),
+))
 const serviceStatusLabel = computed(() => {
   if (selectedModelQuotaExhausted.value || selectedModelStatus.value === 'unavailable') {
     return '正在切换可用服务'
@@ -214,6 +247,222 @@ const canRequestRecommendations = computed(() => {
   return Boolean(currentConversationId.value && getLastUserMessage())
 })
 
+function subjectCapabilityLabel(subject: ChatSubjectOption | null): string {
+  if (subject?.question_bank_available) {
+    return '校本资料与题库可用'
+  }
+  if (subject?.knowledge_base_available) {
+    return '校本资料可用'
+  }
+  return '通用答疑'
+}
+
+function draftStorageAvailable(): boolean {
+  return typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined'
+}
+
+function readDraftStorageValue(storageKey: string): string {
+  if (!storageKey || !draftStorageAvailable()) {
+    return ''
+  }
+  try {
+    return window.sessionStorage.getItem(storageKey) || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeDraftStorageValue(storageKey: string, value: string): boolean {
+  if (!storageKey || !draftStorageAvailable()) {
+    return false
+  }
+  try {
+    window.sessionStorage.setItem(storageKey, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function removeDraftStorageValue(storageKey: string) {
+  if (!storageKey || !draftStorageAvailable()) {
+    return
+  }
+  try {
+    window.sessionStorage.removeItem(storageKey)
+  } catch {
+    // Storage may be unavailable in a restricted WebView; drafting must still work in memory.
+  }
+}
+
+function buildDraftStorageKey(
+  subject = form.subject,
+  conversationId: number | null = currentConversationId.value,
+): string {
+  const studentKey = authStore.user?.id ?? authStore.user?.username ?? 'student'
+  const conversationKey = conversationId ? `conversation-${conversationId}` : 'new'
+  return `${CHAT_DRAFT_STORAGE_PREFIX}:${studentKey}:${subject}:${conversationKey}`
+}
+
+function buildDraftPointerKey(): string {
+  const studentKey = authStore.user?.id ?? authStore.user?.username ?? 'student'
+  return `${CHAT_DRAFT_POINTER_PREFIX}:${studentKey}`
+}
+
+function readDraftPointer(): {
+  storage_key: string
+  subject: string
+  conversation_id: number | null
+} | null {
+  if (!draftStorageAvailable()) {
+    return null
+  }
+  try {
+    const raw = readDraftStorageValue(buildDraftPointerKey())
+    if (!raw) {
+      return null
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (typeof parsed.storage_key !== 'string' || typeof parsed.subject !== 'string') {
+      removeDraftStorageValue(buildDraftPointerKey())
+      return null
+    }
+    return {
+      storage_key: parsed.storage_key,
+      subject: parsed.subject,
+      conversation_id: typeof parsed.conversation_id === 'number' ? parsed.conversation_id : null,
+    }
+  } catch {
+    removeDraftStorageValue(buildDraftPointerKey())
+    return null
+  }
+}
+
+function writeDraftPointer(storageKey: string) {
+  if (!draftStorageAvailable()) {
+    return
+  }
+  writeDraftStorageValue(buildDraftPointerKey(), JSON.stringify({
+    storage_key: storageKey,
+    subject: form.subject,
+    conversation_id: currentConversationId.value,
+  }))
+}
+
+function removeDraft(storageKey: string) {
+  if (!storageKey || !draftStorageAvailable()) {
+    return
+  }
+  removeDraftStorageValue(storageKey)
+  if (readDraftPointer()?.storage_key === storageKey) {
+    removeDraftStorageValue(buildDraftPointerKey())
+  }
+}
+
+function persistDraft(value: string) {
+  if (hydratingDraft || !draftStorageAvailable()) {
+    return
+  }
+  const storageKey = activeDraftStorageKey.value || buildDraftStorageKey()
+  activeDraftStorageKey.value = storageKey
+  if (value.trim()) {
+    if (writeDraftStorageValue(storageKey, value)) {
+      writeDraftPointer(storageKey)
+    }
+  } else {
+    removeDraft(storageKey)
+  }
+}
+
+function setDraftInput(value: string) {
+  hydratingDraft = true
+  form.message = value
+  hydratingDraft = false
+}
+
+function loadDraftForCurrentContext() {
+  const storageKey = buildDraftStorageKey()
+  activeDraftStorageKey.value = storageKey
+  const storedDraft = readDraftStorageValue(storageKey)
+  setDraftInput(storedDraft)
+  if (storedDraft.trim()) {
+    writeDraftPointer(storageKey)
+  }
+}
+
+async function restoreLatestDraftContext(): Promise<boolean> {
+  const pointer = readDraftPointer()
+  if (!pointer || !draftStorageAvailable()) {
+    return false
+  }
+  const draft = readDraftStorageValue(pointer.storage_key)
+  if (!draft.trim()) {
+    removeDraft(pointer.storage_key)
+    return false
+  }
+  if (pointer.conversation_id && conversations.value.some((item) => item.id === pointer.conversation_id)) {
+    return openConversation(pointer.conversation_id)
+  }
+
+  const subject = chatSubjects.value.some((item) => item.name === pointer.subject) ? pointer.subject : form.subject
+  currentConversationId.value = null
+  form.subject = subject
+  previousSubject.value = subject
+  const nextStorageKey = buildDraftStorageKey()
+  if (pointer.storage_key !== nextStorageKey) {
+    removeDraft(pointer.storage_key)
+    writeDraftStorageValue(nextStorageKey, draft)
+  }
+  activeDraftStorageKey.value = nextStorageKey
+  setDraftInput(draft)
+  writeDraftPointer(nextStorageKey)
+  return true
+}
+
+function clearSubmittedDraft(storageKey: string) {
+  removeDraft(storageKey)
+  activeDraftStorageKey.value = buildDraftStorageKey()
+  removeDraft(activeDraftStorageKey.value)
+  setDraftInput('')
+}
+
+function restoreSubmittedDraft(storageKey: string, value: string) {
+  const currentStorageKey = buildDraftStorageKey()
+  if (storageKey !== currentStorageKey) {
+    removeDraft(storageKey)
+  }
+  activeDraftStorageKey.value = currentStorageKey
+  setDraftInput(value)
+  persistDraft(value)
+}
+
+function requestStatus(error: unknown): number | null {
+  const status = (
+    error as {
+      status?: unknown
+      response?: { status?: unknown }
+    }
+  )?.status ?? (error as { response?: { status?: unknown } })?.response?.status
+  return typeof status === 'number' ? status : null
+}
+
+function requestErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message.trim() : ''
+}
+
+function isOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false
+}
+
+function safeImageFailureMessage(error: unknown, fallback: string): string {
+  const message = requestErrorMessage(error)
+  return SAFE_IMAGE_ERROR_MESSAGES.has(message) ? message : fallback
+}
+
+watch(() => form.message, (value) => {
+  persistDraft(value)
+}, { flush: 'sync' })
+
 function scrollToBottom() {
   if (!chatStreamRef.value) {
     return
@@ -250,6 +499,16 @@ async function loadNotifications() {
   } catch (error) {
     console.error(error)
     notifications.value = []
+  }
+}
+
+async function loadChatSubjects() {
+  try {
+    const subjects = await fetchChatSubjects()
+    chatSubjects.value = subjects.length ? subjects : DEFAULT_CHAT_SUBJECTS
+  } catch (error) {
+    console.error(error)
+    chatSubjects.value = DEFAULT_CHAT_SUBJECTS
   }
 }
 
@@ -318,29 +577,37 @@ function selectBestAvailableModel() {
   }
 }
 
-async function openConversation(id: number) {
-  currentConversationId.value = id
-  resetPendingImage()
-  clearLocalAttachmentUrls()
-  const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
-  form.subject = data.subject
-  form.roleId = null
-  previousSubject.value = data.subject
-  guidanceStage.value = data.guidance_stage
-  currentConversationResolved.value = data.resolved
-  messages.value = data.messages.map((item) => ({
-    role: item.role,
-    content: item.content,
-    attachment: item.attachment || null,
-    assets: item.assets || [],
-    suggested_replies: normalizeSuggestedReplies(item.suggested_replies),
-    agent_role_snapshot: item.agent_role_snapshot || null,
-  }))
-  await loadAgentRoles(data.subject)
-  await preloadMessageAttachments(messages.value)
-  resetRecommendations()
-  historyOpen.value = false
-  queueScrollToBottom()
+async function openConversation(id: number): Promise<boolean> {
+  try {
+    const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
+    currentConversationId.value = id
+    resetPendingImage()
+    clearLocalAttachmentUrls()
+    form.subject = data.subject
+    form.roleId = null
+    previousSubject.value = data.subject
+    guidanceStage.value = data.guidance_stage
+    currentConversationResolved.value = data.resolved
+    messages.value = data.messages.map((item) => ({
+      role: item.role,
+      content: item.content,
+      attachment: item.attachment || null,
+      assets: item.assets || [],
+      suggested_replies: normalizeSuggestedReplies(item.suggested_replies),
+      agent_role_snapshot: item.agent_role_snapshot || null,
+    }))
+    loadDraftForCurrentContext()
+    await loadAgentRoles(data.subject)
+    await preloadMessageAttachments(messages.value)
+    resetRecommendations()
+    historyOpen.value = false
+    queueScrollToBottom()
+    return true
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('这条学习记录暂时无法打开，请刷新记录后重试。')
+    return false
+  }
 }
 
 function resetResolveDialog() {
@@ -443,6 +710,7 @@ function startNewConversation(options: { subject?: string } = {}) {
   clearLocalAttachmentUrls()
   resetRecommendations()
   historyOpen.value = false
+  loadDraftForCurrentContext()
   queueScrollToBottom()
 }
 
@@ -459,6 +727,24 @@ function openPasswordDialog() {
   passwordForm.newPassword = ''
   passwordForm.confirmPassword = ''
   passwordDialogVisible.value = true
+}
+
+function handleSessionMenuCommand(command: string) {
+  if (command === 'settings') {
+    settingsOpen.value = !settingsOpen.value
+    return
+  }
+  if (command === 'resolve' && showCompletionAction.value) {
+    if (currentConversationResolved.value) {
+      void restoreConversation()
+    } else {
+      openResolveDialog()
+    }
+    return
+  }
+  if (command === 'password') {
+    openPasswordDialog()
+  }
 }
 
 async function submitPasswordChange() {
@@ -517,6 +803,7 @@ async function deleteConversation(item: ConversationSummary) {
   deletingConversationIds.value = new Set(deletingConversationIds.value).add(item.id)
   try {
     await api.delete(`/chat/${item.id}`)
+    removeDraft(buildDraftStorageKey(item.subject, item.id))
     if (currentConversationId.value === item.id) {
       startNewConversation({ subject: form.subject })
     }
@@ -537,6 +824,7 @@ async function handleSubjectChange(nextSubject: string) {
     previousSubject.value = nextSubject
     form.roleId = null
     await loadAgentRoles(nextSubject)
+    loadDraftForCurrentContext()
     return
   }
 
@@ -556,6 +844,7 @@ async function handleSubjectChange(nextSubject: string) {
   } catch {
     form.subject = oldSubject
     await loadAgentRoles(oldSubject)
+    loadDraftForCurrentContext()
   }
 }
 
@@ -563,6 +852,7 @@ function stopStreaming(showNotice = true) {
   stopRequested = true
   streamAbortController?.abort()
   streamAbortController = null
+  screenReaderAnnouncement.value = '已停止本次生成，可以继续修改问题。'
   if (showNotice) {
     ElMessage.info('已停止本次生成')
   }
@@ -668,7 +958,8 @@ async function handleImageSelection(event: Event) {
     })
   } catch (error) {
     resetPendingImage()
-    ElMessage.error(error instanceof Error ? error.message : '图片处理失败，请重试')
+    console.error(error)
+    ElMessage.error(safeImageFailureMessage(error, '图片处理失败，请重试'))
   }
 }
 
@@ -862,7 +1153,7 @@ async function applyImageCrop() {
     ElMessage.success('已裁剪图片，将上传选中区域')
   } catch (error) {
     console.error(error)
-    ElMessage.error(error instanceof Error ? error.message : '图片裁剪失败，请重试')
+    ElMessage.error(safeImageFailureMessage(error, '图片裁剪失败，请重试'))
     cropApplying.value = false
   }
 }
@@ -986,20 +1277,15 @@ function recommendationTitle(item: QuestionRecommendation): string {
 }
 
 function recommendationDetail(error: unknown): string {
-  const detail = (
-    error as {
-      response?: {
-        data?: {
-          detail?: string
-        }
-      }
-    }
-  )?.response?.data?.detail
-  if (typeof detail === 'string' && detail.trim()) {
-    return detail
+  if (isOffline()) {
+    return '网络连接已断开，恢复网络后可重新获取练习题'
   }
-  if (error instanceof Error && error.message.trim()) {
-    return error.message
+  const status = requestStatus(error)
+  if (status === 429) {
+    return '练习推荐请求较多，请稍后再试'
+  }
+  if (status && status >= 500) {
+    return '练习推荐服务暂时繁忙，请稍后再试'
   }
   return '推荐题获取失败，请稍后重试'
 }
@@ -1021,19 +1307,30 @@ function currentRecommendationContextLabel(): string {
 }
 
 function chatFailureMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const message = error.message.trim()
-    if (message === 'Password change required') {
-      return '当前账号被标记为需改密，学生问答已被后端拦截，请联系管理员检查账号状态'
-    }
-    if (message === 'Question is not a supported academic prompt') {
-      return '当前只支持学科相关问题，请换一个和学习内容相关的问题再试'
-    }
-    if (message) {
-      return message
-    }
+  const message = requestErrorMessage(error)
+  if (message === 'Password change required') {
+    return '请先通过“更多”中的“修改密码”完成改密，再继续提问。草稿已保留。'
   }
-  return '发送失败，请稍后重试'
+  if (message === 'Question is not a supported academic prompt') {
+    return '当前只支持学科相关问题，请换一个和学习内容相关的问题再试。草稿已保留。'
+  }
+  if (isOffline()) {
+    return '网络连接已断开，恢复网络后可以重新发送。草稿已保留。'
+  }
+  const status = requestStatus(error)
+  if (status === 429) {
+    return '当前提问较多，请稍等片刻再发送。草稿已保留。'
+  }
+  if (status === 403) {
+    return '当前账号暂时无法发送问题，请联系老师或管理员。草稿已保留。'
+  }
+  if (status && status >= 500) {
+    return '答疑服务暂时繁忙，请稍后重新发送。草稿已保留。'
+  }
+  if (message === 'SSE stream interrupted before completion') {
+    return '回复连接中断，请重新发送或稍后再试。草稿已保留。'
+  }
+  return '暂时无法发送问题，请稍后重试。草稿已保留。'
 }
 
 async function requestRecommendations(options: { silent?: boolean } = {}) {
@@ -1188,7 +1485,9 @@ async function sendMessage() {
     return
   }
   clearActiveSuggestedReplies()
-  const message = form.message.trim()
+  const draftText = form.message
+  const message = draftText.trim()
+  const submissionDraftKey = activeDraftStorageKey.value || buildDraftStorageKey()
   const image = pendingImageFile.value
   const attachment = image ? {
     attachment_id: `local-${Date.now()}`,
@@ -1197,10 +1496,11 @@ async function sendMessage() {
     url: pendingImagePreviewUrl.value,
   } satisfies ChatMessageAttachment : null
   const content = message || (attachment ? IMAGE_ONLY_PLACEHOLDER : '')
-  form.message = ''
+  setDraftInput('')
   resetPendingImage({ preservePreview: Boolean(attachment) })
   sending.value = true
   stopRequested = false
+  screenReaderAnnouncement.value = '学习助手正在整理回复。'
   streamAbortController = new AbortController()
   messages.value.push({
     role: 'user',
@@ -1266,6 +1566,7 @@ async function sendMessage() {
             }
             last.content = data.content
             last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
+            screenReaderAnnouncement.value = `学习助手回复完成：${data.content}`
             queueScrollToBottom()
           }
         }
@@ -1291,9 +1592,16 @@ async function sendMessage() {
     const last = messages.value[messages.value.length - 1]
     if (last && last.role === 'assistant' && !last.content.trim()) {
       last.content = '这次没有收到有效回复，请重新发送一次，或补充题目条件后再试。'
+      screenReaderAnnouncement.value = last.content
       queueScrollToBottom()
     }
-    await loadConversations()
+    clearSubmittedDraft(submissionDraftKey)
+    try {
+      await loadConversations()
+    } catch (refreshError) {
+      console.error(refreshError)
+      ElMessage.warning('回复已经完成，但学习记录暂未刷新。稍后打开历史记录时可再试。')
+    }
     await loadIncentiveSummary()
     await loadChatModels()
     resetRecommendations()
@@ -1303,14 +1611,20 @@ async function sendMessage() {
       if (stopRequested && last && last.role === 'assistant' && !last.content.trim()) {
         messages.value.pop()
       }
+      clearSubmittedDraft(submissionDraftKey)
       return
     }
 
     console.error(error)
     const failureMessage = chatFailureMessage(error)
+    restoreSubmittedDraft(submissionDraftKey, draftText)
+    if (image && !pendingImageFile.value) {
+      updatePendingImage(image)
+    }
     if (last && last.role === 'assistant' && !last.content.trim()) {
       last.content = failureMessage
     }
+    screenReaderAnnouncement.value = failureMessage
     ElMessage.error(failureMessage)
   } finally {
     streamAbortController = null
@@ -1333,13 +1647,22 @@ onBeforeUnmount(() => {
 
 onMounted(async () => {
   void loadNotifications()
-  await loadChatModels()
-  await loadAgentRoles()
+  await Promise.all([loadChatSubjects(), loadChatModels()])
+  try {
+    await loadConversations()
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning('学习记录暂时无法加载，不影响开始新的提问。')
+  }
+  const restoredDraft = await restoreLatestDraftContext()
+  if (!restoredDraft) {
+    loadDraftForCurrentContext()
+  }
+  await loadAgentRoles(form.subject)
   void refreshChatModelStatuses()
   modelStatusTimer = window.setInterval(() => {
     void refreshChatModelStatuses()
   }, MODEL_STATUS_REFRESH_MS)
-  await loadConversations()
   await loadIncentiveSummary()
 })
 </script>
@@ -1356,39 +1679,62 @@ onMounted(async () => {
           <p>从你卡住的地方开始，我会用问题陪你找到下一步。</p>
         </div>
         <div class="study-session-tools">
-          <el-select
-            v-model="form.subject"
-            class="session-subject-select"
-            :disabled="sending || resolveSubmitting"
-            placeholder="选择学科"
-            aria-label="当前答疑学科"
-            @change="handleSubjectChange"
-          >
-            <el-option v-for="subject in subjects" :key="subject" :label="subject" :value="subject" />
-          </el-select>
+          <div class="session-subject-control">
+            <el-select
+              v-model="form.subject"
+              class="session-subject-select"
+              :disabled="sending || resolveSubmitting"
+              placeholder="选择学科"
+              :aria-label="`当前答疑学科：${form.subject}`"
+              aria-describedby="session-subject-capability"
+              @change="handleSubjectChange"
+            >
+              <el-option
+                v-for="subject in chatSubjects"
+                :key="subject.name"
+                :label="subject.name"
+                :value="subject.name"
+              >
+                <div class="subject-option-copy">
+                  <strong>{{ subject.name }}</strong>
+                  <span>{{ subjectCapabilityLabel(subject) }}</span>
+                </div>
+              </el-option>
+            </el-select>
+            <span id="session-subject-capability" class="session-subject-capability">
+              {{ selectedSubjectCapabilityLabel }}
+            </span>
+          </div>
           <button type="button" class="study-tool-button" :disabled="resolveSubmitting" @click="historyOpen = true">
             历史<span v-if="conversations.length" class="study-tool-count">{{ conversations.length }}</span>
           </button>
-          <button
-            type="button"
-            class="study-tool-button"
-            :disabled="resolveSubmitting"
-            :aria-expanded="settingsOpen"
-            aria-controls="study-session-settings"
-            @click="settingsOpen = !settingsOpen"
-          >
-            引导设置
-          </button>
-          <button
-            v-if="currentConversationId"
-            type="button"
-            class="study-tool-button"
-            :class="{ 'study-tool-button--resolved': currentConversationResolved }"
+          <el-dropdown
             :disabled="sending || resolveSubmitting"
-            @click="currentConversationResolved ? restoreConversation() : openResolveDialog()"
+            trigger="click"
+            placement="bottom-end"
+            @command="handleSessionMenuCommand"
           >
-            {{ currentConversationResolved ? '恢复继续思考' : '完成本次思考' }}
-          </button>
+            <button
+              type="button"
+              class="study-tool-button"
+              :disabled="sending || resolveSubmitting"
+              aria-label="更多会话操作"
+              aria-haspopup="menu"
+            >
+              更多
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="settings">
+                  {{ settingsOpen ? '收起引导设置' : '引导设置' }}
+                </el-dropdown-item>
+                <el-dropdown-item v-if="showCompletionAction" command="resolve" divided>
+                  {{ currentConversationResolved ? '恢复继续思考' : '完成本次思考' }}
+                </el-dropdown-item>
+                <el-dropdown-item command="password">修改密码</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <button
             type="button"
             class="primary-button study-new-question"
@@ -1455,8 +1801,8 @@ onMounted(async () => {
         ref="chatStreamRef"
         class="chat-stream"
         role="log"
-        aria-live="polite"
-        aria-relevant="additions text"
+        aria-live="off"
+        aria-relevant="additions"
         :aria-busy="sending"
       >
         <section v-if="!messages.length" class="chat-empty-state" aria-labelledby="chat-empty-title">
@@ -1575,7 +1921,7 @@ onMounted(async () => {
             <button type="button" class="ghost-button ghost-button--danger" :disabled="sending" @click="removePendingImage">移除</button>
           </div>
         </div>
-        <p v-if="sending" class="stream-hint" role="status" aria-live="polite">正在陪你梳理思路，可随时停止。</p>
+        <p v-if="sending" class="stream-hint">正在陪你梳理思路，可随时停止。</p>
         <div class="chat-composer-footer">
           <div class="chat-secondary-actions">
             <el-dropdown :disabled="sending" trigger="click" placement="top-start">
@@ -1598,7 +1944,7 @@ onMounted(async () => {
             </button>
           </div>
         </div>
-        <p class="sr-only" aria-live="polite">{{ sending ? '学习助手正在回复' : '可以继续输入问题' }}</p>
+        <p class="sr-only" aria-live="polite" aria-atomic="true">{{ screenReaderAnnouncement }}</p>
       </div>
 
       <section v-if="SHOW_RECOMMENDATION_PANEL" class="recommendation-panel">
@@ -1757,7 +2103,6 @@ onMounted(async () => {
         <div class="history-drawer-actions">
           <button type="button" class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
           <button type="button" class="ghost-button" @click="loadConversations">刷新</button>
-          <button type="button" class="ghost-button" :disabled="sending" @click="openPasswordDialog">修改密码</button>
         </div>
         <RouterLink to="/student/growth" class="incentive-summary-card" @click="historyOpen = false">
           <div><span>成长积分</span><strong>{{ incentiveSummary.total_points }}</strong></div>
@@ -1784,6 +2129,7 @@ onMounted(async () => {
                 type="button"
                 class="ghost-button ghost-button--danger"
                 :disabled="sending || deletingConversationIds.has(item.id)"
+                :aria-label="`${deletingConversationIds.has(item.id) ? '正在删除' : '删除对话'}：${conversationTopic(item)}`"
                 @click="deleteConversation(item)"
               >
                 {{ deletingConversationIds.has(item.id) ? '删除中...' : '删除' }}

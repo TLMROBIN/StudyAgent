@@ -23,7 +23,7 @@ from pydantic import ValidationError
 
 from backend.models.audit_log import AuditLog
 from backend.models.conversation import ChatMessageAttachment, Conversation, GuidanceStage, Message, MessageRole
-from backend.models.knowledge import KnowledgeChunk, KnowledgeDocument, ResourceType
+from backend.models.knowledge import DocumentStatus, KnowledgeChunk, KnowledgeDocument, ResourceType
 from backend.models.learning_profile import StudentErrorEvent, StudentSkillProfile
 from backend.models.llm_account import AccountBillingType, LLMProviderAccount
 from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillingMode
@@ -37,6 +37,7 @@ from backend.services.embed_service import EmbedService
 from backend.services.rag_service import RagService, RetrievalResult
 from backend.services.store_service import MemoryStore
 from backend.services.vector_store_service import VectorStoreService
+from backend.subjects import SUBJECTS
 
 
 def _parse_sse(payload: str) -> list[tuple[str, dict]]:
@@ -198,6 +199,75 @@ async def _read_streaming_response(response) -> str:
 
 def _fail_normal_chat_retrieval(*args, **kwargs):
     raise AssertionError("early special routes must skip normal chat RAG retrieval")
+
+
+def test_chat_subjects_report_available_school_materials():
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    session = session_factory()
+    try:
+        physics_document = KnowledgeDocument(
+            subject="物理",
+            filename="physics.pdf",
+            file_path="/tmp/physics.pdf",
+            mime_type="application/pdf",
+            size_bytes=128,
+            resource_type=ResourceType.TEXTBOOK.value,
+            status=DocumentStatus.COMPLETED,
+        )
+        math_document = KnowledgeDocument(
+            subject="数学",
+            filename="math.docx",
+            file_path="/tmp/math.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=256,
+            resource_type=ResourceType.QUESTION_SET.value,
+            status=DocumentStatus.COMPLETED,
+        )
+        pending_document = KnowledgeDocument(
+            subject="英语",
+            filename="english.pdf",
+            file_path="/tmp/english.pdf",
+            mime_type="application/pdf",
+            size_bytes=64,
+            resource_type=ResourceType.KNOWLEDGE_NOTE.value,
+            status=DocumentStatus.PROCESSING,
+        )
+        session.add_all([physics_document, math_document, pending_document])
+        session.flush()
+        session.add_all(
+            [
+                KnowledgeChunk(document_id=physics_document.id, subject="物理", chunk_index=0, content="牛顿定律"),
+                KnowledgeChunk(document_id=math_document.id, subject="数学", chunk_index=0, content="函数题"),
+                KnowledgeChunk(document_id=pending_document.id, subject="英语", chunk_index=0, content="阅读理解"),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    client = _build_chat_test_client(session_factory, current_user)
+    response = client.get("/api/chat/subjects")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["name"] for item in payload] == list(SUBJECTS)
+    by_subject = {item["name"]: item for item in payload}
+    assert by_subject["物理"] == {
+        "name": "物理",
+        "knowledge_base_available": True,
+        "question_bank_available": False,
+    }
+    assert by_subject["数学"] == {
+        "name": "数学",
+        "knowledge_base_available": True,
+        "question_bank_available": True,
+    }
+    assert by_subject["英语"] == {
+        "name": "英语",
+        "knowledge_base_available": False,
+        "question_bank_available": False,
+    }
 
 
 @pytest.fixture(autouse=True)
