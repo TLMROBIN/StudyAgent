@@ -199,7 +199,7 @@ class LLMStreamEvent:
 
 
 class LLMService:
-    DEFAULT_CHAT_MODEL_KEY = "minimax-m27"
+    DEFAULT_CHAT_MODEL_KEY = "deepseek-v4-flash"
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -251,8 +251,8 @@ class LLMService:
         return [
             {
                 "key": self.DEFAULT_CHAT_MODEL_KEY,
-                "name": "MiniMax-M2.7",
-                "description": "highspeed",
+                "name": "DeepSeek V4 Flash",
+                "description": "通用快捷",
             },
         ]
 
