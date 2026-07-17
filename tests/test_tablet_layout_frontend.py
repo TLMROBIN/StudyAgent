@@ -73,11 +73,12 @@ def test_student_chat_trims_first_streaming_chunk():
     assert "data.content.replace(/^\\s+/, '')" in chunk_block
 
 
-def test_user_bubbles_hide_role_label_to_avoid_leading_blank_line():
+def test_user_bubbles_tone_down_role_label_with_subdued_color():
     css = Path("frontend/src/styles.css").read_text()
 
     assert ".bubble.user .bubble-role" in css
     start = css.index(".bubble.user .bubble-role")
     end = css.index("}", start)
     rule = css[start:end]
-    assert "display: none" in rule
+    assert "color: rgba(255, 255, 255, 0.78)" in rule
+    assert "display: none" not in rule
