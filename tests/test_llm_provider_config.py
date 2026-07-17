@@ -482,15 +482,16 @@ def test_llm_service_uses_selected_vision_model_for_image_understanding(monkeypa
     ]
 
 
-def test_llm_service_exposes_builtin_student_chat_models():
+def test_llm_service_exposes_builtin_student_chat_models(monkeypatch):
     service = LLMService()
+    monkeypatch.setattr(service, "_database_chat_model_options", lambda: [])
 
     options = service.chat_model_options()
 
     assert [
         (item["key"], item["name"], item["description"]) for item in options
     ] == [
-        ("minimax-m27", "MiniMax-M2.7", "highspeed"),
+        ("deepseek-v4-flash", "DeepSeek V4 Flash", "通用快捷"),
     ]
 
 
@@ -504,6 +505,7 @@ def test_llm_service_rejects_stopped_builtin_local_vl_model():
 def test_llm_service_logs_empty_stream_fallback(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "test-key"
+    monkeypatch.setattr(service, "_providers_for_chat_model", lambda model_key: [service.providers[0]])
     warnings: list[str] = []
 
     async def fake_stream(provider, messages) -> AsyncIterator[str]:
@@ -530,6 +532,7 @@ def test_llm_service_logs_empty_stream_fallback(monkeypatch):
 def test_llm_service_requires_configured_vision_model_for_image_completion(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "primary-secret"
+    monkeypatch.setattr(service, "_database_image_provider_for_model", lambda model_key: [])
     seen: list[str] = []
 
     monkeypatch.setattr(
@@ -560,6 +563,7 @@ def test_llm_service_requires_configured_vision_model_for_image_completion(monke
 def test_llm_service_does_not_send_images_to_minimax_m2(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "primary-secret"
+    monkeypatch.setattr(service, "_database_image_provider_for_model", lambda model_key: [])
     seen: list[str] = []
 
     async def fake_complete(provider, messages):
@@ -581,6 +585,7 @@ def test_llm_service_does_not_send_images_to_minimax_m2(monkeypatch):
 
 def test_llm_service_reports_chat_model_statuses(monkeypatch):
     service = LLMService()
+    monkeypatch.setattr(service, "_database_chat_model_options", lambda: [])
 
     async def fake_probe(provider):
         return True, ""
@@ -593,12 +598,13 @@ def test_llm_service_reports_chat_model_statuses(monkeypatch):
     statuses = asyncio.run(collect_statuses())
 
     assert [(item["key"], item["status"], item["message"]) for item in statuses] == [
-        ("minimax-m27", "available", ""),
+        ("deepseek-v4-flash", "available", ""),
     ]
 
 
 def test_llm_service_model_statuses_do_not_probe_by_default(monkeypatch):
     service = LLMService()
+    monkeypatch.setattr(service, "_database_chat_model_options", lambda: [])
 
     async def fail_probe(provider):
         raise AssertionError("default model status checks must not call external providers")
@@ -610,7 +616,7 @@ def test_llm_service_model_statuses_do_not_probe_by_default(monkeypatch):
 
     statuses = asyncio.run(collect_statuses())
 
-    assert [item["key"] for item in statuses] == ["minimax-m27"]
+    assert [item["key"] for item in statuses] == ["deepseek-v4-flash"]
     assert {item["status"] for item in statuses} <= {"available", "unavailable"}
 
 

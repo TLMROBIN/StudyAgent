@@ -305,7 +305,7 @@ def test_stream_response_falls_back_when_provider_only_emits_usage(monkeypatch):
             async for chunk in service.stream_response(
                 [{"role": "user", "content": "带电"}],
                 "请继续说说你的想法。",
-                model_key="minimax-m27",
+                model_key="deepseek-v4-flash",
             )
         ]
 
@@ -318,7 +318,7 @@ def test_builtin_chat_models_do_not_include_stopped_local_vl_model(monkeypatch):
 
     options = service.chat_model_options()
 
-    assert [item["key"] for item in options] == ["minimax-m27"]
+    assert [item["key"] for item in options] == ["deepseek-v4-flash"]
     assert all("qwen2.5-vl" not in item["key"] for item in options)
 
 

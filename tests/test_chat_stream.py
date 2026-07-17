@@ -1446,7 +1446,7 @@ def test_chat_stream_strips_leading_blank_output_before_emit_persist_and_replay(
 def test_chat_stream_replays_disconnected_request_without_second_llm_call(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
-    _create_request_count_model(session_factory, limit=2)
+    _create_request_count_model(session_factory, limit=2, model_key="deepseek-v4-flash")
     llm_call_count = {"value": 0}
 
     async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
@@ -1872,12 +1872,12 @@ def test_chat_stream_passes_selected_model_to_image_understanding(monkeypatch):
     client = _build_chat_test_client(session_factory, current_user)
     response = client.post(
         "/api/chat/stream",
-        data={"subject": "数学", "message": "", "llm_model": "minimax-m27"},
+        data={"subject": "数学", "message": "", "llm_model": "deepseek-v4-flash"},
         files={"image": ("question.png", _make_test_image_bytes(), "image/png")},
     )
 
     assert response.status_code == 200
-    assert seen["model_key"] == "minimax-m27"
+    assert seen["model_key"] == "deepseek-v4-flash"
 
 
 def test_chat_stream_short_circuits_low_confidence_images(monkeypatch):
