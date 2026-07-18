@@ -5,8 +5,8 @@ import {
   clearStoredAuthTokens,
   getStoredAccessToken,
   getStoredRefreshToken,
+  redirectToSsoLogoutIfNeeded,
   resetSessionExpiredState,
-  storeAuthTokens,
 } from '../utils/authSession'
 
 export interface UserInfo {
@@ -14,12 +14,6 @@ export interface UserInfo {
   username: string
   full_name: string
   role: 'student' | 'teacher' | 'admin'
-  must_change_password: boolean
-}
-
-interface LoginPayload {
-  access_token: string
-  refresh_token: string
   must_change_password: boolean
 }
 
@@ -33,28 +27,6 @@ export const useAuthStore = defineStore('auth', {
     initialized: false,
   }),
   actions: {
-    async loginStudent(username: string, password: string) {
-      const { data } = await api.post<LoginPayload>('/auth/student/login', {
-        username,
-        password,
-      })
-      await this.applyTokenPair(data)
-    },
-    async loginStaff(username: string, password: string) {
-      const { data } = await api.post<LoginPayload>('/auth/staff/login', {
-        username,
-        password,
-      })
-      await this.applyTokenPair(data)
-    },
-    async applyTokenPair(data: LoginPayload) {
-      this.accessToken = data.access_token
-      this.refreshToken = data.refresh_token
-      storeAuthTokens(data.access_token, data.refresh_token)
-      this.initialized = false
-      await this.fetchProfile()
-      this.initialized = true
-    },
     clearSession() {
       this.accessToken = ''
       this.refreshToken = ''
@@ -106,7 +78,7 @@ export const useAuthStore = defineStore('auth', {
       this.clearSession()
       resetSessionExpiredState()
     },
-    async logout() {
+    async logout(): Promise<boolean> {
       try {
         const accessToken = getStoredAccessToken()
         const refreshToken = getStoredRefreshToken()
@@ -119,6 +91,8 @@ export const useAuthStore = defineStore('auth', {
         this.clearSession()
         resetSessionExpiredState()
       }
+      // SSO 登录的用户联动登出 Keycloak；返回 true 表示已触发整页跳转
+      return redirectToSsoLogoutIfNeeded()
     },
   },
 })

@@ -51,6 +51,7 @@ from backend.routers import chat as chat_router
 from backend.routers import knowledge as knowledge_router
 from backend.routers import stats as stats_router
 from backend.security import get_password_hash
+from backend.services.auth_service import auth_service
 from backend.services.embed_service import EmbedService
 from backend.services.filter_service import filter_service
 from backend.services.metrics_service import filter_blocked_total
@@ -114,11 +115,17 @@ class ScriptedLLM:
             yield chunk
 
 
-def _login(client: TestClient, path: str, username: str, step: str) -> dict[str, str]:
-    response = client.post(path, json={"username": username, "password": PASSWORD})
-    _step(f"{step}·登录 {username}", response.status_code == 200, f"{response.status_code} {response.text}")
-    token = response.json().get("access_token")
-    _step(f"{step}·登录返回 access_token", bool(token), response.json())
+def _login(env, username: str, step: str) -> dict[str, str]:
+    """本地密码登录端点已停用（403），链路测试改为直接签发 JWT，继续走真实鉴权链路。"""
+    session = env.session_factory()
+    try:
+        user = session.scalar(select(User).where(User.username == username))
+    finally:
+        session.close()
+    _step(f"{step}·签发令牌 {username}", user is not None, username)
+    tokens = auth_service.issue_token_pair(user)
+    token = tokens.get("access_token")
+    _step(f"{step}·签发返回 access_token", bool(token), list(tokens))
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -237,13 +244,30 @@ def env(tmp_path_factory):
 
 
 # ---------------------------------------------------------------------------
+# 链路 0：本地账号密码登录端点已停用（仅保留统一认证登录）
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_password_login_endpoints_disabled(env):
+    client = env.client
+    for path in ("/api/auth/student/login", "/api/auth/staff/login"):
+        response = client.post(path, json={"username": "e2e_student1", "password": PASSWORD})
+        _step(f"本地登录端点停用 {path}", response.status_code == 403, f"{response.status_code} {response.text}")
+        _step(
+            f"本地登录端点提示统一认证 {path}",
+            "统一认证" in response.json().get("detail", ""),
+            response.json(),
+        )
+
+
+# ---------------------------------------------------------------------------
 # 链路 1：学生 登录 → SSE 提问 → 查历史 → 同会话追问
 # ---------------------------------------------------------------------------
 
 
 def test_e2e_student_chain_login_ask_history_followup(env):
     client = env.client
-    headers = _login(client, "/api/auth/student/login", "e2e_student1", "学生链路")
+    headers = _login(env, "e2e_student1", "学生链路")
     env.state["student_headers"] = headers
 
     # -- 步骤 2：首次提问，逐事件解析 SSE --
@@ -340,7 +364,7 @@ def test_e2e_student_chain_login_ask_history_followup(env):
 
 def test_e2e_teacher_chain_upload_ingest_and_rag_hit(env):
     client = env.client
-    headers = _login(client, "/api/auth/staff/login", "e2e_teacher1", "教师链路")
+    headers = _login(env, "e2e_teacher1", "教师链路")
     env.state["teacher_headers"] = headers
 
     # -- 步骤 2：上传一份小的 txt 文档 --
@@ -389,7 +413,7 @@ def test_e2e_teacher_chain_upload_ingest_and_rag_hit(env):
 
     # -- 步骤 4：学生提问，RAG 检索命中该文档（meta.context_chunks 出现在 SSE 响应中） --
     student_headers = env.state.get("student_headers") or _login(
-        client, "/api/auth/student/login", "e2e_student1", "教师链路"
+        env, "e2e_student1", "教师链路"
     )
     env.llm.push(["先想一想：磁场在回旋加速器里起什么作用？粒子的周期和速度有关吗？"])
     response = client.post(
@@ -430,7 +454,7 @@ def test_e2e_teacher_chain_upload_ingest_and_rag_hit(env):
 
 def test_e2e_admin_chain_stats_audit_and_filter_rules(env):
     client = env.client
-    headers = _login(client, "/api/auth/staff/login", "e2e_admin1", "管理链路")
+    headers = _login(env, "e2e_admin1", "管理链路")
     env.state["admin_headers"] = headers
 
     # -- 步骤 2：统计概览（应能看到前两条链路的会话） --
@@ -494,10 +518,10 @@ def test_e2e_adversarial_question_blocked_and_recorded(env):
     blocked_case = next(case for case in cases if not case["allowed"] and "系统提示词" in case["text"])
 
     headers = env.state.get("student_headers") or _login(
-        client, "/api/auth/student/login", "e2e_student1", "负向链路"
+        env, "e2e_student1", "负向链路"
     )
     admin_headers = env.state.get("admin_headers") or _login(
-        client, "/api/auth/staff/login", "e2e_admin1", "负向链路"
+        env, "e2e_admin1", "负向链路"
     )
 
     questions_before = client.get("/api/stats/overview", headers=admin_headers).json()["total_questions"]
