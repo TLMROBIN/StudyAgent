@@ -121,6 +121,7 @@ class OidcDisabledSettings(Settings):
 
 
 def test_oidc_config_reports_disabled(monkeypatch):
+    monkeypatch.setenv("OIDC_ENABLED", "false")
     monkeypatch.setattr(auth_router, "get_settings", lambda: OidcDisabledSettings())
 
     assert auth_router.oidc_config() == {
@@ -130,6 +131,7 @@ def test_oidc_config_reports_disabled(monkeypatch):
 
 
 def test_oidc_login_rejects_when_disabled(monkeypatch):
+    monkeypatch.setenv("OIDC_ENABLED", "false")
     monkeypatch.setattr(auth_router, "get_settings", lambda: OidcDisabledSettings())
 
     try:
@@ -142,6 +144,7 @@ def test_oidc_login_rejects_when_disabled(monkeypatch):
 
 
 def test_oidc_callback_rejects_when_disabled_before_state_validation(monkeypatch):
+    monkeypatch.setenv("OIDC_ENABLED", "false")
     monkeypatch.setattr(auth_router, "get_settings", lambda: OidcDisabledSettings())
 
     try:
