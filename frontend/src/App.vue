@@ -153,8 +153,10 @@ watch(
 )
 
 async function handleLogout() {
-  await auth.logout()
-  router.push('/login')
+  const redirectedToSso = await auth.logout()
+  if (!redirectedToSso) {
+    router.push('/login')
+  }
 }
 
 function toggleSidebar() {

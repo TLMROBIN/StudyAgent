@@ -15,7 +15,6 @@ from backend.models.schemas import (
     TokenResponse,
     UserRead,
 )
-from backend.models.user import UserRole
 from backend.security import decode_token, verify_password
 from backend.services.auth_service import auth_service
 from backend.services.oidc_service import OidcAuthError, oidc_service
@@ -23,6 +22,7 @@ from backend.config import get_settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 OIDC_DISABLED_MESSAGE = "统一平台登录暂未启用，请使用账号密码登录。"
+PASSWORD_LOGIN_DISABLED_MESSAGE = "本系统已切换为统一认证登录，请通过统一平台入口登录"
 
 
 def _client_ip(request: Request) -> str | None:
@@ -34,22 +34,16 @@ def _ensure_oidc_enabled() -> None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=OIDC_DISABLED_MESSAGE)
 
 
-@router.post("/student/login", response_model=TokenResponse)
-def student_login(payload: StudentLoginRequest, request: Request, db: DbSession) -> TokenResponse:
-    user = auth_service.authenticate_student(db, payload.username, payload.password, _client_ip(request))
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    tokens = auth_service.issue_token_pair(user)
-    return TokenResponse(**tokens)
+@router.post("/student/login")
+def student_login(payload: StudentLoginRequest, request: Request, db: DbSession) -> None:
+    # 本地账号密码登录已停用，仅保留统一认证（OIDC）登录入口
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PASSWORD_LOGIN_DISABLED_MESSAGE)
 
 
-@router.post("/staff/login", response_model=TokenResponse)
-def staff_login(payload: StaffLoginRequest, request: Request, db: DbSession) -> TokenResponse:
-    user = auth_service.authenticate_staff(db, payload.username, payload.password, _client_ip(request))
-    if not user or user.role == UserRole.STUDENT:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    tokens = auth_service.issue_token_pair(user)
-    return TokenResponse(**tokens)
+@router.post("/staff/login")
+def staff_login(payload: StaffLoginRequest, request: Request, db: DbSession) -> None:
+    # 本地账号密码登录已停用，仅保留统一认证（OIDC）登录入口
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PASSWORD_LOGIN_DISABLED_MESSAGE)
 
 
 @router.get("/oidc/config")
@@ -110,6 +104,7 @@ def oidc_callback(code: str, state: str, request: Request, db: DbSession) -> Res
 <script>
 localStorage.setItem("studyagent-access-token", {tokens["access_token"]!r});
 localStorage.setItem("studyagent-refresh-token", {tokens["refresh_token"]!r});
+localStorage.setItem("studyagent-sso-session", "1");
 location.replace({target!r});
 </script>
 </body>
