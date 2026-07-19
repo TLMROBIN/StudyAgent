@@ -18,6 +18,7 @@ from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillin
 from backend.models.llm_provider import LLMProviderConfig
 from backend.models.llm_usage import LLMUsageEvent
 from backend.models.notification import Notification
+from backend.models.system_config import SystemConfig
 from backend.models.user import Classroom, User, UserRole, teacher_classes
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "StudentFeedbackReadState",
     "ReleaseNote",
     "ReleaseNoteReadState",
+    "SystemConfig",
     "StudentErrorEvent",
     "StudentIncentiveEvent",
     "StudentIncentiveProfile",

@@ -14,6 +14,7 @@ const KnowledgeManage = () => import('../views/KnowledgeManage.vue')
 const Login = () => import('../views/Login.vue')
 const ModelManage = () => import('../views/ModelManage.vue')
 const StudentChat = () => import('../views/StudentChat.vue')
+const SystemConfig = () => import('../views/SystemConfig.vue')
 const StudentFeedback = () => import('../views/StudentFeedback.vue')
 const StudentGrowth = () => import('../views/StudentGrowth.vue')
 const UserManage = () => import('../views/UserManage.vue')
@@ -34,6 +35,7 @@ const router = createRouter({
     { path: '/admin/agent', component: AgentConfig, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/roles', component: AgentRoleManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/models', component: ModelManage, meta: { requiresAuth: true, roles: ['admin'] } },
+    { path: '/admin/system-config', component: SystemConfig, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/admin/users', component: UserManage, meta: { requiresAuth: true, roles: ['admin'] } },
     { path: '/:pathMatch(.*)*', redirect: '/login' },
   ],

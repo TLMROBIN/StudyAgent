@@ -41,6 +41,7 @@ from backend.services.mineru_service import (
     MineruTransientIOError,
 )
 from backend.services.pdf_parse_types import PDFParseResult
+from backend.services.system_config_service import system_config_service
 
 
 # Quota / rate-limit error codes returned by the MinerU v4 API that count as
@@ -59,6 +60,22 @@ class MineruRemoteService:
         self.settings = settings or get_settings()
         # Reused only for the single-image-PDF helper in ocr_image_via_pdf.
         self._local_service = MineruService(settings=self.settings)
+
+    # ------------------------------------------------------------------
+    # 配置读取：DB（管理员 UI 可改）→ env → settings 默认值。
+    # system_config_service 在 DB 不可用时静默降级，不改进程级 settings 对象。
+    # ------------------------------------------------------------------
+    def _cfg(self, key: str, fallback):
+        return system_config_service.get_value(key, fallback)
+
+    def _cfg_int(self, key: str, fallback: int) -> int:
+        try:
+            return int(self._cfg(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _pdf_parser_backend(self) -> str:
+        return str(self._cfg("PDF_PARSER_BACKEND", self.settings.pdf_parser_backend) or "").strip()
 
     # ------------------------------------------------------------------
     # Public interface (mirrors MineruService)
@@ -92,7 +109,7 @@ class MineruRemoteService:
         end_page: int | None = None,
         timeout_seconds: int | None = None,
     ) -> PDFParseResult:
-        if self.settings.pdf_parser_backend != "mineru_remote":
+        if self._pdf_parser_backend() != "mineru_remote":
             raise MineruStartupError("MinerU remote PDF parser backend is not enabled")
         return self._run_chain(
             file_path,
@@ -124,20 +141,20 @@ class MineruRemoteService:
         )
 
     def health_snapshot(self) -> dict[str, Any]:
-        enabled = self.settings.pdf_parser_backend == "mineru_remote"
+        enabled = self._pdf_parser_backend() == "mineru_remote"
         providers = self._configured_providers()
         provider_status: dict[str, dict[str, Any]] = {}
         for name in providers:
             provider_status[name] = self._provider_status(name)
         return {
             "enabled": enabled,
-            "configured_backend": self.settings.pdf_parser_backend,
+            "configured_backend": self._pdf_parser_backend(),
             "parser_backend": "mineru_remote",
             "providers": providers,
             "provider_status": provider_status,
-            "model_version": self.settings.mineru_remote_model_version,
-            "poll_interval_seconds": self.settings.mineru_remote_poll_interval_seconds,
-            "timeout_seconds": self.settings.mineru_remote_timeout_seconds,
+            "model_version": self._cfg("MINERU_REMOTE_MODEL_VERSION", self.settings.mineru_remote_model_version),
+            "poll_interval_seconds": self._cfg_int("MINERU_REMOTE_POLL_INTERVAL_SECONDS", self.settings.mineru_remote_poll_interval_seconds),
+            "timeout_seconds": self._cfg_int("MINERU_REMOTE_TIMEOUT_SECONDS", self.settings.mineru_remote_timeout_seconds),
             "runtime_ready": enabled,
         }
 
@@ -145,9 +162,10 @@ class MineruRemoteService:
     # Provider chain
     # ------------------------------------------------------------------
     def _configured_providers(self) -> list[str]:
+        providers = self._cfg("MINERU_REMOTE_PROVIDERS", self.settings.mineru_remote_providers)
         return [
             name.strip()
-            for name in str(self.settings.mineru_remote_providers or "").split(",")
+            for name in str(providers or "").split(",")
             if name.strip()
         ]
 
@@ -220,15 +238,15 @@ class MineruRemoteService:
         task_id: int,
         timeout_seconds: int | None,
     ) -> tuple[str, dict[str, str] | None]:
-        api_key = self.settings.mineru_remote_api_key
+        api_key = self._cfg("MINERU_REMOTE_API_KEY", self.settings.mineru_remote_api_key)
         if not api_key:
             raise MineruStartupError("MINERU_REMOTE_API_KEY is not configured")
-        base = self.settings.mineru_remote_api_base.rstrip("/")
+        base = str(self.settings.mineru_remote_api_base).rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"}
 
         payload = {
             "files": [{"name": Path(file_path).name, "is_ocr": True}],
-            "model_version": self.settings.mineru_remote_model_version,
+            "model_version": self._cfg("MINERU_REMOTE_MODEL_VERSION", self.settings.mineru_remote_model_version),
             "enable_formula": True,
             "enable_table": True,
             "language": self.settings.mineru_lang,
@@ -267,16 +285,16 @@ class MineruRemoteService:
         task_id: int,
         timeout_seconds: int | None,
     ) -> tuple[str, dict[str, str] | None]:
-        api_key = self.settings.mineru_remote_302_api_key
+        api_key = self._cfg("MINERU_REMOTE_302_API_KEY", self.settings.mineru_remote_302_api_key)
         if not api_key:
             raise MineruStartupError("MINERU_REMOTE_302_API_KEY is not configured")
         file_url = self._public_file_url(file_path, task_id=task_id)
-        base = self.settings.mineru_remote_302_base.rstrip("/")
+        base = str(self.settings.mineru_remote_302_base).rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"}
 
         payload = {
             "url": file_url,
-            "model_version": self.settings.mineru_remote_model_version,
+            "model_version": self._cfg("MINERU_REMOTE_MODEL_VERSION", self.settings.mineru_remote_model_version),
             "enable_formula": True,
             "enable_table": True,
             "language": self.settings.mineru_lang,
@@ -307,11 +325,11 @@ class MineruRemoteService:
         task_id: int,
         timeout_seconds: int | None,
     ) -> tuple[str, dict[str, str] | None]:
-        api_key = self.settings.mineru_remote_302_api_key
+        api_key = self._cfg("MINERU_REMOTE_302_API_KEY", self.settings.mineru_remote_302_api_key)
         if not api_key:
             raise MineruStartupError("MINERU_REMOTE_302_API_KEY is not configured")
         file_url = self._public_file_url(file_path, task_id=task_id)
-        base = self.settings.mineru_remote_302_base.rstrip("/")
+        base = str(self.settings.mineru_remote_302_base).rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"}
 
         payload = {"pdf_url": file_url, "parse_method": "auto", "version": "2.5"}
@@ -511,7 +529,7 @@ class MineruRemoteService:
         401/403 and other 4xx → startup/auth error (no degrade).
         """
         try:
-            with httpx.Client(timeout=self.settings.mineru_remote_timeout_seconds) as client:
+            with httpx.Client(timeout=self._cfg_int("MINERU_REMOTE_TIMEOUT_SECONDS", self.settings.mineru_remote_timeout_seconds)) as client:
                 response = client.request(
                     method,
                     url,
@@ -550,7 +568,7 @@ class MineruRemoteService:
         static file service that maps that base URL onto this directory — this
         project intentionally does NOT add a new download endpoint for it.
         """
-        base_url = str(self.settings.mineru_remote_public_base_url or "").strip().rstrip("/")
+        base_url = str(self._cfg("MINERU_REMOTE_PUBLIC_BASE_URL", self.settings.mineru_remote_public_base_url) or "").strip().rstrip("/")
         if not base_url:
             raise _ProviderSkipped("MINERU_REMOTE_PUBLIC_BASE_URL is not configured; URL-only provider skipped")
         public_root = Path(self.settings.task_artifact_path) / "public_files"
@@ -560,24 +578,24 @@ class MineruRemoteService:
         return f"{base_url}/{target.name}"
 
     def _deadline(self, timeout_seconds: int | None) -> float:
-        return time.time() + (timeout_seconds or self.settings.mineru_remote_timeout_seconds)
+        return time.time() + (timeout_seconds or self._cfg_int("MINERU_REMOTE_TIMEOUT_SECONDS", self.settings.mineru_remote_timeout_seconds))
 
     def _sleep_or_timeout(self, deadline: float) -> None:
         if time.time() >= deadline:
             raise MineruTransientIOError("MinerU remote polling exceeded timeout")
-        time.sleep(self.settings.mineru_remote_poll_interval_seconds)
+        time.sleep(self._cfg_int("MINERU_REMOTE_POLL_INTERVAL_SECONDS", self.settings.mineru_remote_poll_interval_seconds))
 
     def _provider_status(self, name: str) -> dict[str, Any]:
         if name == "official":
-            configured = bool(self.settings.mineru_remote_api_key)
+            configured = bool(self._cfg("MINERU_REMOTE_API_KEY", self.settings.mineru_remote_api_key))
             return {
                 "configured": configured,
                 "skipped_reason": None if configured else "MINERU_REMOTE_API_KEY is not configured",
             }
         if name in {"302_free", "302_paid"}:
-            if not self.settings.mineru_remote_302_api_key:
+            if not self._cfg("MINERU_REMOTE_302_API_KEY", self.settings.mineru_remote_302_api_key):
                 return {"configured": False, "skipped_reason": "MINERU_REMOTE_302_API_KEY is not configured"}
-            if not str(self.settings.mineru_remote_public_base_url or "").strip():
+            if not str(self._cfg("MINERU_REMOTE_PUBLIC_BASE_URL", self.settings.mineru_remote_public_base_url) or "").strip():
                 return {
                     "configured": False,
                     "skipped_reason": "MINERU_REMOTE_PUBLIC_BASE_URL is not configured; provider requires a reachable file URL",
