@@ -5,10 +5,12 @@ Provider degradation chain (configurable via MINERU_REMOTE_PROVIDERS):
 1. ``official``   — MinerU official cloud API (https://mineru.net, /api/v4).
                      Supports direct local-file upload via OSS file-urls.
 2. ``302_free``   — 302.ai hosted MinerU v4 API. Only accepts a public file
-                     URL (no upload), so it requires MINERU_REMOTE_PUBLIC_BASE_URL
-                     pointing at a file-serving endpoint that can already reach
-                     files under ``task_artifact_path`` (e.g. a static server the
-                     operator runs themselves). Not configured → provider skipped.
+                     URL (no upload). The URL is obtained via, in priority order:
+                     (a) the self-hosted Aliyun file relay
+                     (MINERU_REMOTE_RELAY_BASE_URL + MINERU_REMOTE_RELAY_TOKEN),
+                     (b) MINERU_REMOTE_PUBLIC_BASE_URL pointing at a file-serving
+                     endpoint that can already reach files under
+                     ``task_artifact_path``. Neither configured → provider skipped.
 3. ``302_paid``   — 302.ai paid MinerU API (/302/v2/mineru/task). Also URL-only.
 
 Degradation happens ONLY on network-class failures (connect errors, timeouts,
@@ -24,10 +26,11 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from pathlib import Path
 import shutil
 import time
-from typing import Any
+from typing import Any, Callable
 import zipfile
 
 import httpx
@@ -42,6 +45,9 @@ from backend.services.mineru_service import (
 )
 from backend.services.pdf_parse_types import PDFParseResult
 from backend.services.system_config_service import system_config_service
+
+
+logger = logging.getLogger(__name__)
 
 
 # Quota / rate-limit error codes returned by the MinerU v4 API that count as
@@ -194,7 +200,7 @@ class MineruRemoteService:
                 attempts.append({"provider": name, "status": "skipped", "reason": "unknown provider"})
                 continue
             try:
-                zip_url, zip_headers = self._call_with_retry(
+                zip_url, zip_headers, stager = self._call_with_retry(
                     lambda runner=runner: runner(file_path, task_id=task_id, timeout_seconds=timeout_seconds)
                 )
             except _ProviderSkipped as exc:
@@ -216,6 +222,7 @@ class MineruRemoteService:
                 end_page=end_page,
                 attempts=attempts,
                 headers=zip_headers,
+                stager=stager,
             )
 
         detail = "; ".join(f"{a['provider']}: {a.get('reason', 'ok')}" for a in attempts) or "no providers attempted"
@@ -229,7 +236,7 @@ class MineruRemoteService:
             return fn()
 
     # ------------------------------------------------------------------
-    # Providers — each returns (full_zip_url, headers_for_zip_download)
+    # Providers — each returns (full_zip_url, headers_for_zip_download, stager)
     # ------------------------------------------------------------------
     def _run_official(
         self,
@@ -237,7 +244,7 @@ class MineruRemoteService:
         *,
         task_id: int,
         timeout_seconds: int | None,
-    ) -> tuple[str, dict[str, str] | None]:
+    ) -> tuple[str, dict[str, str] | None, str]:
         api_key = self._cfg("MINERU_REMOTE_API_KEY", self.settings.mineru_remote_api_key)
         if not api_key:
             raise MineruStartupError("MINERU_REMOTE_API_KEY is not configured")
@@ -275,7 +282,7 @@ class MineruRemoteService:
                 zip_url = results[0].get("full_zip_url")
                 if not zip_url:
                     raise MineruStartupError("MinerU official API returned done without full_zip_url")
-                return str(zip_url), headers
+                return str(zip_url), headers, "none"
             self._sleep_or_timeout(deadline)
 
     def _run_302_free(
@@ -284,39 +291,43 @@ class MineruRemoteService:
         *,
         task_id: int,
         timeout_seconds: int | None,
-    ) -> tuple[str, dict[str, str] | None]:
+    ) -> tuple[str, dict[str, str] | None, str]:
         api_key = self._cfg("MINERU_REMOTE_302_API_KEY", self.settings.mineru_remote_302_api_key)
         if not api_key:
             raise MineruStartupError("MINERU_REMOTE_302_API_KEY is not configured")
-        file_url = self._public_file_url(file_path, task_id=task_id)
-        base = str(self.settings.mineru_remote_302_base).rstrip("/")
-        headers = {"Authorization": f"Bearer {api_key}"}
+        file_url, stager, cleanup = self._stage_url_file(file_path, task_id=task_id)
+        try:
+            base = str(self.settings.mineru_remote_302_base).rstrip("/")
+            headers = {"Authorization": f"Bearer {api_key}"}
 
-        payload = {
-            "url": file_url,
-            "model_version": self._cfg("MINERU_REMOTE_MODEL_VERSION", self.settings.mineru_remote_model_version),
-            "enable_formula": True,
-            "enable_table": True,
-            "language": self.settings.mineru_lang,
-        }
-        body = self._request_json("POST", f"{base}/api/v4/extract/task", headers=headers, json_body=payload)
-        task_ref = (body.get("data") or {}).get("task_id") or body.get("task_id")
-        if not task_ref:
-            raise MineruStartupError(f"302.ai free API returned no task_id: {body!r}")
+            payload = {
+                "url": file_url,
+                "model_version": self._cfg("MINERU_REMOTE_MODEL_VERSION", self.settings.mineru_remote_model_version),
+                "enable_formula": True,
+                "enable_table": True,
+                "language": self.settings.mineru_lang,
+            }
+            body = self._request_json("POST", f"{base}/api/v4/extract/task", headers=headers, json_body=payload)
+            task_ref = (body.get("data") or {}).get("task_id") or body.get("task_id")
+            if not task_ref:
+                raise MineruStartupError(f"302.ai free API returned no task_id: {body!r}")
 
-        deadline = self._deadline(timeout_seconds)
-        while True:
-            body = self._request_json("GET", f"{base}/api/v4/extract/task/{task_ref}", headers=headers)
-            data = body.get("data") or {}
-            state = str(data.get("state") or "")
-            if state == "failed":
-                raise MineruStartupError(f"302.ai free remote parse failed: {data.get('err_msg') or 'state=failed'}")
-            if state == "done":
-                zip_url = data.get("full_zip_url")
-                if not zip_url:
-                    raise MineruStartupError("302.ai free API returned done without full_zip_url")
-                return str(zip_url), headers
-            self._sleep_or_timeout(deadline)
+            deadline = self._deadline(timeout_seconds)
+            while True:
+                body = self._request_json("GET", f"{base}/api/v4/extract/task/{task_ref}", headers=headers)
+                data = body.get("data") or {}
+                state = str(data.get("state") or "")
+                if state == "failed":
+                    raise MineruStartupError(f"302.ai free remote parse failed: {data.get('err_msg') or 'state=failed'}")
+                if state == "done":
+                    zip_url = data.get("full_zip_url")
+                    if not zip_url:
+                        raise MineruStartupError("302.ai free API returned done without full_zip_url")
+                    return str(zip_url), headers, stager
+                self._sleep_or_timeout(deadline)
+        finally:
+            if cleanup is not None:
+                cleanup()
 
     def _run_302_paid(
         self,
@@ -324,40 +335,44 @@ class MineruRemoteService:
         *,
         task_id: int,
         timeout_seconds: int | None,
-    ) -> tuple[str, dict[str, str] | None]:
+    ) -> tuple[str, dict[str, str] | None, str]:
         api_key = self._cfg("MINERU_REMOTE_302_API_KEY", self.settings.mineru_remote_302_api_key)
         if not api_key:
             raise MineruStartupError("MINERU_REMOTE_302_API_KEY is not configured")
-        file_url = self._public_file_url(file_path, task_id=task_id)
-        base = str(self.settings.mineru_remote_302_base).rstrip("/")
-        headers = {"Authorization": f"Bearer {api_key}"}
+        file_url, stager, cleanup = self._stage_url_file(file_path, task_id=task_id)
+        try:
+            base = str(self.settings.mineru_remote_302_base).rstrip("/")
+            headers = {"Authorization": f"Bearer {api_key}"}
 
-        payload = {"pdf_url": file_url, "parse_method": "auto", "version": "2.5"}
-        body = self._request_json("POST", f"{base}/302/v2/mineru/task", headers=headers, json_body=payload)
-        data = body.get("data") if isinstance(body.get("data"), dict) else body
-        task_ref = (data or {}).get("task_id")
-        if not task_ref:
-            raise MineruStartupError(f"302.ai paid API returned no task_id: {body!r}")
-
-        deadline = self._deadline(timeout_seconds)
-        while True:
-            body = self._request_json(
-                "GET",
-                f"{base}/302/v2/mineru/task",
-                headers=headers,
-                params={"task_id": task_ref},
-            )
+            payload = {"pdf_url": file_url, "parse_method": "auto", "version": "2.5"}
+            body = self._request_json("POST", f"{base}/302/v2/mineru/task", headers=headers, json_body=payload)
             data = body.get("data") if isinstance(body.get("data"), dict) else body
-            data = data or {}
-            state = str(data.get("state") or data.get("status") or "")
-            if state == "failed":
-                raise MineruStartupError(f"302.ai paid remote parse failed: {data.get('err_msg') or 'state=failed'}")
-            if state in {"done", "success"}:
-                zip_url = data.get("full_zip_url") or data.get("zip_url")
-                if not zip_url:
-                    raise MineruStartupError("302.ai paid API returned done without zip url")
-                return str(zip_url), headers
-            self._sleep_or_timeout(deadline)
+            task_ref = (data or {}).get("task_id")
+            if not task_ref:
+                raise MineruStartupError(f"302.ai paid API returned no task_id: {body!r}")
+
+            deadline = self._deadline(timeout_seconds)
+            while True:
+                body = self._request_json(
+                    "GET",
+                    f"{base}/302/v2/mineru/task",
+                    headers=headers,
+                    params={"task_id": task_ref},
+                )
+                data = body.get("data") if isinstance(body.get("data"), dict) else body
+                data = data or {}
+                state = str(data.get("state") or data.get("status") or "")
+                if state == "failed":
+                    raise MineruStartupError(f"302.ai paid remote parse failed: {data.get('err_msg') or 'state=failed'}")
+                if state in {"done", "success"}:
+                    zip_url = data.get("full_zip_url") or data.get("zip_url")
+                    if not zip_url:
+                        raise MineruStartupError("302.ai paid API returned done without zip url")
+                    return str(zip_url), headers, stager
+                self._sleep_or_timeout(deadline)
+        finally:
+            if cleanup is not None:
+                cleanup()
 
     # ------------------------------------------------------------------
     # Result zip download / unpack / normalize
@@ -374,6 +389,7 @@ class MineruRemoteService:
         end_page: int | None,
         attempts: list[dict[str, Any]],
         headers: dict[str, str] | None,
+        stager: str = "none",
     ) -> PDFParseResult:
         started_at = time.time()
         response = self._send("GET", zip_url, headers=headers)
@@ -430,6 +446,7 @@ class MineruRemoteService:
             parser_provenance={
                 "task_id": task_id,
                 "provider": provider,
+                "stager": stager,
                 "provider_attempts": attempts,
                 "source_format": Path(file_path).suffix.lower().lstrip(".") or None,
                 "requested_page_range": [start_page, end_page],
@@ -560,22 +577,81 @@ class MineruRemoteService:
     # ------------------------------------------------------------------
     # Misc helpers
     # ------------------------------------------------------------------
-    def _public_file_url(self, file_path: str, *, task_id: int) -> str:
-        """Expose a local file under MINERU_REMOTE_PUBLIC_BASE_URL for URL-only providers.
+    def _relay_config(self) -> tuple[str, str] | None:
+        """Return (base_url, token) when the self-hosted relay is fully configured."""
+        base_url = str(self._cfg("MINERU_REMOTE_RELAY_BASE_URL", self.settings.mineru_remote_relay_base_url) or "").strip().rstrip("/")
+        token = str(self._cfg("MINERU_REMOTE_RELAY_TOKEN", self.settings.mineru_remote_relay_token) or "").strip()
+        if base_url and token:
+            return base_url, token
+        return None
 
-        The file is copied to ``task_artifact_path/public_files/`` and the URL is
-        built by joining the configured base. The operator must run their own
-        static file service that maps that base URL onto this directory — this
-        project intentionally does NOT add a new download endpoint for it.
+    def _stage_url_file(self, file_path: str, *, task_id: int) -> tuple[str, str, Callable[[], None] | None]:
+        """Expose a local file at a public URL for URL-only providers (302_free / 302_paid).
+
+        Priority: self-hosted relay (both RELAY_BASE_URL + RELAY_TOKEN configured)
+        → public_files copy + MINERU_REMOTE_PUBLIC_BASE_URL (legacy) → skip provider.
+
+        Returns (public_url, stager, cleanup). ``cleanup`` deletes the relay-staged
+        file and is None for the public_files path.
         """
+        if self._relay_config() is not None:
+            public_url, cleanup = self._stage_file_via_relay(file_path)
+            return public_url, "relay", cleanup
         base_url = str(self._cfg("MINERU_REMOTE_PUBLIC_BASE_URL", self.settings.mineru_remote_public_base_url) or "").strip().rstrip("/")
         if not base_url:
-            raise _ProviderSkipped("MINERU_REMOTE_PUBLIC_BASE_URL is not configured; URL-only provider skipped")
+            raise _ProviderSkipped(
+                "MINERU_REMOTE_RELAY_BASE_URL/TOKEN and MINERU_REMOTE_PUBLIC_BASE_URL are not configured; "
+                "URL-only provider requires a reachable file URL, skipped"
+            )
         public_root = Path(self.settings.task_artifact_path) / "public_files"
         public_root.mkdir(parents=True, exist_ok=True)
         target = public_root / f"{task_id}-{Path(file_path).name}"
         shutil.copy2(file_path, target)
-        return f"{base_url}/{target.name}"
+        return f"{base_url}/{target.name}", "public_files", None
+
+    def _stage_file_via_relay(self, file_path: str) -> tuple[str, Callable[[], None]]:
+        """Upload a local file to the self-hosted relay and return its public URL.
+
+        Relay contract (Aliyun nginx → 127.0.0.1:9100):
+        - PUT {BASE}/mineru-relay/upload, Bearer token + X-Filename, raw bytes →
+          200 {"path": "/mineru-relay/f/<uuid>.pdf"}; public URL = BASE + path.
+        - DELETE {BASE}{path} with the Bearer token removes the staged file.
+        - 401 → MineruStartupError (relay auth misconfigured; _send already maps
+          401/403 to StartupError and network/5xx to MineruTransientIOError).
+        The returned cleanup callable only logs failures — the relay's server-side
+        2h TTL guarantees expiry even when DELETE fails.
+        """
+        base_url, token = self._relay_config() or ("", "")
+        source = Path(file_path)
+        response = self._send(
+            "PUT",
+            f"{base_url}/mineru-relay/upload",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Filename": source.name,
+            },
+            content=source.read_bytes(),
+        )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise MineruStartupError("MinerU relay upload returned non-JSON response") from exc
+        relay_path = str((body or {}).get("path") or "").strip()
+        if not relay_path:
+            raise MineruStartupError(f"MinerU relay upload returned no path: {body!r}")
+        public_url = f"{base_url}{relay_path}"
+
+        def cleanup() -> None:
+            try:
+                self._send(
+                    "DELETE",
+                    f"{base_url}{relay_path}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            except Exception as exc:  # noqa: BLE001 — TTL on the relay is the safety net
+                logger.warning("MinerU relay cleanup failed for %s: %s", relay_path, exc)
+
+        return public_url, cleanup
 
     def _deadline(self, timeout_seconds: int | None) -> float:
         return time.time() + (timeout_seconds or self._cfg_int("MINERU_REMOTE_TIMEOUT_SECONDS", self.settings.mineru_remote_timeout_seconds))
@@ -595,12 +671,17 @@ class MineruRemoteService:
         if name in {"302_free", "302_paid"}:
             if not self._cfg("MINERU_REMOTE_302_API_KEY", self.settings.mineru_remote_302_api_key):
                 return {"configured": False, "skipped_reason": "MINERU_REMOTE_302_API_KEY is not configured"}
+            if self._relay_config() is not None:
+                return {"configured": True, "skipped_reason": None, "stager": "relay"}
             if not str(self._cfg("MINERU_REMOTE_PUBLIC_BASE_URL", self.settings.mineru_remote_public_base_url) or "").strip():
                 return {
                     "configured": False,
-                    "skipped_reason": "MINERU_REMOTE_PUBLIC_BASE_URL is not configured; provider requires a reachable file URL",
+                    "skipped_reason": (
+                        "MINERU_REMOTE_RELAY_BASE_URL/TOKEN and MINERU_REMOTE_PUBLIC_BASE_URL are not configured; "
+                        "provider requires a reachable file URL"
+                    ),
                 }
-            return {"configured": True, "skipped_reason": None}
+            return {"configured": True, "skipped_reason": None, "stager": "public_files"}
         return {"configured": False, "skipped_reason": "unknown provider"}
 
 

@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     # Optional base URL where local files are already reachable by remote providers
     # (302.ai only accepts file URLs, not uploads). Leave empty to skip 302 providers.
     mineru_remote_public_base_url: str = Field(default="", alias="MINERU_REMOTE_PUBLIC_BASE_URL")
+    # Self-hosted relay (阿里云 nginx → 127.0.0.1:9100) that stages local files at a
+    # public URL for URL-only providers (302_free / 302_paid). Preferred over
+    # MINERU_REMOTE_PUBLIC_BASE_URL when both base URL and token are configured.
+    mineru_remote_relay_base_url: str = Field(default="", alias="MINERU_REMOTE_RELAY_BASE_URL")
+    mineru_remote_relay_token: str = Field(default="", alias="MINERU_REMOTE_RELAY_TOKEN")
     mineru_remote_poll_interval_seconds: int = Field(default=5, alias="MINERU_REMOTE_POLL_INTERVAL_SECONDS")
     mineru_remote_timeout_seconds: int = Field(default=600, alias="MINERU_REMOTE_TIMEOUT_SECONDS")
     mineru_remote_providers: str = Field(default="official,302_free,302_paid", alias="MINERU_REMOTE_PROVIDERS")

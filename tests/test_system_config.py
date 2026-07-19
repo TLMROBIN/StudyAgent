@@ -275,3 +275,25 @@ def test_mineru_remote_service_graceful_without_db(monkeypatch):
     remote = MineruRemoteService(settings=settings)
     assert remote._cfg("MINERU_REMOTE_API_KEY", remote.settings.mineru_remote_api_key) == "env-token"
     assert remote._configured_providers() == ["official"]
+
+
+def test_relay_config_keys_whitelisted(_isolate_service):
+    """白名单含中继两个新 key，RELAY_TOKEN 为 secret。"""
+    items = {item["key"]: item for item in _isolate_service.service.describe_items()}
+    assert "MINERU_REMOTE_RELAY_BASE_URL" in items
+    assert items["MINERU_REMOTE_RELAY_BASE_URL"]["secret"] is False
+    assert "MINERU_REMOTE_RELAY_TOKEN" in items
+    assert items["MINERU_REMOTE_RELAY_TOKEN"]["secret"] is True
+
+    service = _isolate_service.service
+    session = _isolate_service.SessionLocal()
+    service.set_many(
+        session,
+        {"MINERU_REMOTE_RELAY_BASE_URL": "https://relay.example.com", "MINERU_REMOTE_RELAY_TOKEN": "relay-secret-token-1234"},
+        user_id=1,
+    )
+    row = session.scalar(select(SystemConfig).where(SystemConfig.key == "MINERU_REMOTE_RELAY_TOKEN"))
+    assert row.is_secret is True
+    assert "relay-secret-token-1234" not in row.value
+    assert service.get_value("MINERU_REMOTE_RELAY_TOKEN", "") == "relay-secret-token-1234"
+    session.close()
