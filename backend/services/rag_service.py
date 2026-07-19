@@ -7,6 +7,7 @@ from pathlib import Path
 import mimetypes
 import re
 import shutil
+import time
 from typing import Any, Callable
 
 from sqlalchemy import delete, select
@@ -64,7 +65,13 @@ from backend.services.chunking.text_chunk_builder import (  # noqa: F401
 )
 from backend.services.embed_service import EmbedService, embed_service
 from backend.services.mineru_remote_service import mineru_remote_service
-from backend.services.mineru_service import mineru_service
+from backend.services.mineru_service import (
+    GPUProofFailedError,
+    MineruGpuPreflightError,
+    MineruGpuRuntimeError,
+    MineruStartupError,
+    mineru_service,
+)
 from backend.services.pdf_parse_bridge import PDFParseBridge
 from backend.services.pdf_parse_types import ExtractedAsset, PDFParseResult
 from backend.services.question_bank_post_processor import (  # noqa: F401
@@ -224,6 +231,8 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         self.PreparedChunk = PreparedChunk
         self.question_bank_post_processor = QuestionBankPostProcessor()
         self.pdf_parse_bridge = PDFParseBridge(self)
+        # auto 模式本地健康探测缓存（60s TTL；health_snapshot 含子进程探测，不宜每次解析都跑）。
+        self._auto_local_health_cache: tuple[float, dict] | None = None
 
     def retrieve(self, db: Session, subject: str, question: str, *, student_grade: int | None = None) -> RetrievalResult:
         profile = self._infer_question_profile(question)
@@ -499,6 +508,82 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         """DB（管理员 UI 可改）→ env → settings 默认值；DB 异常时静默降级。"""
         return str(system_config_service.get_value("PDF_PARSER_BACKEND", self.settings.pdf_parser_backend) or "").strip()
 
+    # ------------------------------------------------------------------
+    # auto 模式：本地 MinerU 优先，本地不可用 / GPU 类失败时降级远程 API。
+    # ------------------------------------------------------------------
+    _AUTO_LOCAL_HEALTH_TTL_SECONDS = 60.0
+
+    def _auto_local_health_snapshot(self) -> dict:
+        """本地 MinerU 健康探测，带 60s 进程内 TTL（含子进程探测，不宜每次解析都跑）。"""
+        cached = self._auto_local_health_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < self._AUTO_LOCAL_HEALTH_TTL_SECONDS:
+            return cached[1]
+        snapshot = mineru_service.health_snapshot()
+        self._auto_local_health_cache = (now, snapshot)
+        return snapshot
+
+    @staticmethod
+    def _auto_health_summary(health: dict) -> dict:
+        return {
+            "runtime_ready": bool(health.get("runtime_ready")),
+            "mineru_installed": bool((health.get("mineru") or {}).get("installed")),
+            "configured_device": health.get("configured_device"),
+        }
+
+    def _auto_parse_remote(self, file_path: str, *, task_id: int, document_id: int, local_exc: Exception | None) -> PDFParseResult:
+        """远程解析；远程未配置（MineruStartupError）时不掩盖本地根因。"""
+        try:
+            return mineru_remote_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
+        except MineruStartupError as remote_exc:
+            if local_exc is None:
+                raise
+            raise type(local_exc)(
+                f"{local_exc}；远程降级也不可用（{remote_exc}）"
+            ) from local_exc
+
+    def _extract_pdf_auto(self, file_path: str, *, task_id: int, document_id: int) -> ExtractionResult:
+        health = self._auto_local_health_snapshot()
+        health_summary = self._auto_health_summary(health)
+        extra_provenance: dict[str, Any] = {}
+        if health_summary["runtime_ready"]:
+            try:
+                parsed_pdf = mineru_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
+            except (MineruGpuPreflightError, MineruGpuRuntimeError, GPUProofFailedError, MineruStartupError) as local_exc:
+                # 本地 GPU/启动类失败 → 探测缓存立即失效并降级远程。
+                # 解析质量类异常（MineruMalformedOutputError/MineruTimeoutError 等）不降级，直接抛。
+                self._auto_local_health_cache = None
+                logger.warning(
+                    "auto PDF backend: local MinerU failed (%s: %s), falling back to remote API",
+                    type(local_exc).__name__,
+                    local_exc,
+                )
+                parsed_pdf = self._auto_parse_remote(
+                    file_path, task_id=task_id, document_id=document_id, local_exc=local_exc
+                )
+                decision = "remote_fallback"
+                extra_provenance["auto_fallback_reason"] = f"{type(local_exc).__name__}: {local_exc}"
+            else:
+                decision = "local"
+        else:
+            logger.info("auto PDF backend: local MinerU not ready (%s), using remote API", health_summary)
+            parsed_pdf = self._auto_parse_remote(file_path, task_id=task_id, document_id=document_id, local_exc=None)
+            decision = "remote_no_local"
+
+        provenance = dict(parsed_pdf.parser_provenance or {})
+        provenance["auto_decision"] = decision
+        provenance["auto_local_health"] = health_summary
+        provenance.update(extra_provenance)
+        parsed_pdf.parser_provenance = provenance
+        return ExtractionResult(
+            text=parsed_pdf.text,
+            assets=parsed_pdf.assets,
+            parsed_pdf=parsed_pdf,
+            parser_backend=parsed_pdf.parser_backend,
+            parser_provenance=parsed_pdf.parser_provenance,
+            source_format="pdf",
+        )
+
     def extract_content(
         self,
         file_path: str,
@@ -518,6 +603,10 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
 
         if suffix == ".pdf":
             pdf_parser_backend = self._pdf_parser_backend()
+            if pdf_parser_backend == "auto":
+                if document_id is None or task_id is None:
+                    raise RuntimeError("MinerU auto PDF parsing requires document_id and task_id")
+                return self._extract_pdf_auto(file_path, task_id=task_id, document_id=document_id)
             if pdf_parser_backend == "mineru":
                 if document_id is None or task_id is None:
                     raise RuntimeError("MinerU PDF parsing requires document_id and task_id")

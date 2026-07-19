@@ -162,7 +162,7 @@ def test_get_system_config_returns_metadata_and_sources(_isolate_service):
     items = {item["key"]: item for item in response.json()["items"]}
     assert "PDF_PARSER_BACKEND" in items
     assert items["PDF_PARSER_BACKEND"]["type"] == "enum"
-    assert items["PDF_PARSER_BACKEND"]["choices"] == ["legacy", "mineru", "mineru_remote"]
+    assert items["PDF_PARSER_BACKEND"]["choices"] == ["auto", "legacy", "mineru", "mineru_remote"]
     assert items["PDF_PARSER_BACKEND"]["source"] in {"env", "default"}
     secret_item = items["MINERU_REMOTE_API_KEY"]
     assert secret_item["secret"] is True

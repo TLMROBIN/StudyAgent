@@ -109,7 +109,7 @@ class MineruRemoteService:
         end_page: int | None = None,
         timeout_seconds: int | None = None,
     ) -> PDFParseResult:
-        if self._pdf_parser_backend() != "mineru_remote":
+        if self._pdf_parser_backend() not in {"mineru_remote", "auto"}:
             raise MineruStartupError("MinerU remote PDF parser backend is not enabled")
         return self._run_chain(
             file_path,

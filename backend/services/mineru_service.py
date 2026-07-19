@@ -114,7 +114,7 @@ class MineruService:
         end_page: int | None = None,
         timeout_seconds: int | None = None,
     ) -> PDFParseResult:
-        if self.settings.pdf_parser_backend != "mineru":
+        if self.settings.pdf_parser_backend not in {"mineru", "auto"}:
             raise MineruStartupError("MinerU PDF parser backend is not enabled")
         return self._parse_content_list_document(
             file_path,
@@ -525,7 +525,7 @@ class MineruService:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def health_snapshot(self) -> dict[str, Any]:
-        enabled = self.settings.pdf_parser_backend == "mineru"
+        enabled = self.settings.pdf_parser_backend in {"mineru", "auto"}
         gpu_snapshot = collect_cuda_requirement_snapshot(
             self.settings.mineru_device if enabled else None,
             python_bin=self.settings.mineru_python_bin if enabled else None,
