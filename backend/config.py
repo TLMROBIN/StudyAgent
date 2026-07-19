@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     ingest_soft_time_limit_seconds: int = Field(default=540, alias="INGEST_SOFT_TIME_LIMIT_SECONDS")
     ingest_hard_time_limit_seconds: int = Field(default=600, alias="INGEST_HARD_TIME_LIMIT_SECONDS")
     ingest_poll_interval_seconds: int = Field(default=2, alias="INGEST_POLL_INTERVAL_SECONDS")
-    pdf_parser_backend: str = Field(default="legacy", alias="PDF_PARSER_BACKEND")
+    pdf_parser_backend: str = Field(default="auto", alias="PDF_PARSER_BACKEND")
     mineru_python_bin: str = Field(default="/tmp/mineru-venv/bin/python", alias="MINERU_PYTHON_BIN")
     mineru_backend: str = Field(default="pipeline", alias="MINERU_BACKEND")
     mineru_parse_method: str = Field(default="auto", alias="MINERU_PARSE_METHOD")

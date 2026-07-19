@@ -30,8 +30,8 @@ celery_app.conf.update(
 
 @worker_ready.connect
 def _log_worker_runtime_status(**_: object) -> None:
-    requested_device = settings.mineru_device if settings.pdf_parser_backend == "mineru" else None
-    python_bin = settings.mineru_python_bin if settings.pdf_parser_backend == "mineru" else None
+    requested_device = settings.mineru_device if settings.pdf_parser_backend in {"mineru", "auto"} else None
+    python_bin = settings.mineru_python_bin if settings.pdf_parser_backend in {"mineru", "auto"} else None
     log_gpu_runtime_status("worker", requested_device=requested_device, python_bin=python_bin)
     logger.info(
         "Worker runtime initialized | pdf_parser_backend=%s mineru_device=%s mineru_python_bin=%s",

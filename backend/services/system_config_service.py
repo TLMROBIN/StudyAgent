@@ -28,10 +28,10 @@ CONFIG_ITEMS: list[dict[str, Any]] = [
     {
         "key": "PDF_PARSER_BACKEND",
         "type": "enum",
-        "choices": ["legacy", "mineru", "mineru_remote"],
+        "choices": ["auto", "legacy", "mineru", "mineru_remote"],
         "secret": False,
-        "default": "legacy",
-        "description": "PDF 解析后端：legacy=本地库，mineru=本地 MinerU（GPU），mineru_remote=远程 API",
+        "default": "auto",
+        "description": "PDF 解析后端：auto=本地优先自动降级（推荐）；mineru=仅本地；mineru_remote=仅远程API；legacy=传统解析",
     },
     {
         "key": "MINERU_REMOTE_API_KEY",

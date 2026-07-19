@@ -79,7 +79,7 @@ async def lifespan(_: FastAPI):
     finally:
         session.close()
     seed_default_agent_config()
-    if settings.pdf_parser_backend == "mineru":
+    if settings.pdf_parser_backend in {"mineru", "auto"}:
         log_gpu_runtime_status("backend", requested_device=settings.mineru_device, python_bin=settings.mineru_python_bin)
     warmup_task = asyncio.create_task(asyncio.to_thread(warmup_embedding_model))
     ocr_warmup_task = asyncio.create_task(asyncio.to_thread(warmup_chat_image_ocr_worker))
