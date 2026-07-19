@@ -5,7 +5,6 @@ import json
 import mimetypes
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import threading
@@ -14,6 +13,7 @@ from typing import Any
 
 from backend.config import Settings, get_settings
 from backend.services.gpu_runtime import collect_cuda_requirement_snapshot
+from backend.services import mineru_content_list
 from backend.services.pdf_parse_types import ExtractedAsset, PDFBlock, PDFParseResult
 
 
@@ -290,197 +290,34 @@ class MineruService:
         except Exception as exc:
             raise MineruStartupError(f"Failed to prepare chat image for MinerU OCR: {exc}") from exc
 
+    # content_list normalization logic now lives in backend.services.mineru_content_list
+    # (shared with the remote API backend). Keep the historical method names as thin
+    # delegations so existing callers/tests keep working unchanged.
     def _normalize_block(
         self,
         item: dict[str, Any],
         page_index: int,
         asset_lookup: dict[str, ExtractedAsset],
     ) -> PDFBlock | None:
-        if not isinstance(item, dict):
-            return None
-        block_type = str(item.get("type") or "paragraph")
-        content = item.get("content") or {}
-        text = self._flatten_content(content)
-        asset_id = None
-        image_path = self._extract_image_path(item)
-        if image_path and image_path in asset_lookup:
-            asset = asset_lookup[image_path]
-            asset_id = asset.asset_id
-            marker = f"[[asset:{asset.asset_id}]]"
-            text = f"{marker}\n{text}".strip() if text else marker
-        level = None
-        if isinstance(content, dict):
-            title_content = content.get("title_content") or {}
-            if isinstance(title_content, dict):
-                level = title_content.get("level")
-            level = level or content.get("level")
-        content_roles = self._content_roles(content)
-        return PDFBlock(
-            page_index=page_index,
-            block_type=block_type,
-            text=text.strip(),
-            level=int(level) if isinstance(level, int) else None,
-            asset_id=asset_id,
-            metadata={
-                "raw_type": block_type,
-                "content_roles": content_roles,
-                "table_type": content.get("table_type") if isinstance(content, dict) else None,
-                "table_nest_level": content.get("table_nest_level") if isinstance(content, dict) else None,
-            },
-        )
+        return mineru_content_list.normalize_block(item, page_index, asset_lookup)
 
     def _content_roles(self, content: Any) -> list[str]:
-        if not isinstance(content, dict):
-            return []
-        ordered_keys = [
-            "title_content",
-            "paragraph_content",
-            "table_caption",
-            "table_body",
-            "table_footnote",
-            "image_caption",
-            "image_footnote",
-            "algorithm_caption",
-            "algorithm_content",
-            "algorithm_footnote",
-            "chart_caption",
-            "chart_footnote",
-            "list_items",
-            "page_header_content",
-            "page_footer_content",
-            "page_number_content",
-        ]
-        roles: list[str] = []
-        for key in ordered_keys:
-            if key not in content:
-                continue
-            flattened = self._flatten_content(content.get(key))
-            if flattened:
-                roles.append(key)
-        return roles
+        return mineru_content_list.content_roles(content)
 
     def _flatten_content(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return self._strip_office_text_style_artifacts(value.strip())
-        if isinstance(value, list):
-            if self._looks_like_inline_content_list(value):
-                return self._flatten_inline_content(value)
-            parts = [self._flatten_content(item) for item in value]
-            return "\n".join(part for part in parts if part).strip()
-        if isinstance(value, dict):
-            if value.get("type") == "text":
-                return self._strip_office_text_style_artifacts(str(value.get("content") or "").strip())
-            item_type = str(value.get("type") or "").strip().lower()
-            if item_type in {"equation_inline", "inline_equation"}:
-                payload = str(value.get("content") or "").strip()
-                return f"equation_inline\n{payload}".strip() if payload else "equation_inline"
-            if item_type in {"equation_interline", "interline_equation"}:
-                payload = str(value.get("content") or "").strip()
-                return f"equation_display\n{payload}".strip() if payload else "equation_display"
-            if value.get("math_content"):
-                payload = str(value.get("math_content") or "").strip()
-                return f"equation_display\n{payload}".strip() if payload else ""
-            if value.get("html"):
-                return str(value.get("html") or "").strip()
-            ordered_keys = [
-                "title_content",
-                "paragraph_content",
-                "table_caption",
-                "table_body",
-                "table_footnote",
-                "image_caption",
-                "image_footnote",
-                "algorithm_caption",
-                "algorithm_content",
-                "algorithm_footnote",
-                "chart_caption",
-                "chart_footnote",
-                "list_items",
-                "page_header_content",
-                "page_footer_content",
-                "page_number_content",
-            ]
-            parts = [self._flatten_content(value.get(key)) for key in ordered_keys if key in value]
-            if not any(parts):
-                parts = [self._flatten_content(item) for item in value.values()]
-            return "\n".join(part for part in parts if part).strip()
-        return str(value).strip()
+        return mineru_content_list.flatten_content(value)
 
     def _looks_like_inline_content_list(self, value: list[Any]) -> bool:
-        saw_inline = False
-        for item in value:
-            if isinstance(item, str):
-                if item.strip():
-                    saw_inline = True
-                continue
-            if not isinstance(item, dict):
-                return False
-            item_type = str(item.get("type") or "").strip().lower()
-            if item_type in {
-                "text",
-                "equation_inline",
-                "inline_equation",
-                "equation_interline",
-                "interline_equation",
-            } or item.get("math_content"):
-                saw_inline = True
-                continue
-            return False
-        return saw_inline
+        return mineru_content_list.looks_like_inline_content_list(value)
 
     def _flatten_inline_content(self, value: list[Any]) -> str:
-        parts: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                if item:
-                    parts.append(item)
-                continue
-            if not isinstance(item, dict):
-                rendered = self._flatten_content(item)
-                if rendered:
-                    parts.append(rendered)
-                continue
-            item_type = str(item.get("type") or "").strip().lower()
-            if item_type == "text":
-                raw_text = str(item.get("content") or "")
-                if raw_text:
-                    parts.append(raw_text)
-                continue
-            if item_type in {"equation_inline", "inline_equation", "equation_interline", "interline_equation"} or item.get("math_content"):
-                rendered = self._flatten_content(item)
-                if rendered:
-                    parts.append(f"\n{rendered}\n")
-                continue
-            rendered = self._flatten_content(item)
-            if rendered:
-                parts.append(rendered)
-        normalized = self._strip_office_text_style_artifacts("".join(parts))
-        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
-        normalized = re.sub(r"\n[ \t]+", "\n", normalized)
-        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-        return normalized.strip()
+        return mineru_content_list.flatten_inline_content(value)
 
     def _strip_office_text_style_artifacts(self, text: str) -> str:
-        normalized = str(text or "")
-        if "<text" not in normalized.lower() and "</text>" not in normalized.lower() and 'style="' not in normalized.lower():
-            return normalized.strip()
-        normalized = re.sub(r'(?i)<+\s*/?\s*text(?:\s+style="[^"]*")?\s*>', "", normalized)
-        normalized = re.sub(r"(?i)</\s*text\s*>", "", normalized)
-        normalized = re.sub(r'(?i)(?:text|ext|xt)\s+style="[^"]*">', "", normalized)
-        normalized = re.sub(r"(?i)<[^>\n]*text[^>\n]*>", "", normalized)
-        normalized = normalized.replace("<", "").replace(">", "")
-        return normalized.strip()
+        return mineru_content_list.strip_office_text_style_artifacts(text)
 
     def _extract_image_path(self, item: dict[str, Any]) -> str | None:
-        content = item.get("content") or {}
-        image_source = content.get("image_source") if isinstance(content, dict) else None
-        if isinstance(image_source, dict):
-            path = image_source.get("path")
-            if path:
-                return str(path)
-        return None
+        return mineru_content_list.extract_image_path(item)
 
     def _build_runtime_env(self, runtime_device: str) -> dict[str, str]:
         env = os.environ.copy()

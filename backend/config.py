@@ -93,6 +93,20 @@ class Settings(BaseSettings):
     mineru_parse_timeout_seconds: int = Field(default=480, alias="MINERU_PARSE_TIMEOUT_SECONDS")
     mineru_parse_warn_seconds: int = Field(default=240, alias="MINERU_PARSE_WARN_SECONDS")
 
+    # MinerU remote API backend (PDF_PARSER_BACKEND="mineru_remote").
+    # Provider degradation chain: MinerU official → 302.ai free → 302.ai paid.
+    mineru_remote_api_key: str | None = Field(default=None, alias="MINERU_REMOTE_API_KEY")
+    mineru_remote_api_base: str = Field(default="https://mineru.net", alias="MINERU_REMOTE_API_BASE")
+    mineru_remote_model_version: str = Field(default="vlm", alias="MINERU_REMOTE_MODEL_VERSION")
+    mineru_remote_302_api_key: str | None = Field(default=None, alias="MINERU_REMOTE_302_API_KEY")
+    mineru_remote_302_base: str = Field(default="https://api.302.ai", alias="MINERU_REMOTE_302_BASE")
+    # Optional base URL where local files are already reachable by remote providers
+    # (302.ai only accepts file URLs, not uploads). Leave empty to skip 302 providers.
+    mineru_remote_public_base_url: str = Field(default="", alias="MINERU_REMOTE_PUBLIC_BASE_URL")
+    mineru_remote_poll_interval_seconds: int = Field(default=5, alias="MINERU_REMOTE_POLL_INTERVAL_SECONDS")
+    mineru_remote_timeout_seconds: int = Field(default=600, alias="MINERU_REMOTE_TIMEOUT_SECONDS")
+    mineru_remote_providers: str = Field(default="official,302_free,302_paid", alias="MINERU_REMOTE_PROVIDERS")
+
     upload_max_bytes: int = Field(default=50 * 1024 * 1024, alias="UPLOAD_MAX_BYTES")
     chat_upload_max_bytes: int = Field(default=10 * 1024 * 1024, alias="CHAT_UPLOAD_MAX_BYTES")
     chat_allowed_image_mime_types: str = Field(
