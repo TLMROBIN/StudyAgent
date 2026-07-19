@@ -63,6 +63,7 @@ from backend.services.chunking.text_chunk_builder import (  # noqa: F401
     TextChunkBuilderMixin,
 )
 from backend.services.embed_service import EmbedService, embed_service
+from backend.services.mineru_remote_service import mineru_remote_service
 from backend.services.mineru_service import mineru_service
 from backend.services.pdf_parse_bridge import PDFParseBridge
 from backend.services.pdf_parse_types import ExtractedAsset, PDFParseResult
@@ -523,6 +524,18 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                     parser_provenance=parsed_pdf.parser_provenance,
                     source_format="pdf",
                 )
+            if self.settings.pdf_parser_backend == "mineru_remote":
+                if document_id is None or task_id is None:
+                    raise RuntimeError("MinerU remote PDF parsing requires document_id and task_id")
+                parsed_pdf = mineru_remote_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
+                return ExtractionResult(
+                    text=parsed_pdf.text,
+                    assets=parsed_pdf.assets,
+                    parsed_pdf=parsed_pdf,
+                    parser_backend=parsed_pdf.parser_backend,
+                    parser_provenance=parsed_pdf.parser_provenance,
+                    source_format="pdf",
+                )
             return ExtractionResult(text=self._extract_pdf_text(file_path))
 
         if suffix == ".docx" or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
@@ -530,7 +543,8 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                 self.ensure_question_resource_docx_supported(file_path)
                 if document_id is None or task_id is None:
                     raise RuntimeError("MinerU DOCX parsing requires document_id and task_id")
-                parsed_docx = mineru_service.parse_docx(file_path, task_id=task_id, document_id=document_id)
+                docx_parser = mineru_remote_service if self.settings.pdf_parser_backend == "mineru_remote" else mineru_service
+                parsed_docx = docx_parser.parse_docx(file_path, task_id=task_id, document_id=document_id)
                 return ExtractionResult(
                     text=parsed_docx.text,
                     assets=parsed_docx.assets,
@@ -552,10 +566,15 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         return str(resource_type or "").strip()
 
     def health_snapshot(self) -> dict[str, dict | str | bool]:
+        pdf_parser = (
+            mineru_remote_service.health_snapshot()
+            if self.settings.pdf_parser_backend == "mineru_remote"
+            else mineru_service.health_snapshot()
+        )
         return {
             "embedding": self.embedder.health_snapshot(),
             "vector_store": self.vector_store.health_snapshot(),
-            "pdf_parser": mineru_service.health_snapshot(),
+            "pdf_parser": pdf_parser,
         }
 
     def document_asset_dir(self, document_id: int) -> Path:
