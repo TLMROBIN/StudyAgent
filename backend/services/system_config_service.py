@@ -69,6 +69,20 @@ CONFIG_ITEMS: list[dict[str, Any]] = [
         "description": "公网可达的文件 URL 前缀（302 系 provider 只接受 URL 拉取，不接受上传）",
     },
     {
+        "key": "MINERU_REMOTE_RELAY_BASE_URL",
+        "type": "string",
+        "secret": False,
+        "default": "",
+        "description": "阿里云自建文件中继地址（302 链路的公网文件暂存，如 https://example.com），与 RELAY_TOKEN 同时配置后优先于 PUBLIC_BASE_URL",
+    },
+    {
+        "key": "MINERU_REMOTE_RELAY_TOKEN",
+        "type": "string",
+        "secret": True,
+        "default": "",
+        "description": "阿里云自建文件中继的 Bearer Token（302 链路公网文件暂存鉴权用），留空表示未配置",
+    },
+    {
         "key": "MINERU_REMOTE_POLL_INTERVAL_SECONDS",
         "type": "int",
         "secret": False,

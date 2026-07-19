@@ -67,7 +67,7 @@ def write_source_pdf(tmp_path: Path) -> Path:
 
 def install_fake_send(service: MineruRemoteService, handler, calls: list):
     def fake_send(method, url, *, headers=None, json_body=None, params=None, content=None):
-        calls.append({"method": method, "url": url, "json_body": json_body, "params": params, "has_content": content is not None})
+        calls.append({"method": method, "url": url, "headers": headers, "json_body": json_body, "params": params, "has_content": content is not None})
         # Route through the same status classification as the real _send.
         return MineruRemoteService._classify_response(handler(method, url), url)
 
@@ -296,3 +296,148 @@ def test_rag_service_routes_pdf_to_mineru_remote_backend(tmp_path, monkeypatch):
 
     snapshot = rag_service.health_snapshot()
     assert snapshot["pdf_parser"]["parser_backend"] == "mineru_remote"
+
+
+# ---------------------------------------------------------------------------
+# Relay staging (MINERU_REMOTE_RELAY_BASE_URL / MINERU_REMOTE_RELAY_TOKEN)
+# ---------------------------------------------------------------------------
+RELAY_BASE = "https://relay.example.com"
+
+
+def build_relay_service(tmp_path: Path, **overrides) -> MineruRemoteService:
+    kwargs = dict(
+        MINERU_REMOTE_PROVIDERS="302_free",
+        MINERU_REMOTE_RELAY_BASE_URL=RELAY_BASE,
+        MINERU_REMOTE_RELAY_TOKEN="relay-test-token",
+    )
+    kwargs.update(overrides)
+    return build_service(tmp_path, **kwargs)
+
+
+def relay_success_handler(zip_bytes: bytes):
+    def handler(method, url):
+        if url == f"{RELAY_BASE}/mineru-relay/upload" and method == "PUT":
+            return FakeResponse(json_body={"path": "/mineru-relay/f/uuid-1.pdf", "expires_in": 7200})
+        if url.startswith(f"{RELAY_BASE}/mineru-relay/f/") and method == "DELETE":
+            return FakeResponse(json_body={"deleted": True})
+        if url.endswith("/api/v4/extract/task") and method == "POST":
+            return FakeResponse(json_body={"code": 0, "data": {"task_id": "t-302-free"}})
+        if "/api/v4/extract/task/t-302-free" in url and method == "GET":
+            return FakeResponse(json_body={"code": 0, "data": {"state": "done", "full_zip_url": "https://cdn.example/result.zip"}})
+        if url == "https://cdn.example/result.zip":
+            return FakeResponse(content=zip_bytes)
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    return handler
+
+
+def test_relay_upload_success_feeds_302_with_full_public_url(tmp_path, monkeypatch):
+    service = build_relay_service(tmp_path)
+    source_file = write_source_pdf(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(service, "_send", install_fake_send(service, relay_success_handler(build_result_zip()), calls))
+
+    result = service.parse_pdf(str(source_file), task_id=9, document_id=7)
+
+    assert result.parser_backend == "mineru-remote-302_free"
+    assert result.parser_provenance["stager"] == "relay"
+
+    put_call = next(c for c in calls if c["method"] == "PUT" and c["url"].endswith("/mineru-relay/upload"))
+    assert put_call["headers"]["Authorization"] == "Bearer relay-test-token"
+    assert put_call["headers"]["X-Filename"] == "demo.pdf"
+    assert put_call["has_content"] is True
+
+    create_call = next(c for c in calls if c["url"].endswith("/api/v4/extract/task") and c["method"] == "POST")
+    assert create_call["json_body"]["url"] == f"{RELAY_BASE}/mineru-relay/f/uuid-1.pdf"
+
+    snapshot = service.health_snapshot()
+    assert snapshot["provider_status"]["302_free"]["configured"] is True
+    assert snapshot["provider_status"]["302_free"]["stager"] == "relay"
+
+
+def test_relay_file_deleted_after_task_done(tmp_path, monkeypatch):
+    service = build_relay_service(tmp_path)
+    source_file = write_source_pdf(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(service, "_send", install_fake_send(service, relay_success_handler(build_result_zip()), calls))
+
+    service.parse_pdf(str(source_file), task_id=9, document_id=7)
+
+    delete_calls = [c for c in calls if c["method"] == "DELETE"]
+    assert len(delete_calls) == 1
+    assert delete_calls[0]["url"] == f"{RELAY_BASE}/mineru-relay/f/uuid-1.pdf"
+    assert delete_calls[0]["headers"]["Authorization"] == "Bearer relay-test-token"
+
+
+def test_relay_file_deleted_when_remote_task_fails(tmp_path, monkeypatch):
+    service = build_relay_service(tmp_path)
+    source_file = write_source_pdf(tmp_path)
+    calls: list = []
+
+    def handler(method, url):
+        if method == "PUT":
+            return FakeResponse(json_body={"path": "/mineru-relay/f/uuid-1.pdf"})
+        if method == "DELETE":
+            return FakeResponse(json_body={"deleted": True})
+        if url.endswith("/api/v4/extract/task") and method == "POST":
+            return FakeResponse(json_body={"code": 0, "data": {"task_id": "t-302-free"}})
+        if method == "GET":
+            return FakeResponse(json_body={"code": 0, "data": {"state": "failed", "err_msg": "bad pdf"}})
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(service, "_send", install_fake_send(service, handler, calls))
+
+    with pytest.raises(MineruStartupError, match="bad pdf"):
+        service.parse_pdf(str(source_file), task_id=9, document_id=7)
+    assert any(c["method"] == "DELETE" for c in calls)
+
+
+def test_relay_upload_401_raises_startup_error_without_public_files_fallback(tmp_path, monkeypatch):
+    service = build_relay_service(tmp_path, MINERU_REMOTE_PUBLIC_BASE_URL="http://files.lan/static")
+    source_file = write_source_pdf(tmp_path)
+    calls: list = []
+
+    def handler(method, url):
+        if method == "PUT":
+            return FakeResponse(status_code=401)
+        raise AssertionError("302 provider must not be attempted after relay auth failure")
+
+    monkeypatch.setattr(service, "_send", install_fake_send(service, handler, calls))
+
+    with pytest.raises(MineruStartupError, match="401"):
+        service.parse_pdf(str(source_file), task_id=9, document_id=7)
+    # 未静默落到 public_files：不产生本地副本，也未向 302 发请求
+    assert not (tmp_path / "tasks" / "public_files").exists()
+    assert all(c["method"] == "PUT" for c in calls)
+
+
+def test_relay_upload_network_failure_is_transient_and_degrades(tmp_path, monkeypatch):
+    service = build_relay_service(tmp_path)
+    source_file = write_source_pdf(tmp_path)
+    calls: list = []
+
+    def handler(method, url):
+        return FakeResponse(status_code=502)
+
+    monkeypatch.setattr(service, "_send", install_fake_send(service, handler, calls))
+
+    with pytest.raises(MineruTransientIOError, match="All MinerU remote providers failed"):
+        service.parse_pdf(str(source_file), task_id=9, document_id=7)
+    # retried once → 2 relay upload attempts, no 302 request
+    assert len(calls) == 2
+    assert all(c["url"].endswith("/mineru-relay/upload") for c in calls)
+
+
+def test_relay_preferred_over_public_base_url(tmp_path, monkeypatch):
+    service = build_relay_service(tmp_path, MINERU_REMOTE_PUBLIC_BASE_URL="http://files.lan/static")
+    source_file = write_source_pdf(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(service, "_send", install_fake_send(service, relay_success_handler(build_result_zip()), calls))
+
+    result = service.parse_pdf(str(source_file), task_id=9, document_id=7)
+
+    create_call = next(c for c in calls if c["url"].endswith("/api/v4/extract/task") and c["method"] == "POST")
+    assert create_call["json_body"]["url"].startswith(RELAY_BASE)
+    assert result.parser_provenance["stager"] == "relay"
+    # public_files 路径未被使用
+    assert not (tmp_path / "tasks" / "public_files").exists()
