@@ -75,6 +75,7 @@ const navigationItems = computed<NavigationItem[]>(() => {
       { to: '/admin/agent', label: '智能体配置', shortLabel: '智能体' },
       { to: '/admin/roles', label: '教学角色', shortLabel: '角色' },
       { to: '/admin/models', label: '模型管理', shortLabel: '模型' },
+      { to: '/admin/system-config', label: '系统参数', shortLabel: '参数' },
       { to: '/admin/users', label: '用户管理', shortLabel: '用户' },
     )
   }

@@ -4,7 +4,7 @@ import csv
 import io
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Body, File, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -42,6 +42,7 @@ from backend.services.audit_service import audit_service
 from backend.services.auth_service import auth_service
 from backend.services.filter_service import filter_service
 from backend.services.student_grade_service import student_grade_service
+from backend.services.system_config_service import system_config_service
 from backend.routers.feedback import _feedback_attachment_read, feedback_reply_is_unread
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -1094,3 +1095,37 @@ def list_audit_logs(
         query = query.where(AuditLog.result == result)
     rows = db.scalars(query).all()
     return [AuditLogRead.model_validate(row) for row in rows]
+
+
+@router.get("/system-config")
+def get_system_config(current_user: CurrentAdmin) -> dict[str, object]:
+    """返回可配置系统参数白名单的元数据 + 当前值 + 来源（db/env/default）。
+
+    secret 项只返回掩码（保留后 4 位）与 has_value 标志，绝不返回明文。
+    """
+    return {"items": system_config_service.describe_items()}
+
+
+@router.put("/system-config")
+def update_system_config(
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+    payload: dict[str, object] = Body(...),
+) -> dict[str, object]:
+    """批量更新系统参数（仅白名单内 key 可写）。
+
+    secret 项 value 为空串/null 表示“不覆盖”；审计日志只记录 key 与掩码值，
+    不记录 secret 明文。
+    """
+    try:
+        changed = system_config_service.set_many(
+            db,
+            payload,
+            user_id=current_user.id,
+            ip_address=request.client.host if request.client else None,
+            actor=current_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"changed": changed, "items": system_config_service.describe_items()}

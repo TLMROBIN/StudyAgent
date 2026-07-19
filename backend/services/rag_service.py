@@ -71,6 +71,7 @@ from backend.services.question_bank_post_processor import (  # noqa: F401
     QuestionBankChunkCandidate,
     QuestionBankPostProcessor,
 )
+from backend.services.system_config_service import system_config_service
 from backend.services.vector_store_service import VectorStoreService, vector_store_service
 
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
@@ -494,6 +495,10 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
     def extract_text(self, file_path: str, mime_type: str | None = None) -> str:
         return self.extract_content(file_path, mime_type=mime_type).text
 
+    def _pdf_parser_backend(self) -> str:
+        """DB（管理员 UI 可改）→ env → settings 默认值；DB 异常时静默降级。"""
+        return str(system_config_service.get_value("PDF_PARSER_BACKEND", self.settings.pdf_parser_backend) or "").strip()
+
     def extract_content(
         self,
         file_path: str,
@@ -512,7 +517,8 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
             return ExtractionResult(text=text)
 
         if suffix == ".pdf":
-            if self.settings.pdf_parser_backend == "mineru":
+            pdf_parser_backend = self._pdf_parser_backend()
+            if pdf_parser_backend == "mineru":
                 if document_id is None or task_id is None:
                     raise RuntimeError("MinerU PDF parsing requires document_id and task_id")
                 parsed_pdf = mineru_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
@@ -524,7 +530,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                     parser_provenance=parsed_pdf.parser_provenance,
                     source_format="pdf",
                 )
-            if self.settings.pdf_parser_backend == "mineru_remote":
+            if pdf_parser_backend == "mineru_remote":
                 if document_id is None or task_id is None:
                     raise RuntimeError("MinerU remote PDF parsing requires document_id and task_id")
                 parsed_pdf = mineru_remote_service.parse_pdf(file_path, task_id=task_id, document_id=document_id)
@@ -543,7 +549,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
                 self.ensure_question_resource_docx_supported(file_path)
                 if document_id is None or task_id is None:
                     raise RuntimeError("MinerU DOCX parsing requires document_id and task_id")
-                docx_parser = mineru_remote_service if self.settings.pdf_parser_backend == "mineru_remote" else mineru_service
+                docx_parser = mineru_remote_service if self._pdf_parser_backend() == "mineru_remote" else mineru_service
                 parsed_docx = docx_parser.parse_docx(file_path, task_id=task_id, document_id=document_id)
                 return ExtractionResult(
                     text=parsed_docx.text,
@@ -568,7 +574,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
     def health_snapshot(self) -> dict[str, dict | str | bool]:
         pdf_parser = (
             mineru_remote_service.health_snapshot()
-            if self.settings.pdf_parser_backend == "mineru_remote"
+            if self._pdf_parser_backend() == "mineru_remote"
             else mineru_service.health_snapshot()
         )
         return {

@@ -562,6 +562,28 @@ export async function updateAdminReleaseNote(id: number, payload: ReleaseNotePay
   return data
 }
 
+export interface SystemConfigItem {
+  key: string
+  type: 'string' | 'int' | 'enum'
+  choices?: string[] | null
+  secret: boolean
+  description: string
+  default: string
+  source: 'db' | 'env' | 'default'
+  has_value: boolean
+  value: string
+}
+
+export async function fetchSystemConfig(): Promise<SystemConfigItem[]> {
+  const { data } = await api.get<{ items: SystemConfigItem[] }>('/admin/system-config')
+  return data.items
+}
+
+export async function updateSystemConfig(payload: Record<string, string | null>): Promise<Record<string, string>> {
+  const { data } = await api.put<{ changed: Record<string, string> }>('/admin/system-config', payload)
+  return data.changed
+}
+
 export async function fetchLLMProviderAccounts(): Promise<LLMProviderAccount[]> {
   const { data } = await api.get<LLMProviderAccount[]>('/llm-providers/accounts')
   return data
