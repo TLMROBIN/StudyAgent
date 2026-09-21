@@ -49,6 +49,7 @@ DETAIL_FIELDS = [
     "elapsed_seconds",
 ]
 DEFAULT_MATRIX_MODELS = [
+    # Existing baselines from the previous comparison.
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "Qwen/Qwen3-VL-8B-Instruct",
@@ -56,6 +57,16 @@ DEFAULT_MATRIX_MODELS = [
     "Qwen/Qwen2.5-VL-32B-Instruct",
     "doubao-1.5-vision-pro-32k",
     "minimax-m3",
+    # Newer domestic multimodal candidates confirmed in 302.AI's catalog.
+    "qwen3.8-max",
+    "qwen3.8-flash",
+    "deepseek-v4.1-flash",
+    "qwen3.7-plus",
+    "qwen3-vl-235b-a22b-instruct",
+    "glm-5.3-flash",
+    "kimi-k3",
+    "ernie-5.0-thinking-preview",
+    "doubao-seed-2-0-pro-260215",
 ]
 DEFAULT_MATRIX_MODELS_TEXT = ",".join(DEFAULT_MATRIX_MODELS)
 VLM_EXTRACTION_PROMPT = (
