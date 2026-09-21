@@ -185,6 +185,15 @@ def test_eval_image_understanding_matrix_mode_compares_models_without_leaking_ap
         "Qwen/Qwen2.5-VL-32B-Instruct",
         "doubao-1.5-vision-pro-32k",
         "minimax-m3",
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "deepseek-v4.1-flash",
+        "qwen3.7-plus",
+        "qwen3-vl-235b-a22b-instruct",
+        "glm-5.3-flash",
+        "kimi-k3",
+        "ernie-5.0-thinking-preview",
+        "doubao-seed-2-0-pro-260215",
     ]
     assert "printed_answer" in eval_image_understanding.prompt_for_model("gemini-2.5-flash")
     assert eval_image_understanding.is_garbage_output("啊" * 20)
