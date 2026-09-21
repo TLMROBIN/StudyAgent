@@ -33,7 +33,7 @@
   REQUIRE_REMOTE_HEAD_MATCH=1 bash scripts/studyagent_deploy_verify.sh
   ```
 
-  只有远端 4080s checkout、本机 HEAD、`origin/main`、GitHub `main`、API health、OpenAPI、前端 `/login`、`backend/worker/nginx` 状态都通过后，才能说“部署已验证”。
+  只有远端 159.63 checkout、本机 HEAD、`origin/main`、GitHub `main`、API health、OpenAPI、前端 `/login`、`backend/worker/nginx` 状态都通过后，才能说“部署已验证”。
 - 如果只是本机开发自测，才显式使用：
 
   ```bash
@@ -46,7 +46,7 @@
   bash scripts/studyagent_recover_context.sh
   ```
 
-  先看本机 Git、worktree、远端 4080s checkout、compose 服务、OpenAPI 和前端状态，再决定下一步；不要凭聊天记忆重开任务。
+  先看本机 Git、worktree、远端 159.63 checkout、compose 服务、OpenAPI 和前端状态，再决定下一步；不要凭聊天记忆重开任务。
 
 ---
 
@@ -56,7 +56,7 @@
   - 不要看到 `studyagent-postgres-1` 就按 PG 排查（连接上限、pg_stat_activity、lock 等）。SQLite 走单文件 + 文件锁。
   - `backend/database.py` 是**唯一** `create_engine` 入口。
   - SQLite + SQLAlchemy 仍会报 `QueuePool limit ... reached` 误报，因为 SQLAlchemy 看到 `pool_size>0` 就走 QueuePool 抽象层。
-- **项目目录在中文路径下**：`/home/binyu/文档/trae_projects/StudyAgent/`，不是 `~/Projects/StudyAgent/`。远程 `cd ~/Projects/StudyAgent` 必失败。
+- **项目目录在中文路径下**：`/home/user/文档/trae_projects/StudyAgent/`，不是 `~/Projects/StudyAgent/`。远程 `cd ~/Projects/StudyAgent` 必失败。
 - **容器代码挂载宿主机**（`./:/app`），代码改动 `docker compose restart backend` 即可，无需 rebuild。
 - **后端 compose 内端口**：8002 → 8000（不是宿主机 8001 直跑那个）。宿主机 8001 是 `uvicorn` 单独起的另一份（dev 用），与容器无关。
 - **admin 账户在 DB 里**：id=1 username=`admin`。DB 里**没有** `binyu` 账户，远程 web 登录别用 `binyu/4191` 试（那是 SSH 凭据，不是 web 凭据）。

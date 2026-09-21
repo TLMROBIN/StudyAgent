@@ -24,8 +24,8 @@ services:
     gpus: all
     volumes:
       - ./:/app
-      - /home/binyu/.cache/modelscope:/opt/mineru-modelscope:ro
-      - /home/binyu/.cache/huggingface:/root/.cache/huggingface:ro
+      - /home/user/.cache/modelscope:/opt/mineru-modelscope:ro
+      - /home/user/.cache/huggingface:/root/.cache/huggingface:ro
       - ./.omx/mineru-docker.json:/root/mineru.json:ro
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     depends_on:
@@ -68,8 +68,8 @@ services:
     gpus: all
     volumes:
       - ./:/app
-      - /home/binyu/.cache/modelscope:/opt/mineru-modelscope:ro
-      - /home/binyu/.cache/huggingface:/root/.cache/huggingface:ro
+      - /home/user/.cache/modelscope:/opt/mineru-modelscope:ro
+      - /home/user/.cache/huggingface:/root/.cache/huggingface:ro
       - ./.omx/mineru-docker.json:/root/mineru.json:ro
     command: celery -A backend.tasks.celery_app.celery_app worker -l info --concurrency=1 --max-tasks-per-child=1 --prefetch-multiplier=1
     depends_on:

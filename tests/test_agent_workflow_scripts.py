@@ -16,6 +16,6 @@ def test_recover_context_script_checks_local_and_remote_state() -> None:
     assert "git status --short --branch" in script
     assert "git worktree list" in script
     assert "ssh -o BatchMode=yes" in script
-    assert "/home/binyu/文档/trae_projects/StudyAgent" in script
+    assert "/home/user/文档/trae_projects/StudyAgent" in script
     assert "docker compose ps" in script
     assert "/openapi.json" in script
