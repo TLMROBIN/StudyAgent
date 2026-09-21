@@ -3,8 +3,8 @@
 set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_HOST="${REMOTE_HOST:-4080s}"
-REMOTE_DIR="${REMOTE_DIR:-/home/binyu/文档/trae_projects/StudyAgent}"
+REMOTE_HOST="${REMOTE_HOST:-user-rack-server}"
+REMOTE_DIR="${REMOTE_DIR:-/home/user/文档/trae_projects/StudyAgent}"
 
 section() {
   printf '\n== %s ==\n' "$1"
@@ -34,7 +34,7 @@ section "StudyAgent local changed files"
 run git diff --name-status
 run git diff --cached --name-status
 
-section "StudyAgent remote 4080s context"
+section "StudyAgent remote 159.63 context"
 ssh -o BatchMode=yes "$REMOTE_HOST" bash -s -- "$REMOTE_DIR" <<'REMOTE_RECOVER'
 set -u
 remote_dir="$1"
