@@ -491,7 +491,7 @@ def test_llm_service_exposes_builtin_student_chat_models(monkeypatch):
     assert [
         (item["key"], item["name"], item["description"]) for item in options
     ] == [
-        ("deepseek-v4-flash", "DeepSeek V4 Flash", "通用快捷"),
+        ("glm-5.3-flash-chat", "GLM-5.3-Flash", "高中答疑"),
     ]
 
 
@@ -598,7 +598,7 @@ def test_llm_service_reports_chat_model_statuses(monkeypatch):
     statuses = asyncio.run(collect_statuses())
 
     assert [(item["key"], item["status"], item["message"]) for item in statuses] == [
-        ("deepseek-v4-flash", "available", ""),
+        ("glm-5.3-flash-chat", "available", ""),
     ]
 
 
@@ -616,7 +616,7 @@ def test_llm_service_model_statuses_do_not_probe_by_default(monkeypatch):
 
     statuses = asyncio.run(collect_statuses())
 
-    assert [item["key"] for item in statuses] == ["deepseek-v4-flash"]
+    assert [item["key"] for item in statuses] == ["glm-5.3-flash-chat"]
     assert {item["status"] for item in statuses} <= {"available", "unavailable"}
 
 

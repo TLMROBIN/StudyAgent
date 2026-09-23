@@ -318,8 +318,19 @@ def test_builtin_chat_models_do_not_include_stopped_local_vl_model(monkeypatch):
 
     options = service.chat_model_options()
 
-    assert [item["key"] for item in options] == ["deepseek-v4-flash"]
+    assert [item["key"] for item in options] == ["glm-5.3-flash-chat"]
     assert all("qwen2.5-vl" not in item["key"] for item in options)
+
+
+def test_unspecified_chat_model_uses_first_enabled_model_when_default_is_unconfigured(monkeypatch):
+    service = LLMService()
+    monkeypatch.setattr(
+        service,
+        "chat_model_options",
+        lambda: [{"key": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "description": ""}],
+    )
+
+    assert service.normalize_chat_model_key(None) == "deepseek-v4-flash"
 
 
 def test_text_model_uses_enabled_vision_models_as_image_fallback_chain(monkeypatch):

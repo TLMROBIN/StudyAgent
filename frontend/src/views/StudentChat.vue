@@ -75,7 +75,7 @@ const DEFAULT_CHAT_SUBJECTS: ChatSubjectOption[] = DEFAULT_SUBJECT_NAMES.map((na
   question_bank_available: false,
 }))
 const DEFAULT_CHAT_MODELS: ChatModelOption[] = [
-  { key: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', description: '通用快捷' },
+  { key: 'glm-5.3-flash-chat', name: 'GLM-5.3-Flash', description: '高中答疑' },
 ]
 const CHAT_DRAFT_STORAGE_PREFIX = 'studyagent-student-chat-draft:v1'
 const CHAT_DRAFT_POINTER_PREFIX = 'studyagent-student-chat-active-draft:v1'
@@ -104,7 +104,7 @@ const MODEL_STATUS_REFRESH_MS = 300000
 const form = reactive({
   subject: '物理',
   message: '',
-  llmModel: 'deepseek-v4-flash',
+  llmModel: 'glm-5.3-flash-chat',
   roleId: null as number | null,
 })
 const passwordForm = reactive({
@@ -517,7 +517,7 @@ async function loadChatModels() {
     const models = await fetchChatModels()
     chatModels.value = models.length ? models : DEFAULT_CHAT_MODELS
     if (!chatModels.value.some((item) => item.key === form.llmModel)) {
-      form.llmModel = chatModels.value[0]?.key || 'deepseek-v4-flash'
+      form.llmModel = chatModels.value[0]?.key || 'glm-5.3-flash-chat'
     }
     selectBestAvailableModel()
   } catch {

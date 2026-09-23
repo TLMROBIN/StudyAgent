@@ -199,7 +199,7 @@ class LLMStreamEvent:
 
 
 class LLMService:
-    DEFAULT_CHAT_MODEL_KEY = "deepseek-v4-flash"
+    DEFAULT_CHAT_MODEL_KEY = "glm-5.3-flash-chat"
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -251,14 +251,19 @@ class LLMService:
         return [
             {
                 "key": self.DEFAULT_CHAT_MODEL_KEY,
-                "name": "DeepSeek V4 Flash",
-                "description": "通用快捷",
+                "name": "GLM-5.3-Flash",
+                "description": "高中答疑",
             },
         ]
 
     def normalize_chat_model_key(self, model_key: str | None) -> str:
-        candidate = (model_key or self.DEFAULT_CHAT_MODEL_KEY).strip()
-        allowed = {item["key"] for item in self.chat_model_options()}
+        options = self.chat_model_options()
+        allowed = {item["key"] for item in options}
+        candidate = (model_key or "").strip()
+        if not candidate:
+            candidate = self.DEFAULT_CHAT_MODEL_KEY
+            if candidate not in allowed and options:
+                candidate = options[0]["key"]
         if candidate not in allowed:
             raise ValueError(f"Unsupported chat model: {candidate}")
         return candidate
