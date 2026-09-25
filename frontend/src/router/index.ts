@@ -20,7 +20,7 @@ const StudentGrowth = () => import('../views/StudentGrowth.vue')
 const UserManage = () => import('../views/UserManage.vue')
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/', redirect: '/student' },
     { path: '/login', component: Login, meta: { public: true } },
