@@ -4,6 +4,7 @@ import { api } from '../utils/api'
 import {
   clearStoredAuthTokens,
   getStoredAccessToken,
+  getStoredIdTokenHint,
   getStoredRefreshToken,
   redirectToSsoLogoutIfNeeded,
   resetSessionExpiredState,
@@ -79,6 +80,7 @@ export const useAuthStore = defineStore('auth', {
       resetSessionExpiredState()
     },
     async logout(): Promise<boolean> {
+      const idTokenHint = getStoredIdTokenHint()
       try {
         const accessToken = getStoredAccessToken()
         const refreshToken = getStoredRefreshToken()
@@ -92,7 +94,7 @@ export const useAuthStore = defineStore('auth', {
         resetSessionExpiredState()
       }
       // SSO 登录的用户联动登出 Keycloak；返回 true 表示已触发整页跳转
-      return redirectToSsoLogoutIfNeeded()
+      return redirectToSsoLogoutIfNeeded(idTokenHint)
     },
   },
 })

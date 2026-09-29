@@ -17,11 +17,11 @@ export function installSessionLifecycle(pinia: Pinia, router: Router) {
   window.addEventListener(SESSION_EXPIRED_EVENT, async (event: Event) => {
     const auth = useAuthStore(pinia)
     auth.clearSession()
+    const detail = (event as CustomEvent<{ message?: string; idTokenHint?: string }>).detail
     // SSO 登录的用户在会话被强制清除时同样联动登出 Keycloak
-    if (redirectToSsoLogoutIfNeeded()) {
+    if (redirectToSsoLogoutIfNeeded(detail?.idTokenHint || '')) {
       return
     }
-    const detail = (event as CustomEvent<{ message?: string }>).detail
     const message = typeof detail?.message === 'string' && detail.message.trim()
       ? detail.message
       : '登录已过期，请重新登录'

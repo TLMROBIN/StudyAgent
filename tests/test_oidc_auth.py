@@ -94,6 +94,14 @@ def test_oidc_exchange_passes_access_token_for_at_hash_validation(monkeypatch):
     assert claims["preferred_username"] == "student001"
     assert captured_decode_kwargs["access_token"] == "access-token"
 
+    claims_with_hint, id_token_hint = oidc_service.exchange_code_for_claims(
+        "code",
+        "verifier",
+        include_id_token_hint=True,
+    )
+    assert claims_with_hint["preferred_username"] == "student001"
+    assert id_token_hint == "id-token"
+
 
 def test_oidc_callback_claims_reject_unbound_user():
     SessionLocal = build_session()
