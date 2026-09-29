@@ -58,7 +58,12 @@ class OidcService:
             "authorization_url": f"{self.authorization_endpoint}?{urlencode(params)}",
         }
 
-    def exchange_code_for_claims(self, code: str, code_verifier: str) -> dict:
+    def exchange_code_for_claims(
+        self,
+        code: str,
+        code_verifier: str,
+        include_id_token_hint: bool = False,
+    ) -> dict | tuple[dict, str]:
         data = {
             "grant_type": "authorization_code",
             "client_id": self.settings.oidc_client_id,
@@ -79,7 +84,7 @@ class OidcService:
         if not id_token:
             raise OidcAuthError("OIDC token response did not include id_token")
         try:
-            return jwt.decode(
+            claims = jwt.decode(
                 id_token,
                 jwks,
                 algorithms=["RS256"],
@@ -87,6 +92,9 @@ class OidcService:
                 issuer=self.settings.oidc_issuer.rstrip("/"),
                 access_token=token_payload.get("access_token"),
             )
+            if include_id_token_hint:
+                return claims, id_token
+            return claims
         except Exception as exc:  # jose raises several concrete JWT errors.
             raise OidcAuthError("OIDC id_token validation failed") from exc
 

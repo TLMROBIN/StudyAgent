@@ -86,7 +86,11 @@ def oidc_callback(code: str, state: str, request: Request, db: DbSession) -> Res
     if not expected_state or not code_verifier or not secrets.compare_digest(expected_state, state):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OIDC state")
     try:
-        claims = oidc_service.exchange_code_for_claims(code, code_verifier)
+        claims, id_token_hint = oidc_service.exchange_code_for_claims(
+            code,
+            code_verifier,
+            include_id_token_hint=True,
+        )
         tokens = oidc_service.issue_local_tokens_for_claims(db, claims)
     except OidcAuthError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
@@ -104,6 +108,7 @@ def oidc_callback(code: str, state: str, request: Request, db: DbSession) -> Res
 <script>
 localStorage.setItem("studyagent-access-token", {tokens["access_token"]!r});
 localStorage.setItem("studyagent-refresh-token", {tokens["refresh_token"]!r});
+localStorage.setItem("studyagent-id-token-hint", {id_token_hint!r});
 localStorage.setItem("studyagent-sso-session", "1");
 location.replace({target!r});
 </script>
