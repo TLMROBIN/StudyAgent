@@ -17,6 +17,7 @@ function loginWithSso() {
 <template>
   <section class="login-page">
     <div class="login-hero">
+      <a class="toolbox-link" href="http://10.50.159.62/platform/" aria-label="于博的工具箱，返回功能选择目录页">于博的工具箱</a>
       <p class="eyebrow">LAN Classroom AI</p>
       <h1>让答疑更像一场耐心的推理训练</h1>
       <p>
