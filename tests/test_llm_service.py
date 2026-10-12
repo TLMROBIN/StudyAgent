@@ -1,6 +1,8 @@
 import asyncio
+import json
 
 import httpx
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -38,6 +40,42 @@ def _add_account(session, *, provider_name: str, enabled: bool = True) -> LLMPro
     session.add(account)
     session.flush()
     return account
+
+
+@pytest.mark.parametrize("provider_name,model,expected", [
+    ("302ai", "glm-5.3-flash", True),
+    ("deepseek", "deepseek-v4-flash", True),
+    ("zai", "glm-5.3-flash", False),
+    ("minimax", "MiniMax-M3", False),
+    ("deepseek", "deepseek-v4-pro", False),
+])
+def test_interactive_thinking_option_is_scoped_to_measured_text_routes(provider_name, model, expected):
+    captured = []
+
+    def handle(request):
+        payload = json.loads(request.content)
+        captured.append(payload)
+        if payload["stream"]:
+            return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"先确定条件。"}}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json={"choices": [{"message": {"content": "先确定条件。"}}]})
+
+    async def run():
+        service = LLMService()
+        provider = ProviderState(name=provider_name, model=model, base_url="https://example.test", api_key="secret")
+        service._chat_http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        service._vision_http_client = service._chat_http_client
+        try:
+            events = [e async for e in service._stream_openai_compatible_events(provider, [{"role": "user", "content": "分析条件"}])]
+            assert events[0].content == "先确定条件。"
+            await service._complete_openai_compatible(provider, [], client_kind="chat")
+            await service._complete_openai_compatible(provider, [], client_kind="vision")
+        finally:
+            await service.aclose()
+
+    asyncio.run(run())
+    for payload in captured[:2]:
+        assert (payload.get("thinking") == {"type": "disabled"}) == expected
+    assert "thinking" not in captured[2]
 
 
 def test_thinking_filter_strips_complete_think_block():

@@ -798,6 +798,7 @@ class LLMService:
             payload["top_p"] = top_p
         if max_completion_tokens:
             payload["max_completion_tokens"] = max_completion_tokens
+        payload.update(self._interactive_text_options(provider))
         url = self._chat_completions_url(provider.base_url)
         raw_event_count = 0
         content_event_count = 0
@@ -998,6 +999,8 @@ class LLMService:
         }
         if max_completion_tokens:
             payload["max_completion_tokens"] = max_completion_tokens
+        if client_kind == "chat":
+            payload.update(self._interactive_text_options(provider))
         url = self._chat_completions_url(provider.base_url)
         timeout = httpx.Timeout(timeout_seconds or self.settings.effective_chat_image_vision_timeout_seconds)
         client = (
@@ -1010,6 +1013,16 @@ class LLMService:
         body = response.json()
         message = body.get("choices", [{}])[0].get("message", {})
         return _content_text(message.get("content", ""))
+
+    @staticmethod
+    def _interactive_text_options(provider: ProviderState) -> dict:
+        # These deployed models otherwise spend the short answer budget on
+        # hidden reasoning before giving the student any visible guidance.
+        if provider.model.lower() == "deepseek-v4-flash" or (
+            provider.name == "302ai" and provider.model.lower() == "glm-5.3-flash"
+        ):
+            return {"thinking": {"type": "disabled"}}
+        return {}
 
     @staticmethod
     def _chat_completions_url(base_url: str) -> str:

@@ -905,6 +905,54 @@ def test_chat_stream_forwards_selected_model_to_llm_service(monkeypatch):
     assert assistant_message.llm_model_key == "vision-model"
 
 
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_chat_heartbeat_preserves_pending_provider_read_and_cleans_up(monkeypatch, disconnect):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    closed = []
+
+    async def delayed_stream(messages, fallback_text, **kwargs):
+        try:
+            await asyncio.sleep(0.04)
+            yield "你可以先确定圆周运动的半径吗？"
+            await asyncio.sleep(0.04)
+            yield "再想想合力的方向。"
+        finally:
+            closed.append(True)
+
+    async def no_suggestions(**kwargs):
+        return []
+
+    monkeypatch.setattr(chat_router, "STREAM_HEARTBEAT_SECONDS", 0.005)
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", delayed_stream)
+    monkeypatch.setattr(chat_router, "_generate_suggested_replies", no_suggestions)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+    request = DisconnectAfterFirstChunkRequest() if disconnect else FakeRequest()
+    session = session_factory()
+    try:
+        async def run():
+            response = await chat_router.stream_chat(
+                ChatRequest(subject="物理", message="圆周运动的合力方向如何判断"),
+                session, current_user, request,
+            )
+            return _parse_sse(await _read_streaming_response(response))
+
+        events = asyncio.run(run())
+        assert any(name == "heartbeat" for name, _ in events)
+        assert closed == [True]
+        if disconnect:
+            assert not any(name == "done" for name, _ in events)
+            assert session.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT)) is None
+        else:
+            done = next(data for name, data in events if name == "done")
+            assert done["content"] == "你可以先确定圆周运动的半径吗？再想想合力的方向。"
+            stored = session.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+            assert stored.content == done["content"]
+    finally:
+        session.close()
+
+
 def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
