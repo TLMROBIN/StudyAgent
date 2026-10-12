@@ -215,6 +215,7 @@ async def _stream_llm_events(
     max_completion_tokens: int | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
+    deep_reasoning: bool = False,
 ):
     stream_response_func = getattr(llm_service.stream_response, "__func__", None)
     if stream_response_func is not LLMService.stream_response:
@@ -228,6 +229,7 @@ async def _stream_llm_events(
         max_completion_tokens=max_completion_tokens,
         temperature=temperature,
         top_p=top_p,
+        deep_reasoning=deep_reasoning,
     ):
         yield event
 
@@ -344,6 +346,51 @@ def _compose_safe_rewrite(existing_text: str, rewrite_text: str) -> str:
         return cleaned_existing
     separator = "" if cleaned_existing.endswith(("。", "！", "？", "!", "?", "\n")) else "\n\n"
     return f"{cleaned_existing}{separator}{cleaned_rewrite}"
+
+
+class LearningSummaryParser:
+    """Separate a short, explicitly public explanation from reply text.
+
+    This only parses visible model content, never internal reasoning_content.
+    Hold the summary until it can be safety-checked as a whole.
+    """
+    OPEN = "<learning_summary>"
+    CLOSE = "</learning_summary>"
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.resolved = False
+        self.discarding = False
+
+    def feed(self, text: str) -> tuple[str | None, str]:
+        if self.resolved:
+            return None, text
+        self.buffer += text
+        trimmed = self.buffer.lstrip()
+        if self.OPEN.startswith(trimmed):
+            return None, ""
+        if not trimmed.startswith(self.OPEN):
+            self.resolved = True
+            result, self.buffer = self.buffer, ""
+            return None, result
+        end = trimmed.find(self.CLOSE)
+        if end < 0:
+            if len(trimmed) > 4096:
+                self.discarding = True
+                self.buffer = self.OPEN + trimmed[-len(self.CLOSE):]
+            return None, ""
+        summary = trimmed[len(self.OPEN):end].strip()
+        body = trimmed[end + len(self.CLOSE):]
+        self.buffer = ""
+        self.resolved = True
+        return summary if not self.discarding and len(summary) <= 600 else None, body
+
+    def flush(self) -> str:
+        # An incomplete tagged summary never becomes an unvalidated reply.
+        if self.buffer.lstrip().startswith(self.OPEN) or self.OPEN.startswith(self.buffer.lstrip()):
+            return ""
+        result, self.buffer = self.buffer, ""
+        return result
 
 
 def _message_load_option():
@@ -1257,6 +1304,7 @@ async def _parse_stream_request_payload(request: Request) -> tuple[ChatRequest, 
                     "conversation_id": conversation_id_raw or None,
                     "request_id": request_id_raw or None,
                     "llm_model": str(form.get("llm_model") or "").strip() or None,
+                    "deep_reasoning": str(form.get("deep_reasoning") or "false"),
                     "role_id": role_id_raw or None,
                 }
             )
@@ -1334,6 +1382,7 @@ def _chat_model_read_from_config(db: DbSession, current_user: User, model: LLMMo
         key=model.model_key,
         name=model.display_name,
         description=model.description,
+        supports_deep_reasoning=llm_service.supports_deep_reasoning(model.model_key),
         billing_mode=(policy.billing_mode.value if policy else QuotaBillingMode.FREE_LOCAL.value),
         quota=ChatModelQuotaRead(**snapshot.__dict__),
     )
@@ -1352,6 +1401,7 @@ def list_chat_models(db: DbSession, current_user: CurrentUser) -> list[ChatModel
     return [
         ChatModelOptionRead(
             **item,
+            supports_deep_reasoning=llm_service.supports_deep_reasoning(item["key"]),
             quota=ChatModelQuotaRead(quota_exhausted=False, message="默认模型"),
         )
         for item in llm_service.chat_model_options()
@@ -1574,6 +1624,8 @@ async def stream_chat(
     chat_request_total.inc()
     has_image_turn = image_upload is not None
     selected_model_key = _chat_model_key_or_422(payload.llm_model)
+    if payload.deep_reasoning and not llm_service.supports_deep_reasoning(selected_model_key):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="当前模型不支持手动深度推理，请切换模型或关闭深度推理")
     image_content: bytes | None = None
     stored_attachment: StoredChatAttachment | None = None
     attachment_record: ChatMessageAttachment | None = None
@@ -1591,6 +1643,7 @@ async def stream_chat(
         image_sha256=image_sha256,
         llm_model=selected_model_key,
         requested_role_id=payload.role_id,
+        deep_reasoning=payload.deep_reasoning,
     )
 
     replay_state = request_replay_service.load(user_id=current_user.id, request_id=payload.request_id)
@@ -2390,7 +2443,7 @@ async def stream_chat(
         .options(selectinload(LLMModelConfig.quota_policy), selectinload(LLMModelConfig.provider_account))
         .where(LLMModelConfig.model_key == selected_model_key, LLMModelConfig.is_enabled.is_(True))
     )
-    if not practice_review_turn and question_cache_service.is_cacheable(
+    if not payload.deep_reasoning and not practice_review_turn and question_cache_service.is_cacheable(
         history_pairs=history_pairs,
         question=retrieval_query,
         has_image_turn=has_image_turn,
@@ -2478,6 +2531,13 @@ async def stream_chat(
             )
 
     quota_reservation: QuotaReservation | None = None
+    if payload.deep_reasoning:
+        prompt.messages[0]["content"] += (
+            "\n本轮使用深度分析，但不公开内部推理原文。"
+            "请在正文前用 <learning_summary>...</learning_summary> 输出面向学生的公开学习思路摘要，"
+            "只写1至3句，说明先核对哪些条件、如何选择模型，不写最终答案、标准解或计算结果。"
+            "如需输出模式标签，模式标签仍放在最前面，然后才是摘要。摘要之后继续正常的苏格拉底引导。"
+        )
     quota_usage: LLMUsage | None = None
     if selected_model_config is not None:
         quota_result = llm_quota_service.check_and_reserve(
@@ -2520,6 +2580,8 @@ async def stream_chat(
         emitted_text = ""
         emitted_visible = False
         mode_parser = LeadingModeTagParser() if prompt.fact_mode_offered else None
+        summary_parser = LearningSummaryParser() if payload.deep_reasoning else None
+        learning_summary = ""
         quality_filter = QualitySignalFilter() if incentive_params.get("llm_signal_enabled") else None
         resolved_mode: str | None = None
         pending_buffer = ""
@@ -2557,6 +2619,7 @@ async def stream_chat(
                     "queue_waiting_before": ticket.waiting_before,
                     "context_chunks": len(retrieval.chunks),
                     "request_id": getattr(request.state, "request_id", None),
+                    "deep_reasoning": payload.deep_reasoning,
                     **role_snapshot.meta_payload(),
                 },
             )
@@ -2574,7 +2637,11 @@ async def stream_chat(
                 max_completion_tokens=min(candidate_max_tokens) if candidate_max_tokens else None,
                 temperature=subject_llm_params.get("temperature"),
                 top_p=subject_llm_params.get("top_p"),
+                deep_reasoning=payload.deep_reasoning,
             )
+            reasoning_started = perf_counter()
+            if payload.deep_reasoning:
+                yield _sse_event("reasoning_progress", {"summary": "模型正在分析题目，复杂问题可能需要更长时间。", "elapsed_seconds": 0})
 
             while True:
                 if await request.is_disconnected():
@@ -2592,12 +2659,17 @@ async def stream_chat(
                     if not completed:
                         # A heartbeat must not cancel the provider's pending read.
                         yield _sse_event("heartbeat", {"conversation_id": conversation.id})
+                        if payload.deep_reasoning:
+                            yield _sse_event("reasoning_progress", {"summary": "正在等待模型完成分析，连接正常，可以随时停止。", "elapsed_seconds": int(perf_counter() - reasoning_started)})
                         continue
                     provider_event = pending_provider_event.result()
                     pending_provider_event = None
                 except StopAsyncIteration:
                     break
 
+                if provider_event.type == "reasoning_progress":
+                    yield _sse_event("reasoning_progress", {"summary": provider_event.content, "elapsed_seconds": int(perf_counter() - reasoning_started)})
+                    continue
                 if provider_event.type == "usage":
                     quota_usage = provider_event.usage
                     continue
@@ -2610,6 +2682,16 @@ async def stream_chat(
                         resolved_mode = parsed_mode
                 if quality_filter is not None:
                     provider_chunk = quality_filter.feed(provider_chunk)
+                if summary_parser is not None:
+                    summary, provider_chunk = summary_parser.feed(provider_chunk)
+                    if (
+                        summary
+                        and not re.search(r"(?:答案|结果|选项)(?:就)?[是为:：]", re.sub(r"\s+", "", summary))
+                        and filter_service.validate_answer(summary, subject=subject).allowed
+                        and filter_service.validate_answer(re.sub(r"\s+", "", summary), subject=subject).allowed
+                    ):
+                        learning_summary = summary
+                        yield _sse_event("learning_summary", {"content": summary})
                 pending_buffer += provider_chunk
                 segments, pending_buffer = _split_stream_buffer(pending_buffer)
                 for segment in segments:
@@ -2651,6 +2733,8 @@ async def stream_chat(
                 resolved_mode = mode_parser.resolved_mode
             if quality_filter is not None and not disconnected:
                 pending_buffer += quality_filter.flush()
+            if summary_parser is not None and not disconnected:
+                pending_buffer += summary_parser.flush()
 
             if not disconnected and pending_buffer:
                 segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
@@ -2693,6 +2777,7 @@ async def stream_chat(
                         "content": emitted_text,
                         "assets": [],
                         "suggested_replies": [],
+                        "learning_summary": learning_summary,
                     },
                 )
                 suggested_replies = await _generate_suggested_replies(

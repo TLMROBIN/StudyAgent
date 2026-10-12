@@ -56,6 +56,11 @@ export interface ChatMessageRead {
   assets?: KnowledgeAsset[]
   suggested_replies?: string[]
   agent_role_snapshot?: AgentRoleSnapshot | null
+  reasoning_progress?: string
+  reasoning_elapsed?: number
+  reasoning_finished?: boolean
+  learning_summary?: string
+  deep_reasoning?: boolean
 }
 
 export interface AgentRoleSnapshot {
@@ -94,6 +99,7 @@ export interface StreamChatRequest {
   conversation_id?: number | null
   request_id?: string | null
   llm_model?: string | null
+  deep_reasoning?: boolean
   role_id?: number | null
   image?: File | null
 }
@@ -102,6 +108,7 @@ export interface ChatModelOption {
   key: string
   name: string
   description: string
+  supports_deep_reasoning?: boolean
   billing_mode?: 'request_count' | 'token_usage' | 'free_local'
   quota?: ChatModelQuota
 }
@@ -827,6 +834,7 @@ function buildStreamChatFormData(payload: StreamChatRequest): FormData {
   if (typeof payload.llm_model === 'string' && payload.llm_model) {
     formData.append('llm_model', payload.llm_model)
   }
+  formData.append('deep_reasoning', String(Boolean(payload.deep_reasoning)))
 
   if (typeof payload.role_id === 'number') {
     formData.append('role_id', String(payload.role_id))

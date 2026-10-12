@@ -191,7 +191,7 @@ class LLMUsage:
 
 @dataclass
 class LLMStreamEvent:
-    type: Literal["chunk", "usage"]
+    type: Literal["chunk", "usage", "reasoning_progress"]
     content: str = ""
     usage: LLMUsage | None = None
     provider_name: str = ""
@@ -278,6 +278,13 @@ class LLMService:
         if configured:
             return configured
         return self._runtime_providers()
+
+    def supports_deep_reasoning(self, model_key: str | None) -> bool:
+        try:
+            providers = self._providers_for_chat_model(model_key)
+        except ValueError:
+            return False
+        return bool(providers and self._interactive_text_options(providers[0], deep_reasoning=True))
 
     async def chat_model_statuses(self, *, force_refresh: bool = False) -> list[dict[str, str]]:
         statuses: list[dict[str, str]] = []
@@ -620,6 +627,7 @@ class LLMService:
         max_completion_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        deep_reasoning: bool = False,
     ) -> AsyncIterator[LLMStreamEvent]:
         selected_model_key = self.normalize_chat_model_key(model_key)
         fallback_reason = "no_available_provider"
@@ -648,7 +656,11 @@ class LLMService:
                         max_completion_tokens=max_completion_tokens,
                         temperature=temperature,
                         top_p=top_p,
+                        deep_reasoning=deep_reasoning,
                     ):
+                        if event.type == "reasoning_progress":
+                            yield event
+                            continue
                         if event.type == "usage":
                             if yielded_text:
                                 yield event
@@ -783,6 +795,7 @@ class LLMService:
         max_completion_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        deep_reasoning: bool = False,
     ) -> AsyncIterator[LLMStreamEvent]:
         content_filter = ThinkingContentFilter()
         emitted_text = ""
@@ -798,7 +811,7 @@ class LLMService:
             payload["top_p"] = top_p
         if max_completion_tokens:
             payload["max_completion_tokens"] = max_completion_tokens
-        payload.update(self._interactive_text_options(provider))
+        payload.update(self._interactive_text_options(provider, deep_reasoning=deep_reasoning))
         url = self._chat_completions_url(provider.base_url)
         raw_event_count = 0
         content_event_count = 0
@@ -837,6 +850,10 @@ class LLMService:
                 )
                 if reasoning_content:
                     reasoning_event_count += 1
+                    if deep_reasoning and (reasoning_event_count == 1 or reasoning_event_count % 20 == 0):
+                        # Report activity only; internal reasoning may contain
+                        # answers or unsafe material and never reaches the SSE.
+                        yield LLMStreamEvent(type="reasoning_progress", content="正在深入分析题目，回复准备好后会继续引导你。")
                 text = delta or message_content
                 if text and emitted_text and text.startswith(emitted_text):
                     text = text[len(emitted_text) :]
@@ -1015,13 +1032,13 @@ class LLMService:
         return _content_text(message.get("content", ""))
 
     @staticmethod
-    def _interactive_text_options(provider: ProviderState) -> dict:
+    def _interactive_text_options(provider: ProviderState, *, deep_reasoning: bool = False) -> dict:
         # These deployed models otherwise spend the short answer budget on
         # hidden reasoning before giving the student any visible guidance.
         if provider.model.lower() == "deepseek-v4-flash" or (
             provider.name == "302ai" and provider.model.lower() == "glm-5.3-flash"
         ):
-            return {"thinking": {"type": "disabled"}}
+            return {"thinking": {"type": "enabled" if deep_reasoning else "disabled"}}
         return {}
 
     @staticmethod

@@ -502,6 +502,9 @@ def test_rag_session_cache_preserves_chunk_order_and_invalidates_agent_version(m
     session = session_factory()
     cache_store = MemoryStore()
     monkeypatch.setattr(chat_router, "rag_session_store", cache_store)
+    # This isolated DB has no active config; do not inherit process-global
+    # config-cache entries from preceding tests using recycled engine IDs.
+    monkeypatch.setattr(chat_router, "_get_active_agent_config", lambda db: None)
     try:
         document = KnowledgeDocument(
             subject="数学",
@@ -783,6 +786,7 @@ def test_student_model_list_includes_database_quota_snapshot():
             "key": "minimax-m27",
             "name": "MiniMax M2.7",
             "description": "高速答疑模型",
+            "supports_deep_reasoning": False,
             "billing_mode": "request_count",
             "quota": {
                 "daily_request_limit": 20,
@@ -990,6 +994,61 @@ def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch
         assert stored_messages[1].content == chat_router.EMPTY_CHAT_RESPONSE_FALLBACK
     finally:
         session.close()
+
+
+@pytest.mark.parametrize("summary,expected", [("先判断受力与运动模型。", True), ("答案是 A。", False)])
+def test_deep_reasoning_multipart_stream_bypasses_normal_cache(monkeypatch, summary, expected):
+    session_factory = _build_session_factory()
+    student = _create_student(session_factory)
+    selected = []
+
+    async def fake_events(*args, **kwargs):
+        selected.append(kwargs["deep_reasoning"])
+        yield chat_router.LLMStreamEvent(type="reasoning_progress", content="正在深入分析题目。")
+        yield chat_router.LLMStreamEvent(type="chunk", content=f"<learning_summary>{summary}</learning_summary>")
+        yield chat_router.LLMStreamEvent(type="chunk", content="你能先列出石块受到哪些力吗？")
+
+    async def no_suggestions(**kwargs):
+        return []
+
+    monkeypatch.setattr(chat_router.llm_service, "supports_deep_reasoning", lambda key: True)
+    monkeypatch.setattr(chat_router, "_stream_llm_events", fake_events)
+    monkeypatch.setattr(chat_router, "_generate_suggested_replies", no_suggestions)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "lookup", lambda **kwargs: pytest.fail("Deep reasoning reused a normal cached answer"))
+    response = _build_chat_test_client(session_factory, student).post("/api/chat/stream", data={"subject": "物理", "message": "圆周运动如何判断受力", "deep_reasoning": "true"})
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert selected == [True]
+    assert next(data for name, data in events if name == "meta")["deep_reasoning"] is True
+    assert any(name == "reasoning_progress" for name, _ in events)
+    assert any(name == "learning_summary" for name, _ in events) is expected
+    if not expected:
+        assert summary not in response.text
+    assert next(data for name, data in events if name == "done")["content"] == "你能先列出石块受到哪些力吗？"
+
+
+def test_public_learning_summary_parser_handles_fragmented_tags_and_plain_reply():
+    parser = chat_router.LearningSummaryParser()
+    assert parser.feed("  <learn") == (None, "")
+    assert parser.feed("ing_summary>先核对条件。") == (None, "")
+    assert parser.feed("</learning_summary>你认为合力方向如何？") == ("先核对条件。", "你认为合力方向如何？")
+    assert parser.feed("继续画图。") == (None, "继续画图。")
+    plain = chat_router.LearningSummaryParser()
+    assert plain.feed("先画图。") == (None, "先画图。")
+    incomplete = chat_router.LearningSummaryParser()
+    incomplete.feed("<learning_summary>未完成的摘要")
+    assert incomplete.flush() == ""
+
+
+def test_unsupported_deep_reasoning_is_rejected_before_saving_question(monkeypatch):
+    session_factory = _build_session_factory()
+    student = _create_student(session_factory)
+    monkeypatch.setattr(chat_router.llm_service, "supports_deep_reasoning", lambda key: False)
+    response = _build_chat_test_client(session_factory, student).post("/api/chat/stream", json={"subject": "物理", "message": "圆周运动如何判断受力", "deep_reasoning": True})
+    assert response.status_code == 422
+    with session_factory() as db:
+        assert db.scalar(select(Message)) is None
 
 
 def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):

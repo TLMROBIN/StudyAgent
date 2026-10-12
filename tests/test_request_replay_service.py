@@ -2,6 +2,13 @@ from backend.services.request_replay_service import RequestReplayService
 from backend.services.store_service import MemoryStore
 
 
+def test_request_fingerprint_separates_deep_reasoning_and_preserves_default():
+    service = RequestReplayService(store_backend=MemoryStore())
+    args = dict(subject="物理", question="圆周运动如何分析", conversation_id=None)
+    assert service.fingerprint(**args) == service.fingerprint(**args, deep_reasoning=False)
+    assert service.fingerprint(**args) != service.fingerprint(**args, deep_reasoning=True)
+
+
 def test_request_replay_fingerprint_includes_image_hash():
     service = RequestReplayService(store_backend=MemoryStore())
 

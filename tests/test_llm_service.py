@@ -85,6 +85,30 @@ def test_thinking_filter_strips_complete_think_block():
     assert output == "最终回答"
 
 
+def test_deep_reasoning_stream_reports_activity_without_exposing_internal_text():
+    captured = []
+
+    def handle(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text='data: {"choices":[{"delta":{"reasoning_content":"内部推理和最终答案 SECRET"}}]}\n\ndata: {"choices":[{"delta":{"content":"先判断合力方向。"}}]}\n\ndata: [DONE]\n\n')
+
+    async def run():
+        service = LLMService()
+        service._chat_http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        provider = ProviderState(name="302ai", model="glm-5.3-flash", base_url="https://example.test", api_key="secret")
+        service._providers_for_chat_model = lambda key: [provider]
+        try:
+            return [e async for e in service.stream_events([], "fallback", deep_reasoning=True)]
+        finally:
+            await service.aclose()
+
+    events = asyncio.run(run())
+    assert captured[0]["thinking"] == {"type": "enabled"}
+    assert [e.type for e in events] == ["reasoning_progress", "chunk"]
+    assert "SECRET" not in "".join(e.content for e in events)
+    assert events[-1].content == "先判断合力方向。"
+
+
 def test_thinking_filter_handles_split_tags_across_chunks():
     content_filter = ThinkingContentFilter()
     output = content_filter.feed("<thi")

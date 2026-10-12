@@ -105,6 +105,7 @@ const form = reactive({
   subject: '物理',
   message: '',
   llmModel: 'glm-5.3-flash-chat',
+  deepReasoning: false,
   roleId: null as number | null,
 })
 const passwordForm = reactive({
@@ -189,6 +190,7 @@ const visibleRecommendations = computed(() => (
 
 const selectedModelStatus = computed(() => chatModelStatuses.value[form.llmModel]?.status || 'unknown')
 const selectedModel = computed(() => chatModels.value.find((item) => item.key === form.llmModel) || null)
+const canUseDeepReasoning = computed(() => Boolean(selectedModel.value?.supports_deep_reasoning))
 const selectedModelQuotaExhausted = computed(() => Boolean(selectedModel.value?.quota?.quota_exhausted))
 const selectedSubject = computed(() => (
   chatSubjects.value.find((item) => item.name === form.subject)
@@ -1507,7 +1509,7 @@ async function sendMessage() {
     content,
     attachment,
   })
-  messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [] })
+  messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [], deep_reasoning: form.deepReasoning && canUseDeepReasoning.value })
   queueScrollToBottom()
 
   try {
@@ -1518,11 +1520,14 @@ async function sendMessage() {
         message,
         conversation_id: currentConversationId.value,
         llm_model: form.llmModel,
+        deep_reasoning: form.deepReasoning && canUseDeepReasoning.value,
         role_id: form.roleId,
         image,
       },
       ({ event, data }) => {
         if (event === 'meta') {
+          const last = messages.value[messages.value.length - 1]
+          if (last?.role === 'assistant') last.deep_reasoning = data.deep_reasoning === true
           if (typeof data.conversation_id === 'number') {
             currentConversationId.value = data.conversation_id
           }
@@ -1547,6 +1552,10 @@ async function sendMessage() {
           if (last && last.role === 'assistant') {
             last.content = ''
             last.suggested_replies = []
+            last.reasoning_progress = ''
+            last.reasoning_elapsed = 0
+            last.reasoning_finished = false
+            last.learning_summary = ''
             queueScrollToBottom()
           }
         }
@@ -1557,6 +1566,17 @@ async function sendMessage() {
             queueScrollToBottom()
           }
         }
+        if (event === 'reasoning_progress') {
+          const last = messages.value[messages.value.length - 1]
+          if (last?.role === 'assistant' && typeof data.summary === 'string') {
+            last.reasoning_progress = data.summary
+            if (typeof data.elapsed_seconds === 'number') last.reasoning_elapsed = data.elapsed_seconds
+          }
+        }
+        if (event === 'learning_summary') {
+          const last = messages.value[messages.value.length - 1]
+          if (last?.role === 'assistant' && typeof data.content === 'string') last.learning_summary = data.content
+        }
         if (event === 'done') {
           const last = messages.value[messages.value.length - 1]
           if (last && last.role === 'assistant' && typeof data.content === 'string') {
@@ -1565,6 +1585,11 @@ async function sendMessage() {
               void preloadAssets(last.assets)
             }
             last.content = data.content
+            if (typeof data.learning_summary === 'string') last.learning_summary = data.learning_summary
+            if (last.deep_reasoning) {
+              last.reasoning_finished = true
+              last.reasoning_progress = '分析已完成，下面的回复会引导你继续思考。'
+            }
             last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
             screenReaderAnnouncement.value = `学习助手回复完成：${data.content}`
             queueScrollToBottom()
@@ -1828,6 +1853,14 @@ onMounted(async () => {
             :aria-label="item.role === 'user' ? '你的消息' : '学习助手回复'"
           >
             <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
+            <details v-if="item.role === 'assistant' && item.deep_reasoning" class="reasoning-progress">
+              <summary>{{ item.reasoning_finished ? '深度推理已完成' : '深度推理进行中' }} · {{ item.reasoning_elapsed || 0 }} 秒</summary>
+              <div class="reasoning-progress__body">
+                <p v-if="item.learning_summary">{{ item.learning_summary }}</p>
+                <p>{{ item.reasoning_progress || '等待模型分析题目，复杂问题可能需要更长时间。' }}</p>
+                <p>这里显示分析进度；学习思路会在导师回复中呈现，最后一步仍由你完成。</p>
+              </div>
+            </details>
             <div
               v-if="item.attachment?.content_type.startsWith('image/')"
               class="recommendation-card__images"
@@ -1937,6 +1970,11 @@ onMounted(async () => {
             </el-dropdown>
             <span class="composer-helper">一次可上传 1 张题图</span>
           </div>
+          <label class="deep-reasoning-control">
+            <input v-model="form.deepReasoning" type="checkbox" :disabled="sending || !canUseDeepReasoning" />
+            <span>深度推理</span>
+            <span class="composer-helper">{{ canUseDeepReasoning ? '复杂题可开启，等待更久' : '当前模型不支持' }}</span>
+          </label>
           <div class="chat-primary-actions">
             <button v-if="sending" type="button" class="ghost-button" @click="stopStreaming()">停止生成</button>
             <button type="button" class="primary-button send-question-button" :disabled="sending || !canSend" @click="sendMessage">
