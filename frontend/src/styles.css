@@ -118,7 +118,7 @@ textarea {
   backdrop-filter: blur(16px);
   background: rgba(17, 24, 39, 0.9);
   color: #f8f6ef;
-  transition: width 0.24s ease, padding 0.24s ease;
+  /* Fold once: animating these dimensions reflows the learning workspace each frame. */
   overflow: hidden;
 }
 
@@ -159,7 +159,6 @@ textarea {
 .app-root--shell .app-main {
   min-height: var(--app-viewport-height, 100vh);
   padding: 28px 28px 28px calc(var(--shell-sidebar-width) + var(--shell-page-gap));
-  transition: padding-left 0.24s ease;
 }
 
 .app-root--shell .app-main--student-chat {
