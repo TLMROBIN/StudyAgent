@@ -502,9 +502,6 @@ def test_rag_session_cache_preserves_chunk_order_and_invalidates_agent_version(m
     session = session_factory()
     cache_store = MemoryStore()
     monkeypatch.setattr(chat_router, "rag_session_store", cache_store)
-    # This isolated DB has no active config; do not inherit process-global
-    # config-cache entries from preceding tests using recycled engine IDs.
-    monkeypatch.setattr(chat_router, "_get_active_agent_config", lambda db: None)
     try:
         document = KnowledgeDocument(
             subject="数学",
@@ -698,6 +695,9 @@ def test_chat_stream_reuses_rag_for_short_followup_and_invalidates_new_topic(mon
         )
         first_events = _parse_sse(asyncio.run(_read_streaming_response(first_response)))
         conversation_id = first_events[0][1]["conversation_id"]
+        # HTTP requests use fresh sessions. Refresh ORM relationships before
+        # simulating the next request with this fixture's reused session.
+        session.expire_all()
 
         second_response = asyncio.run(
             chat_router.stream_chat(
@@ -708,6 +708,7 @@ def test_chat_stream_reuses_rag_for_short_followup_and_invalidates_new_topic(mon
             )
         )
         _parse_sse(asyncio.run(_read_streaming_response(second_response)))
+        session.expire_all()
 
         third_response = asyncio.run(
             chat_router.stream_chat(
