@@ -63,6 +63,10 @@ class EmbedService:
         with self._lock:
             if self._model is not None:
                 return self._model
+            if self._load_attempted:
+                # Keep the established fallback until the process is restarted.
+                # Retrying an unavailable model for every query blocks retrieval.
+                return None
             if self.settings.embedding_backend != "sentence-transformers":
                 self._load_attempted = True
                 self._backend_name = "hash-fallback"

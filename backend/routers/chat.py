@@ -2524,6 +2524,7 @@ async def stream_chat(
         resolved_mode: str | None = None
         pending_buffer = ""
         llm_stream = None
+        pending_provider_event = None
         disconnected = False
         first_token_observed = False
         should_send_done = True
@@ -2583,10 +2584,17 @@ async def stream_chat(
                     break
 
                 try:
-                    provider_event = await asyncio.wait_for(anext(llm_stream), timeout=STREAM_HEARTBEAT_SECONDS)
-                except TimeoutError:
-                    yield _sse_event("heartbeat", {"conversation_id": conversation.id})
-                    continue
+                    if pending_provider_event is None:
+                        pending_provider_event = asyncio.create_task(anext(llm_stream))
+                    completed, _ = await asyncio.wait(
+                        {pending_provider_event}, timeout=STREAM_HEARTBEAT_SECONDS
+                    )
+                    if not completed:
+                        # A heartbeat must not cancel the provider's pending read.
+                        yield _sse_event("heartbeat", {"conversation_id": conversation.id})
+                        continue
+                    provider_event = pending_provider_event.result()
+                    pending_provider_event = None
                 except StopAsyncIteration:
                     break
 
@@ -2745,6 +2753,10 @@ async def stream_chat(
                 ):
                     yield _sse_event("incentive", incentive_grant)
         finally:
+            if pending_provider_event is not None:
+                pending_provider_event.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending_provider_event
             if llm_stream is not None:
                 with suppress(Exception):
                     await llm_stream.aclose()

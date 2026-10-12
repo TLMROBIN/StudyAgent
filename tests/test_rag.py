@@ -204,6 +204,25 @@ def test_embedding_normalization_expands_common_latex_tokens():
     assert "下标" in normalized
 
 
+def test_failed_embedding_load_is_not_retried_for_every_query(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    attempts = []
+
+    def unavailable_model(*args, **kwargs):
+        attempts.append(True)
+        raise OSError("model is unavailable offline")
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=unavailable_model))
+    embedder = EmbedService(Settings(EMBEDDING_BACKEND="sentence-transformers", EMBEDDING_DEVICE="cpu"))
+    first = embedder.embed_text("圆周运动")
+    second = embedder.embed_text("圆周运动")
+    assert first == second
+    assert attempts == [True]
+    assert embedder.health_snapshot()["backend"] == "hash-fallback"
+
+
 def test_hash_fallback_dimension_matches_bge_m3_runtime_contract():
     embedder = EmbedService(
         Settings(
