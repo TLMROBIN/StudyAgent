@@ -96,10 +96,9 @@ def oidc_callback(code: str, state: str, request: Request, db: DbSession) -> Res
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
     web_base = get_settings().web_base_path.rstrip("/") + "/"
-    if tokens.get("must_change_password"):
-        target = f"{web_base}login"
-    else:
-        target = f"{web_base}{'student' if tokens.get('role') == 'student' else 'admin'}"
+    # Keycloak owns password policy for OIDC users. A legacy local-password
+    # flag must not send an authenticated user back to the SSO-only login page.
+    target = f"{web_base}{'student' if tokens.get('role') == 'student' else 'admin'}"
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>统一认证登录中</title></head>
