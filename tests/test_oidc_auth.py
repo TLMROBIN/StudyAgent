@@ -162,3 +162,34 @@ def test_oidc_callback_rejects_when_disabled_before_state_validation(monkeypatch
         assert exc.detail == "统一平台登录暂未启用，请使用账号密码登录。"
     else:
         raise AssertionError("Expected disabled OIDC callback to be rejected")
+
+
+def test_oidc_callback_enters_role_page_despite_legacy_password_flag(monkeypatch):
+    from types import SimpleNamespace
+    from starlette.requests import Request
+
+    monkeypatch.setattr(
+        auth_router, "get_settings",
+        lambda: SimpleNamespace(oidc_enabled=True, web_base_path="/studyagent/"),
+    )
+    monkeypatch.setattr(
+        oidc_service, "exchange_code_for_claims",
+        lambda *args, **kwargs: ({"preferred_username": "student001"}, "id-token"),
+    )
+    request = Request({
+        "type": "http",
+        "headers": [(b"cookie", b"studyagent_oidc_state=valid; studyagent_oidc_verifier=verifier")],
+    })
+    for role, destination in [("student", "student"), ("teacher", "admin"), ("admin", "admin")]:
+        monkeypatch.setattr(
+            oidc_service, "issue_local_tokens_for_claims",
+            lambda *args, **kwargs: {
+                "access_token": "access", "refresh_token": "refresh",
+                "must_change_password": True, "role": role,
+            },
+        )
+        response = auth_router.oidc_callback("code", "valid", request, db=None)
+        body = response.body.decode()
+        assert f"location.replace('/studyagent/{destination}')" in body
+        assert "location.replace('/studyagent/login')" not in body
+        assert 'localStorage.setItem("studyagent-access-token"' in body
