@@ -186,6 +186,7 @@ function toggleSidebar() {
       <div class="sidebar-body">
         <div class="sidebar-head">
           <div class="sidebar-brand">
+            <a class="toolbox-link" href="http://10.50.159.62/platform/" aria-label="于博的工具箱，返回功能选择目录页"><span>于博的</span><span>工具箱</span></a>
             <p class="eyebrow" role="img" aria-label="StudyAgent">
               <span class="sidebar-brand-name" aria-hidden="true">StudyAgent</span>
               <span class="sidebar-brand-mark" aria-hidden="true">SA</span>
