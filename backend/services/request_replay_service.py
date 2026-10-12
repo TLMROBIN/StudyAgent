@@ -38,6 +38,7 @@ class RequestReplayService:
         image_sha256: str | None = None,
         llm_model: str | None = None,
         requested_role_id: int | None = None,
+        deep_reasoning: bool = False,
     ) -> str:
         payload = {
             "subject": subject.strip(),
@@ -47,6 +48,8 @@ class RequestReplayService:
             "llm_model": (llm_model or "").strip(),
             "requested_role_id": requested_role_id,
         }
+        if deep_reasoning:
+            payload["deep_reasoning"] = True
         return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     def load(self, *, user_id: int, request_id: str | None) -> RequestReplayState | None:

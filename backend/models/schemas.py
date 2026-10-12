@@ -221,6 +221,7 @@ class ChatRequest(BaseModel):
     conversation_id: int | None = None
     request_id: str | None = None
     llm_model: str | None = Field(default=None, max_length=64)
+    deep_reasoning: bool = False
     role_id: int | None = Field(default=None, gt=0)
 
 
@@ -237,6 +238,7 @@ class ChatModelOptionRead(BaseModel):
     key: str
     name: str
     description: str
+    supports_deep_reasoning: bool = False
     billing_mode: Literal["request_count", "token_usage", "free_local"] = "request_count"
     quota: ChatModelQuotaRead = Field(default_factory=ChatModelQuotaRead)
 

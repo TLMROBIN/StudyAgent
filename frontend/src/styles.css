@@ -2581,3 +2581,34 @@ textarea {
 .app-sidebar .toolbox-link:hover { background: #34475c; }
 .app-sidebar--collapsed .toolbox-link { display: flex; flex-direction: column; padding: 8px 2px; }
 .login-hero > .toolbox-link { margin-bottom: 16px; }
+.deep-reasoning-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  flex-wrap: wrap;
+  cursor: pointer;
+}
+.deep-reasoning-control input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary, #0f766e);
+}
+.deep-reasoning-control .composer-helper { display: inline; }
+.reasoning-progress {
+  margin: 8px 0 12px;
+  color: var(--muted, #617287);
+  font-size: 14px;
+}
+.reasoning-progress summary {
+  min-height: 44px;
+  display: list-item;
+  cursor: pointer;
+  line-height: 44px;
+}
+.reasoning-progress__body {
+  max-height: 140px;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+.reasoning-progress__body p { margin: 0 0 8px; }
