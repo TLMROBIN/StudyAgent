@@ -279,16 +279,19 @@ function renderInlineMarkdown(text: string, mathHtml: string[], options: RenderR
     .replace(/\*\*([^\n]+?)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^\n]+?)__/g, '<strong>$1</strong>')
     .replace(/~~([^\n]+?)~~/g, '<del>$1</del>')
+    // Convert text line breaks before restoring HTML: KaTeX SVG paths contain
+    // newlines that must remain intact (notably the radical in \sqrt).
+    .replace(/\n/g, '<br>')
 
   return restoreMathPlaceholders(restoreInlinePlaceholders(html, inlineHtml), mathHtml)
 }
 
 function renderParagraph(lines: string[], mathHtml: string[], options: RenderRichTextOptions): string {
-  return `<p>${renderInlineMarkdown(lines.join('\n'), mathHtml, options).replace(/\n/g, '<br>')}</p>`
+  return `<p>${renderInlineMarkdown(lines.join('\n'), mathHtml, options)}</p>`
 }
 
 function renderListItem(lines: string[], mathHtml: string[], options: RenderRichTextOptions): string {
-  return `<li>${renderInlineMarkdown(lines.join('\n'), mathHtml, options).replace(/\n/g, '<br>')}</li>`
+  return `<li>${renderInlineMarkdown(lines.join('\n'), mathHtml, options)}</li>`
 }
 
 function splitTableCells(line: string): string[] {
