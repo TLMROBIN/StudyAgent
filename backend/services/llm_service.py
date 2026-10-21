@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from base64 import b64encode
@@ -10,6 +11,7 @@ from time import monotonic
 from typing import AsyncIterator, Literal
 
 import httpx
+from anyio import CancelScope
 
 from backend.config import get_settings
 from backend.database import SessionLocal
@@ -35,6 +37,20 @@ NO_IMAGE_RECEIVED_PATTERNS = [
         r"图片.*(?:未|没有|没)提供",
     ]
 ]
+
+
+@asynccontextmanager
+async def closing_llm_stream(stream):
+    """Propagate early exits through nested generators to the pooled response.
+
+    A disconnect cancels the surrounding AnyIO scope; network cleanup must still
+    finish before another request can reuse the pool slot.
+    """
+    try:
+        yield stream
+    finally:
+        with CancelScope(shield=True):
+            await stream.aclose()
 
 
 def _partial_tag_suffix_length(text: str, tag: str) -> int:
@@ -614,9 +630,10 @@ class LLMService:
         *,
         model_key: str | None = None,
     ) -> AsyncIterator[str]:
-        async for event in self.stream_events(messages, fallback_text, model_key=model_key):
-            if event.type == "chunk":
-                yield event.content
+        async with closing_llm_stream(self.stream_events(messages, fallback_text, model_key=model_key)) as stream:
+            async for event in stream:
+                if event.type == "chunk":
+                    yield event.content
 
     async def stream_events(
         self,
@@ -639,42 +656,44 @@ class LLMService:
                 pending_usage_events: list[LLMStreamEvent] = []
                 stream_func = getattr(self._stream_openai_compatible, "__func__", None)
                 if stream_func is not LLMService._stream_openai_compatible:
-                    async for chunk in self._stream_openai_compatible(provider, messages):
-                        if not chunk:
-                            continue
-                        yielded_text = True
-                        yield LLMStreamEvent(
-                            type="chunk",
-                            content=chunk,
-                            provider_name=provider.name,
-                            provider_model=provider.model,
-                        )
+                    async with closing_llm_stream(self._stream_openai_compatible(provider, messages)) as stream:
+                        async for chunk in stream:
+                            if not chunk:
+                                continue
+                            yielded_text = True
+                            yield LLMStreamEvent(
+                                type="chunk",
+                                content=chunk,
+                                provider_name=provider.name,
+                                provider_model=provider.model,
+                            )
                 else:
-                    async for event in self._stream_openai_compatible_events(
+                    async with closing_llm_stream(self._stream_openai_compatible_events(
                         provider,
                         messages,
                         max_completion_tokens=max_completion_tokens,
                         temperature=temperature,
                         top_p=top_p,
                         deep_reasoning=deep_reasoning,
-                    ):
-                        if event.type == "reasoning_progress":
-                            yield event
-                            continue
-                        if event.type == "usage":
-                            if yielded_text:
+                    )) as stream:
+                        async for event in stream:
+                            if event.type == "reasoning_progress":
                                 yield event
-                            else:
-                                pending_usage_events.append(event)
-                            continue
-                        if not event.content:
-                            continue
-                        yielded_text = True
-                        yield event
-                        if pending_usage_events:
-                            for usage_event in pending_usage_events:
-                                yield usage_event
-                            pending_usage_events.clear()
+                                continue
+                            if event.type == "usage":
+                                if yielded_text:
+                                    yield event
+                                else:
+                                    pending_usage_events.append(event)
+                                continue
+                            if not event.content:
+                                continue
+                            yielded_text = True
+                            yield event
+                            if pending_usage_events:
+                                for usage_event in pending_usage_events:
+                                    yield usage_event
+                                pending_usage_events.clear()
                 if yielded_text:
                     self._reset_provider(provider)
                     return
@@ -783,9 +802,10 @@ class LLMService:
             provider.open_until = datetime.now(UTC) + timedelta(seconds=self.settings.llm_circuit_breaker_seconds)
 
     async def _stream_openai_compatible(self, provider: ProviderState, messages: list[dict[str, str]]):
-        async for event in self._stream_openai_compatible_events(provider, messages):
-            if event.type == "chunk":
-                yield event.content
+        async with closing_llm_stream(self._stream_openai_compatible_events(provider, messages)) as stream:
+            async for event in stream:
+                if event.type == "chunk":
+                    yield event.content
 
     async def _stream_openai_compatible_events(
         self,
@@ -820,54 +840,60 @@ class LLMService:
         finish_reasons: list[str] = []
         client = await self._get_chat_http_client()
         async with client.stream("POST", url, headers=headers, json=payload) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                payload = json.loads(data)
-                raw_event_count += 1
-                usage = self._parse_usage(payload)
-                if usage is not None:
-                    usage_event_count += 1
-                    yield LLMStreamEvent(
-                        type="usage",
-                        usage=usage,
-                        provider_name=provider.name,
-                        provider_model=provider.model,
-                    )
-                    continue
-                choice = payload.get("choices", [{}])[0]
-                finish_reason = choice.get("finish_reason")
-                if finish_reason:
-                    finish_reasons.append(str(finish_reason))
-                delta = _content_text(choice.get("delta", {}).get("content"))
-                message_content = _content_text(choice.get("message", {}).get("content"))
-                reasoning_content = _content_text(choice.get("delta", {}).get("reasoning")) or _content_text(
-                    choice.get("delta", {}).get("reasoning_content")
-                )
-                if reasoning_content:
-                    reasoning_event_count += 1
-                    if deep_reasoning and (reasoning_event_count == 1 or reasoning_event_count % 20 == 0):
-                        # Report activity only; internal reasoning may contain
-                        # answers or unsafe material and never reaches the SSE.
-                        yield LLMStreamEvent(type="reasoning_progress", content="正在深入分析题目，回复准备好后会继续引导你。")
-                text = delta or message_content
-                if text and emitted_text and text.startswith(emitted_text):
-                    text = text[len(emitted_text) :]
-                if text:
-                    content_event_count += 1
-                    visible_text = content_filter.feed(text)
-                    if visible_text:
-                        emitted_text += visible_text
+            try:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    payload = json.loads(data)
+                    raw_event_count += 1
+                    usage = self._parse_usage(payload)
+                    if usage is not None:
+                        usage_event_count += 1
                         yield LLMStreamEvent(
-                            type="chunk",
-                            content=visible_text,
+                            type="usage",
+                            usage=usage,
                             provider_name=provider.name,
                             provider_model=provider.model,
                         )
+                        continue
+                    choice = payload.get("choices", [{}])[0]
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason:
+                        finish_reasons.append(str(finish_reason))
+                    delta = _content_text(choice.get("delta", {}).get("content"))
+                    message_content = _content_text(choice.get("message", {}).get("content"))
+                    reasoning_content = _content_text(choice.get("delta", {}).get("reasoning")) or _content_text(
+                        choice.get("delta", {}).get("reasoning_content")
+                    )
+                    if reasoning_content:
+                        reasoning_event_count += 1
+                        if deep_reasoning and (reasoning_event_count == 1 or reasoning_event_count % 20 == 0):
+                            # Report activity only; internal reasoning may contain
+                            # answers or unsafe material and never reaches the SSE.
+                            yield LLMStreamEvent(type="reasoning_progress", content="正在深入分析题目，回复准备好后会继续引导你。")
+                    text = delta or message_content
+                    if text and emitted_text and text.startswith(emitted_text):
+                        text = text[len(emitted_text) :]
+                    if text:
+                        content_event_count += 1
+                        visible_text = content_filter.feed(text)
+                        if visible_text:
+                            emitted_text += visible_text
+                            yield LLMStreamEvent(
+                                type="chunk",
+                                content=visible_text,
+                                provider_name=provider.name,
+                                provider_model=provider.model,
+                            )
+            finally:
+                # Close before httpx marks the response closed: a cancelled
+                # disconnect scope must not interrupt the actual socket release.
+                with CancelScope(shield=True):
+                    await response.aclose()
 
         final_visible_text = content_filter.flush()
         if final_visible_text:

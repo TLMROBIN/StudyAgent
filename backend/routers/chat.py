@@ -11,6 +11,7 @@ import re
 from time import perf_counter
 from typing import Any
 
+from anyio import CancelScope
 from fastapi import APIRouter, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
@@ -54,7 +55,7 @@ from backend.services.chat_attachment_service import StoredChatAttachment, chat_
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import FilterDecision, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
-from backend.services.llm_service import LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, llm_service
+from backend.services.llm_service import LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
 from backend.services.metrics_service import (
     chat_fact_mode_total,
     chat_first_token_seconds,
@@ -219,10 +220,11 @@ async def _stream_llm_events(
 ):
     stream_response_func = getattr(llm_service.stream_response, "__func__", None)
     if stream_response_func is not LLMService.stream_response:
-        async for chunk in _stream_llm_response(messages, fallback_text, model_key=model_key):
-            yield LLMStreamEvent(type="chunk", content=chunk)
+        async with closing_llm_stream(_stream_llm_response(messages, fallback_text, model_key=model_key)) as stream:
+            async for chunk in stream:
+                yield LLMStreamEvent(type="chunk", content=chunk)
         return
-    async for event in llm_service.stream_events(
+    async with closing_llm_stream(llm_service.stream_events(
         messages,
         fallback_text,
         model_key=model_key,
@@ -230,8 +232,9 @@ async def _stream_llm_events(
         temperature=temperature,
         top_p=top_p,
         deep_reasoning=deep_reasoning,
-    ):
-        yield event
+    )) as stream:
+        async for event in stream:
+            yield event
 
 
 def _subject_llm_params(guidance_params: dict | None, subject: str) -> dict[str, float | int]:
@@ -2730,6 +2733,12 @@ async def stream_chat(
                 if stop_streaming:
                     break
 
+            # Release the provider response before sending done or starting the
+            # suggested-reply request, including after a safety rewrite.
+            if not disconnected:
+                await llm_stream.aclose()
+                llm_stream = None
+
             if mode_parser is not None and resolved_mode is None:
                 pending_buffer += mode_parser.flush()
                 resolved_mode = mode_parser.resolved_mode
@@ -2839,15 +2848,19 @@ async def stream_chat(
                     or incentive_grant.get("level_up")
                 ):
                     yield _sse_event("incentive", incentive_grant)
+        except (asyncio.CancelledError, GeneratorExit):
+            should_send_done = False
+            raise
         finally:
-            if pending_provider_event is not None:
-                pending_provider_event.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await pending_provider_event
-            if llm_stream is not None:
-                with suppress(Exception):
-                    await llm_stream.aclose()
-            await release_ticket_once()
+            with CancelScope(shield=True):
+                if pending_provider_event is not None:
+                    pending_provider_event.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await pending_provider_event
+                if llm_stream is not None:
+                    with suppress(Exception):
+                        await llm_stream.aclose()
+                await release_ticket_once()
 
             try:
                 if not turn_persisted:

@@ -3247,3 +3247,41 @@ def test_chat_router_wires_subject_llm_params_into_stream_call():
     assert 'top_p=subject_llm_params.get("top_p")' in source
     # 学科 max_tokens 与配额取 min，不放大配额
     assert "min(candidate_max_tokens)" in source
+
+
+def test_safety_rewrite_closes_provider_before_done(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    closed = []
+
+    async def unsafe_stream(messages, fallback_text, **kwargs):
+        try:
+            yield "最终答案是42。"
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            closed.append(True)
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", unsafe_stream)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+    session = session_factory()
+    try:
+        async def run():
+            response = await chat_router.stream_chat(
+                ChatRequest(subject="物理", message="圆周运动的合力方向如何判断"),
+                session, current_user, FakeRequest(),
+            )
+            body = response.body_iterator
+            try:
+                async for frame in body:
+                    if "event: done" in frame:
+                        assert closed == [True]
+                        assert "42" not in frame
+                        return
+                pytest.fail("Expected a safe completed response")
+            finally:
+                await body.aclose()
+        asyncio.run(run())
+    finally:
+        session.close()

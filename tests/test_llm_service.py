@@ -186,6 +186,9 @@ def test_stream_parser_reads_final_message_content_chunk(monkeypatch):
     ]
 
     class FakeStreamResponse:
+        async def aclose(self):
+            pass
+
         def raise_for_status(self):
             return None
 
@@ -239,6 +242,9 @@ def test_stream_parser_handles_cumulative_delta_content(monkeypatch):
     ]
 
     class FakeStreamResponse:
+        async def aclose(self):
+            pass
+
         def raise_for_status(self):
             return None
 
@@ -294,6 +300,9 @@ def test_stream_events_emit_chunks_and_final_usage(monkeypatch):
     captured_payloads: list[dict] = []
 
     class FakeStreamResponse:
+        async def aclose(self):
+            pass
+
         def raise_for_status(self):
             return None
 
@@ -728,6 +737,9 @@ def test_stream_events_pass_subject_llm_params_to_payload(monkeypatch):
     captured_payloads: list[dict] = []
 
     class FakeStreamResponse:
+        async def aclose(self):
+            pass
+
         def raise_for_status(self):
             return None
 
@@ -779,3 +791,103 @@ def test_stream_events_pass_subject_llm_params_to_payload(monkeypatch):
     asyncio.run(run_once())
     assert captured_payloads[-1]["temperature"] == 0.3
     assert "top_p" not in captured_payloads[-1]
+
+
+@pytest.mark.parametrize("layer", ["events", "text", "provider", "router"])
+@pytest.mark.parametrize("termination", ["close", "cancel_scope_close", "cancel_pending"])
+def test_stream_early_close_releases_http_response_before_return(monkeypatch, layer, termination):
+    """Stopping an outer generator must close the actual HTTP response immediately."""
+    import anyio
+    from backend.routers import chat as chat_router
+
+    async def run():
+        closed = []
+
+        class OpenResponse(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield 'data: {"choices":[{"delta":{"content":"先判断受力方向。"}}]}\n\n'.encode()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                # Real network close needs an await, including inside a cancelled
+                # Starlette/AnyIO disconnect scope.
+                await asyncio.sleep(0)
+                closed.append(True)
+
+        service = LLMService()
+        provider = ProviderState(name="test", model="test", base_url="https://example.test", api_key="secret")
+        monkeypatch.setattr(service, "_providers_for_chat_model", lambda key: [provider])
+        monkeypatch.setattr(chat_router, "llm_service", service)
+        service._chat_http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=OpenResponse()))
+        )
+        if layer == "events":
+            stream = service.stream_events([], "fallback")
+        elif layer == "text":
+            stream = service.stream_response([], "fallback")
+        elif layer == "provider":
+            stream = service._stream_openai_compatible(provider, [])
+        else:
+            stream = chat_router._stream_llm_events([], "fallback", model_key=service.normalize_chat_model_key(None))
+        try:
+            with anyio.CancelScope() as scope:
+                await anext(stream)
+                if termination == "cancel_pending":
+                    with anyio.move_on_after(0.01):
+                        await anext(stream)
+                else:
+                    if termination == "cancel_scope_close":
+                        scope.cancel()
+                    await stream.aclose()
+            assert closed == [True]
+        finally:
+            await service.aclose()
+
+    asyncio.run(run())
+
+
+def test_early_stop_returns_real_single_connection_pool_slot(monkeypatch):
+    """A one-slot TCP pool remains usable across repeated incomplete streams."""
+    from backend.routers import chat as chat_router
+
+    async def run():
+        writers = set()
+
+        async def serve(reader, writer):
+            writers.add(writer)
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                body = 'data: {"choices":[{"delta":{"content":"先判断条件。"}}]}\n\n'.encode()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                writer.write(f"{len(body):x}\r\n".encode() + body + b"\r\n")
+                await writer.drain()
+                # Never finish the response. Early client cleanup must release it.
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                writers.discard(writer)
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        service = LLMService()
+        provider = ProviderState(name="test", model="test", base_url=f"http://127.0.0.1:{port}", api_key="secret")
+        monkeypatch.setattr(service, "_providers_for_chat_model", lambda key: [provider])
+        monkeypatch.setattr(chat_router, "llm_service", service)
+        service._chat_http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=1), timeout=httpx.Timeout(1, pool=0.05), trust_env=False,
+        )
+        try:
+            for _ in range(8):
+                stream = chat_router._stream_llm_events([], "fallback", model_key=service.normalize_chat_model_key(None))
+                event = await asyncio.wait_for(anext(stream), 1)
+                assert event.content == "先判断条件。"
+                await stream.aclose()
+        finally:
+            await service.aclose()
+            server.close()
+            await server.wait_closed()
+            for writer in list(writers):
+                writer.close()
+
+    asyncio.run(run())
