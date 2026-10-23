@@ -15,5 +15,43 @@
     "total": 1
   },
   "external_service_design": "preserved by user instruction",
-  "production": "pending verification"
+  "production": {
+    "code_sha": "cff4bc2459054969e8e96d2975285b606eeea104",
+    "migration_revision": "20261023_0021",
+    "provider_accounts": 3,
+    "plaintext_provider_rows": 0,
+    "logical_data_unchanged": true,
+    "integrity": "ok",
+    "foreign_key_violations": 0,
+    "vacuum_and_wal_checkpoint": true,
+    "backup": "protected server .codex-backups/security-20261023T020104Z",
+    "grafana_password_rotated_and_authenticated": true,
+    "backend_worker_health": "healthy",
+    "lan_ports_blocked": [
+      8002,
+      9090,
+      3001
+    ],
+    "gateway_login_status": 200,
+    "gateway_entry_assets_200": 6,
+    "teacher_out_of_class_profile_status": 403,
+    "teacher_has_assigned_classes": true,
+    "live_chat": {
+      "synthetic_account_only": true,
+      "configured_model": "glm-5.3-flash-chat",
+      "http_status": 200,
+      "done": true,
+      "chunks": 9,
+      "fixed_fallback": false,
+      "duration_seconds": 6.59
+    },
+    "strict_deploy_gate": "passed; local HEAD, remote checkout, origin/main and GitHub main matched",
+    "ci": "Repository security passed on code commit",
+    "browser": "native browser tool timed out; not accepted as browser verification"
+  },
+  "remaining": [
+    "KaTeX low advisory (outside high-priority scope)",
+    "legacy SSH credential validity/rotation needs original host",
+    "shared Git history rewrite awaiting explicit approval"
+  ]
 }
