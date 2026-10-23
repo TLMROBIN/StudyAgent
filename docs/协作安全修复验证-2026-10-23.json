@@ -51,7 +51,25 @@
   },
   "remaining": [
     "KaTeX low advisory (outside high-priority scope)",
-    "legacy SSH credential validity/rotation needs original host",
-    "shared Git history rewrite awaiting explicit approval"
-  ]
+    "legacy SSH password owner/validity/rotation unverified; known alias public-key-only connection timed out",
+    "GitHub caches and preexisting external clones cannot be revoked by branch rewriting"
+  ],
+  "history_cleanup": {
+    "date": "2026-10-23",
+    "remote_branches_checked": 8,
+    "rewritten_branches": [
+      "refs/heads/feat/subject-differentiated-guidance",
+      "refs/heads/main"
+    ],
+    "fresh_github_clone_reachable_blobs": 1292,
+    "credential_pattern_hits": 0,
+    "main_tree_unchanged": true,
+    "pull_refs_reported_by_git": 0,
+    "repository_public": true,
+    "limitations": [
+      "finite pattern scan only",
+      "does not revoke existing clones or prove GitHub cache erasure",
+      "legacy SSH password not verified or rotated"
+    ]
+  }
 }
