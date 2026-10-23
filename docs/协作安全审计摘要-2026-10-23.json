@@ -1,0 +1,363 @@
+{
+  "date": "2026-10-23",
+  "head": "6aee7f6cb4701ebf6ff9072e392471e41f28d8da",
+  "scope": "local source and synthetic checks; no production verification",
+  "tests": {
+    "command": ".venv/bin/python -m pytest tests/test_security.py tests/test_admin_stats.py tests/test_filter.py tests/test_socratic.py -q",
+    "passed": 79,
+    "duration_seconds": 4.42
+  },
+  "reproductions": [
+    {
+      "case": "teacher_reads_student_outside_assigned_class",
+      "expected_status": [
+        403,
+        404
+      ],
+      "actual_status": 200,
+      "data": "synthetic in-memory SQLite"
+    },
+    {
+      "case": "nonacademic_travel_question_with_declared_physics",
+      "actual_allowed": true
+    }
+  ],
+  "git_pattern_scan": {
+    "reachable_blobs_scanned": 1372,
+    "high_confidence_format_hits": 0,
+    "limitations": "limited token formats only; manual review found credential text in tracked AGENTS.md"
+  },
+  "npm_audit": {
+    "command": "npm audit --omit=dev --json",
+    "exit_code": 1,
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 1,
+        "moderate": 1,
+        "high": 9,
+        "critical": 0,
+        "total": 11
+      },
+      "dependencies": {
+        "prod": 86,
+        "dev": 91,
+        "optional": 52,
+        "peer": 0,
+        "peerOptional": 0,
+        "total": 176
+      }
+    },
+    "packages": [
+      {
+        "name": "@vue/server-renderer",
+        "severity": "high",
+        "direct": false,
+        "range": "<=3.5.41",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "@vue/server-renderer: XSS via missing CR in attribute-name blacklist",
+            "url": "https://github.com/advisories/GHSA-g2v6-rqmx-r4w6"
+          }
+        ]
+      },
+      {
+        "name": "axios",
+        "severity": "high",
+        "direct": true,
+        "range": "1.0.0 - 1.19.0",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "Axios has a NO_PROXY Hostname Normalization Bypass that Leads to SSRF",
+            "url": "https://github.com/advisories/GHSA-3p68-rc4w-qgx5"
+          },
+          {
+            "title": "Axios: Authentication Bypass via Prototype Pollution Gadget in `validateStatus` Merge Strategy",
+            "url": "https://github.com/advisories/GHSA-w9j2-pvgh-6h63"
+          },
+          {
+            "title": "Axios: Incomplete Fix for CVE-2025-62718 — NO_PROXY Protection Bypassed via RFC 1122 Loopback Subnet (127.0.0.0/8) in Axios 1.15.0",
+            "url": "https://github.com/advisories/GHSA-pmwg-cvhr-8vh7"
+          },
+          {
+            "title": "Axios: Invisible JSON Response Tampering via Prototype Pollution Gadget in `parseReviver`",
+            "url": "https://github.com/advisories/GHSA-3w6x-2g7m-8v23"
+          },
+          {
+            "title": "Axios: Null Byte Injection via Reverse-Encoding in AxiosURLSearchParams",
+            "url": "https://github.com/advisories/GHSA-xhjh-pmcv-23jw"
+          },
+          {
+            "title": "Axios: CRLF Injection in multipart/form-data body via unsanitized blob.type in formDataToStream",
+            "url": "https://github.com/advisories/GHSA-445q-vr5w-6q77"
+          },
+          {
+            "title": "Axios: no_proxy bypass via IP alias allows SSRF",
+            "url": "https://github.com/advisories/GHSA-m7pr-hjqh-92cm"
+          },
+          {
+            "title": "Axios' HTTP adapter-streamed uploads bypass maxBodyLength when maxRedirects: 0",
+            "url": "https://github.com/advisories/GHSA-5c9x-8gcm-mpgx"
+          },
+          {
+            "title": "Axios: HTTP adapter streamed responses bypass maxContentLength",
+            "url": "https://github.com/advisories/GHSA-vf2m-468p-8v99"
+          },
+          {
+            "title": "Axios: Prototype Pollution Gadgets - Response Tampering, Data Exfiltration, and Request Hijacking",
+            "url": "https://github.com/advisories/GHSA-pf86-5x62-jrwf"
+          },
+          {
+            "title": "Axios: Header Injection via Prototype Pollution",
+            "url": "https://github.com/advisories/GHSA-6chq-wfr3-2hj9"
+          },
+          {
+            "title": "Axios: XSRF Token Cross-Origin Leakage via Prototype Pollution Gadget in `withXSRFToken` Boolean Coercion",
+            "url": "https://github.com/advisories/GHSA-xx6v-rp6x-q39c"
+          },
+          {
+            "title": "Axios has prototype pollution read-side gadgets in HTTP adapter that allow credential injection and request hijacking",
+            "url": "https://github.com/advisories/GHSA-q8qp-cvcw-x6jj"
+          },
+          {
+            "title": "Axios has Unrestricted Cloud Metadata Exfiltration via Header Injection Chain",
+            "url": "https://github.com/advisories/GHSA-fvcv-3m26-pcqx"
+          },
+          {
+            "title": "Axios: unbounded recursion in toFormData causes DoS via deeply nested request data",
+            "url": "https://github.com/advisories/GHSA-62hf-57xw-28j9"
+          },
+          {
+            "title": "Axios: Regular Expression Denial of Service (ReDoS) via Cookie Name Injection",
+            "url": "https://github.com/advisories/GHSA-hfxv-24rg-xrqf"
+          },
+          {
+            "title": "Allocation of Resources Without Limits or Throttling in Axios",
+            "url": "https://github.com/advisories/GHSA-777c-7fjr-54vf"
+          },
+          {
+            "title": "Axios: Proxy-Authorization Credential Leak to Origin Server Across HTTP-to-HTTPS Redirect in Axios Node.js HTTP Adapter",
+            "url": "https://github.com/advisories/GHSA-p92q-9vqr-4j8v"
+          },
+          {
+            "title": "Axios: Proxy-Authorization header leaks to redirect target when proxy is re-evaluated to direct connection",
+            "url": "https://github.com/advisories/GHSA-j5f8-grm9-p9fc"
+          },
+          {
+            "title": "axios Vulnerable to Credential Theft and Response Hijacking via Prototype Pollution Gadget in Config Merge",
+            "url": "https://github.com/advisories/GHSA-3g43-6gmg-66jw"
+          },
+          {
+            "title": "axios Vulnerable to Full Man-in-the-Middle via Prototype Pollution Gadget in `config.proxy`",
+            "url": "https://github.com/advisories/GHSA-35jp-ww65-95wh"
+          },
+          {
+            "title": "axios has DoS & Header Injection via Prototype Pollution Read-Side Gadgets in axios merge functions",
+            "url": "https://github.com/advisories/GHSA-898c-q2cr-xwhg"
+          },
+          {
+            "title": "Axios: Prototype pollution gadgets can alter axios request construction",
+            "url": "https://github.com/advisories/GHSA-mmx7-hfxf-jppx"
+          },
+          {
+            "title": "Axios: Deep formToJSON Key Recursion Can Cause Denial of Service",
+            "url": "https://github.com/advisories/GHSA-pmv8-rq9r-6j72"
+          },
+          {
+            "title": "Axios: HTTP/2 streamed uploads bypass `maxBodyLength`",
+            "url": "https://github.com/advisories/GHSA-mwf2-3pr3-8698"
+          },
+          {
+            "title": "Axios: Nested axios option objects can consume polluted prototype values",
+            "url": "https://github.com/advisories/GHSA-7q8q-rj6j-mhjq"
+          },
+          {
+            "title": "Axios: Fetch adapter `ReadableStream` uploads bypass `maxBodyLength`",
+            "url": "https://github.com/advisories/GHSA-jqh4-m9w3-8hp9"
+          },
+          {
+            "title": "Axios: Excessive recursion in formDataToJSON can cause denial of service",
+            "url": "https://github.com/advisories/GHSA-42h9-826w-cgv3"
+          },
+          {
+            "title": "Axios: Prototype pollution gadget in fetch adapter can alter outbound requests",
+            "url": "https://github.com/advisories/GHSA-vh66-26gq-q6x8"
+          },
+          {
+            "title": "Axios: Prototype-Pollution Gadget in the Default Instance Allows Inherited Object.prototype.method to Override HTTP Method",
+            "url": "https://github.com/advisories/GHSA-9fr6-4gfg-395g"
+          },
+          {
+            "title": "Axios: HTTP/2 adapter bypasses configured DNS lookup and proxy controls",
+            "url": "https://github.com/advisories/GHSA-3pq3-5fj3-cg6v"
+          },
+          {
+            "title": "Axios: Denial of Service via Unhandled 'error' Event in HTTP/2 ClientHttp2Session Initialization",
+            "url": "https://github.com/advisories/GHSA-542g-h47m-68v8"
+          },
+          {
+            "title": "Axios: Header Injection via Inherited headers After Minimal Interceptor",
+            "url": "https://github.com/advisories/GHSA-j8rh-479h-cp32"
+          },
+          {
+            "title": "Axios: Fetch Adapter Header Injection via Inherited FormData getHeaders",
+            "url": "https://github.com/advisories/GHSA-4hqw-qxg8-jxx2"
+          }
+        ]
+      },
+      {
+        "name": "follow-redirects",
+        "severity": "moderate",
+        "direct": false,
+        "range": "<=1.15.11",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "follow-redirects leaks Custom Authentication Headers to Cross-Domain Redirect Targets",
+            "url": "https://github.com/advisories/GHSA-r4q5-vmmm-2653"
+          }
+        ]
+      },
+      {
+        "name": "form-data",
+        "severity": "high",
+        "direct": false,
+        "range": "4.0.0 - 4.0.5",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "form-data: CRLF injection in form-data via unescaped multipart field names and filenames",
+            "url": "https://github.com/advisories/GHSA-hmw2-7cc7-3qxx"
+          }
+        ]
+      },
+      {
+        "name": "katex",
+        "severity": "low",
+        "direct": true,
+        "range": "0.11.0 - 0.18.1",
+        "fix_available": {
+          "name": "katex",
+          "version": "0.19.0",
+          "isSemVerMajor": true
+        },
+        "advisories": [
+          {
+            "title": "KaTeX: Existing prototype pollution can bypass trust restrictions",
+            "url": "https://github.com/advisories/GHSA-238p-pmpm-9mq7"
+          }
+        ]
+      },
+      {
+        "name": "lodash",
+        "severity": "high",
+        "direct": false,
+        "range": "<=4.17.23",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "lodash vulnerable to Code Injection via `_.template` imports key names",
+            "url": "https://github.com/advisories/GHSA-r5fr-rjxr-66jc"
+          },
+          {
+            "title": "lodash vulnerable to Prototype Pollution via array path bypass in `_.unset` and `_.omit`",
+            "url": "https://github.com/advisories/GHSA-f23m-r3pf-42rh"
+          }
+        ]
+      },
+      {
+        "name": "lodash-es",
+        "severity": "high",
+        "direct": false,
+        "range": "<=4.17.23",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "lodash vulnerable to Code Injection via `_.template` imports key names",
+            "url": "https://github.com/advisories/GHSA-r5fr-rjxr-66jc"
+          },
+          {
+            "title": "lodash vulnerable to Prototype Pollution via array path bypass in `_.unset` and `_.omit`",
+            "url": "https://github.com/advisories/GHSA-f23m-r3pf-42rh"
+          }
+        ]
+      },
+      {
+        "name": "nanoid",
+        "severity": "high",
+        "direct": false,
+        "range": "<=3.3.17",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "nanoid: non-secure generators can loop indefinitely with negative size",
+            "url": "https://github.com/advisories/GHSA-28wg-ghj8-5hjv"
+          },
+          {
+            "title": "nanoid: custom generators can loop indefinitely when size is zero",
+            "url": "https://github.com/advisories/GHSA-2v37-7h3g-55p8"
+          },
+          {
+            "title": "nanoid: Integer Overflow or Wraparound",
+            "url": "https://github.com/advisories/GHSA-xwg4-73v4-xw9w"
+          }
+        ]
+      },
+      {
+        "name": "postcss",
+        "severity": "high",
+        "direct": false,
+        "range": "<=8.5.22",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "PostCSS has XSS via Unescaped </style> in its CSS Stringify Output",
+            "url": "https://github.com/advisories/GHSA-qx2v-qp2m-jg93"
+          },
+          {
+            "title": "PostCSS: Arbitrary file read and information disclosure via attacker-controlled sourceMappingURL in CSS comments",
+            "url": "https://github.com/advisories/GHSA-6g55-p6wh-862q"
+          },
+          {
+            "title": "PostCSS: incomplete fix of GHSA-6g55-p6wh-862q — attacker-controlled sourceMappingURL reads arbitrary .map files when `from` is unset",
+            "url": "https://github.com/advisories/GHSA-fxqj-rqcc-2cmp"
+          },
+          {
+            "title": "PostCSS: Path Traversal in Previous Source Map Auto-Loading (sourceMappingURL) leads to Arbitrary .map File Disclosure",
+            "url": "https://github.com/advisories/GHSA-r28c-9q8g-f849"
+          }
+        ]
+      },
+      {
+        "name": "source-map-js",
+        "severity": "high",
+        "direct": false,
+        "range": "1.0.0 - 1.2.1",
+        "fix_available": true,
+        "advisories": [
+          {
+            "title": "source-map-js allows event-loop denial of service through indexed source-map section offsets",
+            "url": "https://github.com/advisories/GHSA-68fv-2mgg-jv7q"
+          }
+        ]
+      },
+      {
+        "name": "vue",
+        "severity": "high",
+        "direct": true,
+        "range": "3.2.13 - 3.5.41",
+        "fix_available": true,
+        "advisories": []
+      }
+    ]
+  },
+  "not_verified": [
+    "production services and firewall",
+    "repository remote visibility and branch protection",
+    "Python dependency CVEs",
+    "container CVEs",
+    "external provider data terms"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-23",
+  "local_tests": {
+    "passed": 631,
+    "seconds": 12.04
+  },
+  "frontend_build": "passed",
+  "compileall": "passed",
+  "npm_all_dependencies": {
+    "info": 0,
+    "low": 1,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0,
+    "total": 1
+  },
+  "external_service_design": "preserved by user instruction",
+  "production": "pending verification"
+}

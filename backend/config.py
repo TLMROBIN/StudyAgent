@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +11,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = Field(default="StudyAgent API", alias="APP_NAME")
@@ -19,7 +20,9 @@ class Settings(BaseSettings):
     web_base_path: str = Field(default="/", alias="WEB_BASE_PATH")
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")
 
-    jwt_secret_key: str = Field(default="studyagent-dev-secret", alias="JWT_SECRET_KEY")
+    jwt_secret_key: str = Field(default="studyagent-dev-secret", alias="JWT_SECRET_KEY", repr=False)
+    data_encryption_key: str | None = Field(default=None, alias="DATA_ENCRYPTION_KEY", repr=False)
+    data_encryption_key_file: str = Field(default="data/secrets/provider.key", alias="DATA_ENCRYPTION_KEY_FILE")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(default=30, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
@@ -155,6 +158,25 @@ class Settings(BaseSettings):
     default_semester: str = Field(default="2025-2026-2", alias="DEFAULT_SEMESTER")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: str = Field(default="json", alias="LOG_FORMAT")
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self):
+        if self.app_env.lower() not in {"production", "prod"}:
+            return self
+        if len(self.jwt_secret_key.strip()) < 32 or self.jwt_secret_key in {"studyagent-dev-secret", "change-me"}:
+            raise ValueError("Production requires an independent JWT_SECRET_KEY of at least 32 characters")
+        if not self.data_encryption_key:
+            raise ValueError("Production requires DATA_ENCRYPTION_KEY; retain it separately from database backups")
+        if self.data_encryption_key == self.jwt_secret_key:
+            raise ValueError("DATA_ENCRYPTION_KEY must be independent of JWT_SECRET_KEY")
+        from cryptography.fernet import Fernet
+        try:
+            Fernet(self.data_encryption_key.encode("ascii"))
+        except (ValueError, UnicodeError):
+            raise ValueError("DATA_ENCRYPTION_KEY must be a valid Fernet key") from None
+        if self.bootstrap_admin_password in {"StudyAgent123", "change-me", ""}:
+            raise ValueError("Production requires a non-default BOOTSTRAP_ADMIN_PASSWORD")
+        return self
 
     @property
     def sqlalchemy_database_url(self) -> str:

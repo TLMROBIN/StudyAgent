@@ -72,6 +72,9 @@ def warmup_chat_image_ocr_worker() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     apply_runtime_schema_updates()
+    from backend.secret_storage import encrypt_legacy_provider_keys
+    with engine.begin() as connection:
+        encrypt_legacy_provider_keys(connection)
     session = SessionLocal()
     try:
         auth_service.seed_bootstrap_admin(session)

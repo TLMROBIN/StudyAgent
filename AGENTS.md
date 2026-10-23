@@ -59,7 +59,7 @@
 - **项目目录在中文路径下**：`/home/user/文档/trae_projects/StudyAgent/`，不是 `~/Projects/StudyAgent/`。远程 `cd ~/Projects/StudyAgent` 必失败。
 - **容器代码挂载宿主机**（`./:/app`），代码改动 `docker compose restart backend` 即可，无需 rebuild。
 - **后端 compose 内端口**：8002 → 8000（不是宿主机 8001 直跑那个）。宿主机 8001 是 `uvicorn` 单独起的另一份（dev 用），与容器无关。
-- **admin 账户在 DB 里**：id=1 username=`admin`。DB 里**没有** `binyu` 账户，远程 web 登录别用 `[removed credential]` 试（那是 SSH 凭据，不是 web 凭据）。
+- **admin 账户在 DB 里**：id=1 username=`admin`。DB 里**没有** `binyu` 账户，远程 web 登录别用 `SSH 账号密码` 试（SSH 身份与 Web 身份不同；凭据只保存在受控配置中）。
 
 ---
 

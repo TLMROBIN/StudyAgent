@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.base import TimestampMixin
+from backend.secret_storage import EncryptedSecret
 
 
 def _enum_values(enum_cls: type[Enum]) -> list[str]:
@@ -27,7 +28,7 @@ class LLMProviderAccount(TimestampMixin, Base):
     provider_name: Mapped[str] = mapped_column(String(64), index=True)
     display_name: Mapped[str] = mapped_column(String(64))
     base_url: Mapped[str] = mapped_column(String(255))
-    api_key: Mapped[str] = mapped_column(String(512))
+    api_key: Mapped[str] = mapped_column(EncryptedSecret())
     account_billing_type: Mapped[AccountBillingType] = mapped_column(
         SqlEnum(AccountBillingType, values_callable=_enum_values),
         default=AccountBillingType.PAY_AS_YOU_GO,

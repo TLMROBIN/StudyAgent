@@ -1,0 +1,25 @@
+name: Repository security
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  credentials-and-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject credential patterns and private artifacts
+        run: python3 scripts/check_no_credentials.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm audit --audit-level=high
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend

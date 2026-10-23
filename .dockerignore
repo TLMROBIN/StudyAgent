@@ -13,6 +13,16 @@ tests/__pycache__/
 .mypy_cache/
 .ruff_cache/
 .git/
+artifacts/
+.codex-backups/
+*.codex-backup-*
+*_benchmark_*.csv
+*_benchmark_*.json
+*_tmp*.py
+eval_matrix_*.csv
+eval_matrix_*.log
+content_judgment_*.csv
+content_judgment_*.json
 .DS_Store
 *.pyc
 *.pyo

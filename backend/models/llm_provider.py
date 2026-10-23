@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
 from backend.models.base import TimestampMixin
+from backend.secret_storage import EncryptedSecret
 
 
 class LLMProviderConfig(TimestampMixin, Base):
@@ -15,7 +16,7 @@ class LLMProviderConfig(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), index=True)
     base_url: Mapped[str] = mapped_column(String(255))
-    api_key: Mapped[str] = mapped_column(String(512))
+    api_key: Mapped[str] = mapped_column(EncryptedSecret())
     model: Mapped[str] = mapped_column(String(128))
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

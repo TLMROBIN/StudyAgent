@@ -4,10 +4,11 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse, Response
+from sqlalchemy import select
 
 from backend.dependencies import CurrentUser, DbSession
 from backend.models.schemas import ClassroomStat, StatsOverview, StudentPortrait, StudentProfile, UsageTrend
-from backend.models.user import UserRole
+from backend.models.user import User, UserRole, teacher_classes
 from backend.services.stats_service import stats_service
 from backend.time_utils import serialize_datetime_for_api
 
@@ -23,6 +24,18 @@ def overview(db: DbSession, current_user: CurrentUser) -> StatsOverview:
 def student_profile(student_id: int, db: DbSession, current_user: CurrentUser) -> StudentProfile:
     if current_user.role == UserRole.STUDENT and current_user.id != student_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+    if current_user.role == UserRole.TEACHER:
+        accessible = db.scalar(
+            select(User.id)
+            .join(teacher_classes, teacher_classes.c.classroom_id == User.classroom_id)
+            .where(
+                User.id == student_id,
+                User.role == UserRole.STUDENT,
+                teacher_classes.c.teacher_id == current_user.id,
+            )
+        )
+        if accessible is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
     return StudentProfile(**stats_service.student_profile(db, student_id))
 
 

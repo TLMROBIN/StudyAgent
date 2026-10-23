@@ -3,6 +3,8 @@
 > 生成于 2026-07-03，由 `tests/test_alembic_migrations.py` 对临时 SQLite 空库实测得出。
 > 该测试将下列清单固化为断言：新增/修复迁移后清单变化会导致测试失败，请同步更新两处。
 
+2026-10-23：新增 `20261023_0021`，为两张 provider 表加密 API key；SQLite 无 DDL，其他数据库将该列扩为 Text。升级幂等且保持密钥原值，回退需要保留匹配的 `DATA_ENCRYPTION_KEY` 并会恢复明文以兼容旧程序。生产先做 SQLite 在线备份和副本升级/回退/再升级核验；密钥与数据库分别保管。此迁移不改变下方旧迁移风险清单。
+
 ## 风险 1（高）：全新空库无法直接 `alembic upgrade head`
 
 `20260401_0001` 的 `upgrade()` 是 `Base.metadata.create_all(bind)`，它按**当前代码模型**建出全量
