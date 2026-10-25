@@ -325,11 +325,17 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
     assert "agent_roles" in _table_names(db_path)
     assert "student_incentive_events" in _table_names(db_path)
     assert "student_incentive_profiles" in _table_names(db_path)
+    assert "is_pinned" not in _column_names(db_path, "conversations")
+    assert "last_message_at" not in _column_names(db_path, "conversations")
+    # Credential rollback belongs specifically to 0021, no longer the latest revision.
+    command.downgrade(cfg, "20260716_0020")
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT api_key FROM llm_provider_configs WHERE id=1")) == secret
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
+    assert "is_pinned" in _column_names(db_path, "conversations")
+    assert "last_message_at" in _column_names(db_path, "conversations")
     assert "agent_role_revision_id" in _column_names(db_path, "messages"), "重新 upgrade 后角色消息列应被重建"
     assert "agent_roles" in _table_names(db_path), "重新 upgrade 后角色表应被重建"
     assert "student_incentive_events" in _table_names(db_path), "重新 upgrade 后激励流水表应被重建"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { normalizeSelectedImage } from '../utils/chatImageUpload'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 
@@ -31,6 +32,8 @@ const saving = ref(false)
 const content = ref('')
 const cameraInputRef = ref<HTMLInputElement | null>(null)
 const galleryInputRef = ref<HTMLInputElement | null>(null)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const preparingImages = ref(false)
 const selectedImages = ref<PendingFeedbackImage[]>([])
 const activeSection = ref<FeedbackSection>('feedback')
 const items = ref<StudentFeedbackItem[]>([])
@@ -173,32 +176,33 @@ function resetImageInputs() {
   }
 }
 
-function isImageFile(file: File): boolean {
-  return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name)
-}
-
-function addSelectedImages(event: Event) {
+async function addSelectedImages(event: Event) {
   const input = event.target as HTMLInputElement | null
   const files = Array.from(input?.files || [])
-  if (!files.length) {
-    return
-  }
-  const availableSlots = MAX_FEEDBACK_IMAGES - selectedImages.value.length
-  if (availableSlots <= 0) {
-    ElMessage.info(`每次最多上传 ${MAX_FEEDBACK_IMAGES} 张图片`)
+  if (input) input.value = ''
+  if (!files.length || preparingImages.value) return
+  preparingImages.value = true
+  try {
+    for (const file of files) {
+      if (selectedImages.value.length >= MAX_FEEDBACK_IMAGES) {
+        ElMessage.warning(`每次最多上传 ${MAX_FEEDBACK_IMAGES} 张图片`)
+        break
+      }
+      try {
+        const normalized = await normalizeSelectedImage(file)
+        selectedImages.value.push({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          file: normalized,
+          url: URL.createObjectURL(normalized),
+        })
+      } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '图片处理失败，请重试')
+      }
+    }
+  } finally {
+    preparingImages.value = false
     resetImageInputs()
-    return
   }
-  const imageFiles = files.filter(isImageFile).slice(0, availableSlots)
-  if (imageFiles.length < files.length) {
-    ElMessage.warning(`已忽略非图片文件或超过 ${MAX_FEEDBACK_IMAGES} 张的部分`)
-  }
-  selectedImages.value.push(...imageFiles.map((file) => ({
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    file,
-    url: URL.createObjectURL(file),
-  })))
-  resetImageInputs()
 }
 
 function removeSelectedImage(id: string) {
@@ -288,14 +292,16 @@ onMounted(() => {
           class="textarea"
           maxlength="1000"
           rows="6"
-          :disabled="saving || feedbackBanned || dailyRemaining <= 0"
+          :disabled="saving || preparingImages || feedbackBanned || dailyRemaining <= 0"
           placeholder="请描述你遇到的问题、建议或希望改进的地方"
         ></textarea>
         <div class="feedback-upload-row">
+          <input ref="fileInputRef" type="file" multiple style="display: none" @change="addSelectedImages" />
+          <button type="button" class="ghost-button" :disabled="saving || preparingImages || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES" @click="fileInputRef?.click()">从文件选择</button>
           <button
             class="ghost-button"
             type="button"
-            :disabled="saving || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES"
+            :disabled="saving || preparingImages || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES"
             @click="galleryInputRef?.click()"
           >
             相册
@@ -303,7 +309,7 @@ onMounted(() => {
           <button
             class="ghost-button"
             type="button"
-            :disabled="saving || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES"
+            :disabled="saving || preparingImages || feedbackBanned || dailyRemaining <= 0 || selectedImages.length >= MAX_FEEDBACK_IMAGES"
             @click="cameraInputRef?.click()"
           >
             拍照
@@ -327,7 +333,7 @@ onMounted(() => {
           <button
             class="primary-button"
             type="submit"
-            :disabled="saving || feedbackBanned || dailyRemaining <= 0"
+            :disabled="saving || preparingImages || feedbackBanned || dailyRemaining <= 0"
           >
             提交反馈
           </button>

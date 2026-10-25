@@ -56,8 +56,17 @@ def oidc_config() -> dict[str, bool | str]:
 
 @router.get("/oidc/login")
 def oidc_login() -> RedirectResponse:
+    return _oidc_redirect()
+
+
+@router.get("/oidc/change-password")
+def oidc_change_password() -> RedirectResponse:
+    return _oidc_redirect(change_password=True)
+
+
+def _oidc_redirect(*, change_password: bool = False) -> RedirectResponse:
     _ensure_oidc_enabled()
-    login_state = oidc_service.create_login_state()
+    login_state = oidc_service.create_login_state(change_password=True) if change_password else oidc_service.create_login_state()
     response = RedirectResponse(login_state["authorization_url"], status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         "studyagent_oidc_state",
@@ -165,6 +174,8 @@ def read_me(current_user: CurrentUser) -> UserRead:
 
 @router.post("/change-password", response_model=UserRead)
 def change_password(payload: PasswordChangeRequest, db: DbSession, current_user: CurrentUser) -> UserRead:
+    if get_settings().oidc_enabled:
+        raise HTTPException(status_code=409, detail="请通过统一身份平台修改密码")
     if not verify_password(payload.current_password, current_user.password_hash):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password incorrect")
     updated = auth_service.update_password(db, current_user, payload.new_password)

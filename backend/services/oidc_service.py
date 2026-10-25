@@ -39,7 +39,7 @@ class OidcService:
     def jwks_uri(self) -> str:
         return f"{self.settings.oidc_issuer.rstrip('/')}/protocol/openid-connect/certs"
 
-    def create_login_state(self) -> dict[str, str]:
+    def create_login_state(self, *, change_password: bool = False) -> dict[str, str]:
         verifier = secrets.token_urlsafe(48)
         challenge = _base64url(hashlib.sha256(verifier.encode("ascii")).digest())
         state = secrets.token_urlsafe(24)
@@ -52,6 +52,8 @@ class OidcService:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
+        if change_password:
+            params["kc_action"] = "UPDATE_PASSWORD"
         return {
             "state": state,
             "code_verifier": verifier,

@@ -74,6 +74,8 @@ class Conversation(TimestampMixin, Base):
     subject: Mapped[str] = mapped_column(String(32), index=True)
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
     deleted_by_student_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     active_practice: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -167,3 +169,14 @@ def _cleanup_chat_attachment_file(_mapper, _connection, target: ChatMessageAttac
 
 if TYPE_CHECKING:
     from backend.models.user import User
+
+
+@event.listens_for(Message, "after_insert")
+def _touch_conversation_activity(_mapper, connection, message: Message) -> None:
+    table = Conversation.__table__
+    connection.execute(
+        table.update()
+        .where(table.c.id == message.conversation_id)
+        .where((table.c.last_message_at.is_(None)) | (table.c.last_message_at < message.created_at))
+        .values(last_message_at=message.created_at)
+    )

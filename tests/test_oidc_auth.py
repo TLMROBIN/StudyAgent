@@ -193,3 +193,21 @@ def test_oidc_callback_enters_role_page_despite_legacy_password_flag(monkeypatch
         assert f"location.replace('/studyagent/{destination}')" in body
         assert "location.replace('/studyagent/login')" not in body
         assert 'localStorage.setItem("studyagent-access-token"' in body
+
+
+def test_password_action_uses_pkce_and_does_not_mutate_local_password(monkeypatch):
+    import pytest
+    from urllib.parse import urlparse, parse_qs
+    from backend.models.schemas import PasswordChangeRequest
+    settings = Settings(OIDC_ENABLED=True, OIDC_ISSUER='https://identity.example/realms/school', OIDC_CLIENT_ID='studyagent')
+    monkeypatch.setattr(oidc_service, 'settings', settings)
+    monkeypatch.setattr(auth_router, 'get_settings', lambda: settings)
+    response = auth_router.oidc_change_password()
+    query = parse_qs(urlparse(response.headers['location']).query)
+    assert query['kc_action'] == ['UPDATE_PASSWORD']
+    assert query['code_challenge_method'] == ['S256']
+    assert query['state'] and query['code_challenge']
+    assert 'studyagent_oidc_state=' in str(response.raw_headers)
+    with pytest.raises(HTTPException) as exc:
+        auth_router.change_password(PasswordChangeRequest(current_password='old-password', new_password='new-password-123'), None, None)
+    assert exc.value.status_code == 409

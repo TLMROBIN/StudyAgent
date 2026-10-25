@@ -14,7 +14,7 @@ from backend.models.llm_model import LLMModelConfig
 from backend.services.metrics_service import chat_image_vision_call_failures_total
 from backend.services.llm_service import ThinkingContentFilter
 from backend.services import llm_service as llm_service_module
-from backend.services.llm_service import LLMService, LLMStreamEvent, LLMUsage, ProviderState
+from backend.services.llm_service import LLMCallError, LLMService, LLMStreamEvent, LLMUsage, ProviderState
 
 
 def _build_session_factory():
@@ -355,7 +355,7 @@ def test_stream_events_emit_chunks_and_final_usage(monkeypatch):
     assert captured_payloads[0]["max_completion_tokens"] == 256
 
 
-def test_stream_response_falls_back_when_provider_only_emits_usage(monkeypatch):
+def test_stream_response_fails_when_provider_only_emits_usage(monkeypatch):
     service = LLMService()
     provider = ProviderState(
         name="openrouter",
@@ -380,7 +380,8 @@ def test_stream_response_falls_back_when_provider_only_emits_usage(monkeypatch):
             )
         ]
 
-    assert asyncio.run(collect_chunks()) == ["请继续说说你的想法。"]
+    with pytest.raises(LLMCallError, match="模型调用失败"):
+        asyncio.run(collect_chunks())
 
 
 def test_builtin_chat_models_do_not_include_stopped_local_vl_model(monkeypatch):

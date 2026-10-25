@@ -294,6 +294,12 @@ def apply_runtime_schema_updates() -> None:
             statements.append("ALTER TABLE conversations ADD COLUMN deleted_by_student_at DATETIME")
         if "active_practice" not in conversation_columns:
             statements.append("ALTER TABLE conversations ADD COLUMN active_practice JSON")
+        if "is_pinned" not in conversation_columns:
+            statements.append("ALTER TABLE conversations ADD COLUMN is_pinned BOOLEAN DEFAULT 0 NOT NULL")
+        if "last_message_at" not in conversation_columns:
+            statements.append("ALTER TABLE conversations ADD COLUMN last_message_at DATETIME")
+            if "messages" in table_names and "created_at" in conversation_columns:
+                statements.append("UPDATE conversations SET last_message_at = COALESCE((SELECT MAX(created_at) FROM messages WHERE messages.conversation_id = conversations.id), created_at)")
 
     if "messages" in table_names:
         message_columns = {column["name"] for column in inspector.get_columns("messages")}

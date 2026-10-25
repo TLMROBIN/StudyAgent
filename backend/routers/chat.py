@@ -15,7 +15,7 @@ from anyio import CancelScope
 from fastapi import APIRouter, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from backend.database import SessionLocal
@@ -40,6 +40,7 @@ from backend.models.schemas import (
     ChatSubjectOptionRead,
     ChatRequest,
     ConversationRead,
+    PinConversationRequest,
     QuestionRecommendationRead,
     QuestionRecommendationRequest,
     ResolveConversationRequest,
@@ -55,7 +56,7 @@ from backend.services.chat_attachment_service import StoredChatAttachment, chat_
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.filter_service import FilterDecision, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
-from backend.services.llm_service import LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
+from backend.services.llm_service import LLMCallError, MODEL_CALL_FAILED_MESSAGE, LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
 from backend.services.metrics_service import (
     chat_fact_mode_total,
     chat_first_token_seconds,
@@ -103,10 +104,6 @@ AGENT_CONFIG_CACHE_TTL_SECONDS = 60.0
 RAG_SESSION_CACHE_TTL_SECONDS = 600
 _active_agent_config_cache: tuple[AgentConfig | None, float, int | None] = (None, 0.0, None)
 rag_session_store: BaseStore = store
-EMPTY_CHAT_RESPONSE_FALLBACK = (
-    "我刚刚没有生成出有效内容。我们换一种方式继续："
-    "请你把题目条件或卡住的一步再发我一次，我会先帮你整理已知条件。"
-)
 ANSWER_SUBMISSION_RE = re.compile(r"[A-Da-d]|\d|[=≈]|^是|^不是|^对|^错|^能|^不能|^正确|^不正确")
 ANSWER_REQUEST_RE = re.compile(r"直接(告诉|给|说)|答案是什么|是多少|不会|不知道|怎么做")
 SHORT_FOLLOWUP_BLOCK_RE = re.compile(r"怎么|为什么|什么是|讲|解释|求|计算|证明|答案|不会|不知道|直接|再来|出一道|推荐")
@@ -1447,9 +1444,24 @@ def list_conversations(db: DbSession, current_user: CurrentUser) -> list[Convers
         select(Conversation)
         .options(_message_load_option())
         .where(Conversation.student_id == current_user.id, Conversation.deleted_by_student_at.is_(None))
-        .order_by(Conversation.updated_at.desc())
+        .order_by(Conversation.is_pinned.desc(), func.coalesce(Conversation.last_message_at, Conversation.created_at).desc(), Conversation.id.desc())
     ).all()
     return [ConversationRead.model_validate(item) for item in conversations]
+
+
+@router.patch("/{conversation_id}/pin", response_model=ConversationRead)
+def pin_conversation(conversation_id: int, payload: PinConversationRequest, db: DbSession, current_user: CurrentUser) -> ConversationRead:
+    conversation = db.scalar(select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.student_id == current_user.id,
+        Conversation.deleted_by_student_at.is_(None),
+    ))
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conversation.is_pinned = payload.is_pinned
+    db.commit()
+    db.refresh(conversation)
+    return ConversationRead.model_validate(conversation)
 
 
 @router.get("/history/{conversation_id}", response_model=ConversationRead)
@@ -1611,6 +1623,23 @@ def recommend_questions(
 async def stream_chat_endpoint(request: Request, db: DbSession, current_user: CurrentUser):
     payload, image_upload = await _parse_stream_request_payload(request)
     return await stream_chat(payload, db, current_user, request, image_upload=image_upload)
+
+
+async def _await_image_understanding(request: Request, **kwargs) -> ImageUnderstandingResult:
+    task = asyncio.create_task(chat_image_understanding_service.understand(**kwargs))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=0.2)
+            if await request.is_disconnected():
+                raise HTTPException(status_code=499, detail="请求已取消")
+            if done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+        with CancelScope(shield=True):
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 async def stream_chat(
@@ -1786,7 +1815,8 @@ async def stream_chat(
     if has_image_turn and image_content and attachment_record:
         image_understanding_started = perf_counter()
         try:
-            image_understanding = await chat_image_understanding_service.understand(
+            image_understanding = await _await_image_understanding(
+                request,
                 image_bytes=image_content,
                 mime_type=attachment_record.mime_type,
                 subject=payload.subject,
@@ -1797,6 +1827,11 @@ async def stream_chat(
             )
         finally:
             chat_image_understanding_seconds.observe(perf_counter() - image_understanding_started)
+        if image_understanding.source == "failed":
+            attachment_record.ocr_status = "failed"
+            db.add(attachment_record)
+            db.commit()
+            raise HTTPException(status_code=502, detail="图片识别失败，请联系管理员老师或稍后再试。")
         attachment_record.ocr_status = {
             "paddleocr": "paddleocr",
             "ocr": "llm_ocr",
@@ -2778,7 +2813,7 @@ async def stream_chat(
                     yield _sse_event("chunk", {"content": segment})
 
             if should_send_done and not emitted_text.strip():
-                emitted_text = fallback_text if has_image_turn else EMPTY_CHAT_RESPONSE_FALLBACK
+                raise LLMCallError(MODEL_CALL_FAILED_MESSAGE)
             if should_send_done:
                 emitted_text = emitted_text.strip()
                 await release_ticket_once()
@@ -2848,6 +2883,15 @@ async def stream_chat(
                     or incentive_grant.get("level_up")
                 ):
                     yield _sse_event("incentive", incentive_grant)
+        except LLMCallError:
+            should_send_done = False
+            # Do not persist, reward, cache or replay incomplete/fabricated answers.
+            emitted_text = ""
+            yield _sse_event("error", {
+                "code": "model_call_failed",
+                "message": MODEL_CALL_FAILED_MESSAGE,
+                "request_id": payload.request_id,
+            })
         except (asyncio.CancelledError, GeneratorExit):
             should_send_done = False
             raise

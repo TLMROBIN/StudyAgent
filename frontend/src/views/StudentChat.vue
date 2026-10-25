@@ -6,6 +6,7 @@ import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
 import {
   api,
+  resolveApiUrl,
   type AgentRolePublic,
   type ChatModelOption,
   type ChatModelStatus,
@@ -35,7 +36,7 @@ import {
 import {
   CHAT_IMAGE_TOO_LARGE_MESSAGE,
   HEIC_EXPORT_MESSAGE,
-  isSupportedChatImageFile,
+  INVALID_IMAGE_MESSAGE,
   prepareChatImageUpload,
 } from '../utils/chatImageUpload'
 import { collectInlineAssetIds, renderRichText, type InlineRichTextAsset } from '../utils/richText'
@@ -46,6 +47,8 @@ interface ConversationSummary {
   topic: string
   guidance_stage: string
   resolved: boolean
+  is_pinned: boolean
+  last_message_at?: string | null
 }
 
 type RecommendationMode = 'context' | 'keyword'
@@ -83,6 +86,7 @@ const SAFE_IMAGE_ERROR_MESSAGES = new Set([
   '只支持上传 1 张图片',
   CHAT_IMAGE_TOO_LARGE_MESSAGE,
   HEIC_EXPORT_MESSAGE,
+  INVALID_IMAGE_MESSAGE,
   '当前浏览器不支持图片裁剪',
   '图片裁剪失败，请重试',
 ])
@@ -108,11 +112,6 @@ const form = reactive({
   deepReasoning: false,
   roleId: null as number | null,
 })
-const passwordForm = reactive({
-  currentPassword: '',
-  newPassword: '',
-  confirmPassword: '',
-})
 const conversations = ref<ConversationSummary[]>([])
 const messages = ref<ChatMessageRead[]>([])
 const notifications = ref<NotificationItem[]>([])
@@ -135,7 +134,7 @@ const resolveSubmitting = ref(false)
 const resolveReflection = ref('')
 const currentConversationResolved = ref(false)
 const passwordDialogVisible = ref(false)
-const passwordChanging = ref(false)
+const pinningConversationIds = ref<Set<number>>(new Set())
 const deletingConversationIds = ref<Set<number>>(new Set())
 const guidanceStage = ref('initial_guidance')
 const recommendationPool = ref<QuestionRecommendation[]>([])
@@ -148,9 +147,16 @@ const recommendationDifficulty = ref<'basic' | 'standard' | 'advanced'>('basic')
 const recommendationMode = ref<RecommendationMode>('context')
 const recommendationKeyword = ref('')
 const chatStreamRef = ref<HTMLElement | null>(null)
+const followLatest = ref(true)
+const previewAttachment = ref<ChatMessageAttachment | null>(null)
+const imagePreviewVisible = ref(false)
+const imagePreviewUrl = ref('')
+const imagePreviewError = ref('')
+const imagePreviewZoom = ref(1)
 const messageInputRef = ref<{ $el?: HTMLElement } | null>(null)
 const cameraInputRef = ref<HTMLInputElement | null>(null)
 const galleryInputRef = ref<HTMLInputElement | null>(null)
+const fileInputRef = ref<HTMLInputElement | null>(null)
 const cropImageRef = ref<HTMLImageElement | null>(null)
 const cropStageRef = ref<HTMLElement | null>(null)
 const pendingImageFile = ref<File | null>(null)
@@ -181,7 +187,7 @@ let cropPointerStart: {
   initial: CropRect
 } | null = null
 const localAttachmentUrls = new Set<string>()
-const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
+const { assetUrl, openAsset, preloadAssets, ensureAssetUrl } = useAuthorizedAssets()
 const authStore = useAuthStore()
 
 const visibleRecommendations = computed(() => (
@@ -465,6 +471,16 @@ watch(() => form.message, (value) => {
   persistDraft(value)
 }, { flush: 'sync' })
 
+function handleChatScroll() {
+  const el = chatStreamRef.value
+  if (el) followLatest.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
+function returnToLatest() {
+  followLatest.value = true
+  scrollToBottom()
+}
+
 function scrollToBottom() {
   if (!chatStreamRef.value) {
     return
@@ -474,7 +490,7 @@ function scrollToBottom() {
 
 function queueScrollToBottom() {
   void nextTick(() => {
-    scrollToBottom()
+    if (followLatest.value) scrollToBottom()
   })
 }
 
@@ -580,6 +596,7 @@ function selectBestAvailableModel() {
 }
 
 async function openConversation(id: number): Promise<boolean> {
+  followLatest.value = true
   try {
     const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
     currentConversationId.value = id
@@ -700,6 +717,7 @@ async function loadIncentiveSummary() {
 }
 
 function startNewConversation(options: { subject?: string } = {}) {
+  followLatest.value = true
   currentConversationId.value = null
   currentConversationResolved.value = false
   messages.value = []
@@ -725,10 +743,12 @@ function applyStarterPrompt(prompt: string) {
 }
 
 function openPasswordDialog() {
-  passwordForm.currentPassword = ''
-  passwordForm.newPassword = ''
-  passwordForm.confirmPassword = ''
   passwordDialogVisible.value = true
+}
+
+function goToUnifiedPassword() {
+  persistDraft(form.message)
+  window.location.assign(resolveApiUrl('/auth/oidc/change-password'))
 }
 
 function handleSessionMenuCommand(command: string) {
@@ -749,38 +769,17 @@ function handleSessionMenuCommand(command: string) {
   }
 }
 
-async function submitPasswordChange() {
-  if (!passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword) {
-    ElMessage.info('请完整填写当前密码和新密码')
-    return
-  }
-  if (passwordForm.newPassword.length < 6) {
-    ElMessage.error('新密码至少需要 6 位')
-    return
-  }
-  if (passwordForm.newPassword !== passwordForm.confirmPassword) {
-    ElMessage.error('两次输入的新密码不一致')
-    return
-  }
-  passwordChanging.value = true
+async function toggleConversationPin(item: ConversationSummary) {
+  pinningConversationIds.value = new Set(pinningConversationIds.value).add(item.id)
   try {
-    await authStore.changePassword(passwordForm.currentPassword, passwordForm.newPassword)
-    ElMessage.success('密码已修改，请重新登录')
-    passwordDialogVisible.value = false
-    forceLoginRedirect()
-  } catch (error) {
-    const detail = (
-      error as {
-        response?: {
-          data?: {
-            detail?: string
-          }
-        }
-      }
-    )?.response?.data?.detail
-    ElMessage.error(typeof detail === 'string' && detail ? detail : '密码修改失败，请检查当前密码')
+    await api.patch(`/chat/${item.id}/pin`, { is_pinned: !item.is_pinned })
+    await loadConversations()
+  } catch {
+    ElMessage.error('置顶设置未保存，请稍后重试')
   } finally {
-    passwordChanging.value = false
+    const pending = new Set(pinningConversationIds.value)
+    pending.delete(item.id)
+    pinningConversationIds.value = pending
   }
 }
 
@@ -854,6 +853,9 @@ function stopStreaming(showNotice = true) {
   stopRequested = true
   streamAbortController?.abort()
   streamAbortController = null
+  sending.value = false
+  const last = messages.value[messages.value.length - 1]
+  if (last?.role === 'assistant' && !last.content.trim()) messages.value.pop()
   screenReaderAnnouncement.value = '已停止本次生成，可以继续修改问题。'
   if (showNotice) {
     ElMessage.info('已停止本次生成')
@@ -944,12 +946,8 @@ function triggerGalleryPicker() {
 async function handleImageSelection(event: Event) {
   const input = event.target as HTMLInputElement | null
   const file = input?.files?.[0]
+  if (input) input.value = ''
   if (!file) {
-    return
-  }
-  if (!isSupportedChatImageFile(file)) {
-    resetPendingImage()
-    ElMessage.error('只支持上传 1 张图片')
     return
   }
   try {
@@ -1181,18 +1179,19 @@ async function preloadMessageAttachments(items: ChatMessageRead[]) {
   }
 }
 
-function openMessageAttachment(attachment?: ChatMessageAttachment | null) {
-  if (!attachment?.url) {
-    return
+async function openMessageAttachment(attachment?: ChatMessageAttachment | null) {
+  if (!attachment?.url) return
+  previewAttachment.value = attachment
+  imagePreviewVisible.value = true
+  imagePreviewZoom.value = 1
+  imagePreviewUrl.value = ''
+  imagePreviewError.value = ''
+  try {
+    const url = isLocalPreviewUrl(attachment.url) ? attachment.url : await ensureAssetUrl(attachment)
+    if (previewAttachment.value?.url === attachment.url) imagePreviewUrl.value = url
+  } catch {
+    imagePreviewError.value = '图片加载失败，请重试'
   }
-  if (isLocalPreviewUrl(attachment.url)) {
-    window.open(attachment.url, '_blank', 'noopener,noreferrer')
-    return
-  }
-  void openAsset(attachment).catch((error) => {
-    console.error(error)
-    ElMessage.error('图片打开失败，请稍后重试')
-  })
 }
 
 function resetRecommendations() {
@@ -1310,6 +1309,8 @@ function currentRecommendationContextLabel(): string {
 
 function chatFailureMessage(error: unknown): string {
   const message = requestErrorMessage(error)
+  if (message === '模型调用失败，请联系管理员老师或稍后再试。'
+    || message === '图片识别失败，请联系管理员老师或稍后再试。') return message
   if (message === 'Password change required') {
     return '请先通过“更多”中的“修改密码”完成改密，再继续提问。草稿已保留。'
   }
@@ -1503,7 +1504,9 @@ async function sendMessage() {
   sending.value = true
   stopRequested = false
   screenReaderAnnouncement.value = '学习助手正在整理回复。'
-  streamAbortController = new AbortController()
+  const controller = new AbortController()
+  streamAbortController = controller
+  followLatest.value = true
   messages.value.push({
     role: 'user',
     content,
@@ -1525,6 +1528,7 @@ async function sendMessage() {
         image,
       },
       ({ event, data }) => {
+        if (controller.signal.aborted || streamAbortController !== controller) return
         if (event === 'meta') {
           const last = messages.value[messages.value.length - 1]
           if (last?.role === 'assistant') last.deep_reasoning = data.deep_reasoning === true
@@ -1612,13 +1616,12 @@ async function sendMessage() {
           void loadIncentiveSummary()
         }
       },
-      { signal: streamAbortController.signal, retryAttempts: 2, retryDelayMs: 1200 },
+      { signal: controller.signal, retryAttempts: 2, retryDelayMs: 1200 },
     )
+    if (controller.signal.aborted || streamAbortController !== controller) return
     const last = messages.value[messages.value.length - 1]
     if (last && last.role === 'assistant' && !last.content.trim()) {
-      last.content = '这次没有收到有效回复，请重新发送一次，或补充题目条件后再试。'
-      screenReaderAnnouncement.value = last.content
-      queueScrollToBottom()
+      throw new Error('模型调用失败，请联系管理员老师或稍后再试。')
     }
     clearSubmittedDraft(submissionDraftKey)
     try {
@@ -1631,6 +1634,7 @@ async function sendMessage() {
     await loadChatModels()
     resetRecommendations()
   } catch (error) {
+    if (controller.signal.aborted || streamAbortController !== controller) return
     const last = messages.value[messages.value.length - 1]
     if (error instanceof DOMException && error.name === 'AbortError') {
       if (stopRequested && last && last.role === 'assistant' && !last.content.trim()) {
@@ -1646,15 +1650,18 @@ async function sendMessage() {
     if (image && !pendingImageFile.value) {
       updatePendingImage(image)
     }
-    if (last && last.role === 'assistant' && !last.content.trim()) {
-      last.content = failureMessage
+    if (last && last.role === 'assistant') {
+      last.error = failureMessage
+      last.suggested_replies = []
     }
     screenReaderAnnouncement.value = failureMessage
     ElMessage.error(failureMessage)
   } finally {
-    streamAbortController = null
-    sending.value = false
-    stopRequested = false
+    if (streamAbortController === controller) {
+      streamAbortController = null
+      sending.value = false
+      stopRequested = false
+    }
   }
 }
 
@@ -1824,6 +1831,7 @@ onMounted(async () => {
 
       <div
         ref="chatStreamRef"
+        @scroll.passive="handleChatScroll"
         class="chat-stream"
         role="log"
         aria-live="off"
@@ -1882,6 +1890,7 @@ onMounted(async () => {
                 <span>{{ item.attachment.filename }}</span>
               </a>
             </div>
+            <p v-if="item.error" class="chat-error" role="alert">{{ item.error }}</p>
             <div class="message-body" v-html="renderMessageBody(item.content, item.assets || [])"></div>
           </article>
           <div
@@ -1903,7 +1912,9 @@ onMounted(async () => {
         </div>
       </div>
 
+      <button v-if="!followLatest" type="button" class="ghost-button" @click="returnToLatest">回到最新回复</button>
       <div class="chat-controls">
+        <input ref="fileInputRef" type="file" style="display: none" @change="handleImageSelection" />
         <input
           ref="cameraInputRef"
           type="file"
@@ -1964,7 +1975,8 @@ onMounted(async () => {
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item @click="triggerCameraCapture">拍照上传</el-dropdown-item>
-                  <el-dropdown-item @click="triggerGalleryPicker">从相册选择</el-dropdown-item>
+                  <el-dropdown-item @click="fileInputRef?.click()">从文件选择</el-dropdown-item>
+                <el-dropdown-item @click="triggerGalleryPicker">从相册选择</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -2163,6 +2175,9 @@ onMounted(async () => {
               <span>{{ item.resolved ? '已解决' : '继续思考' }}</span>
             </button>
             <div class="row-actions conversation-card__actions">
+              <button type="button" class="ghost-button" :disabled="pinningConversationIds.has(item.id)" :aria-pressed="item.is_pinned" @click="toggleConversationPin(item)">
+                {{ item.is_pinned ? '取消置顶' : '置顶' }}
+              </button>
               <button
                 type="button"
                 class="ghost-button ghost-button--danger"
@@ -2287,45 +2302,23 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <el-dialog
-      v-model="passwordDialogVisible"
-      title="修改密码"
-      width="420px"
-      destroy-on-close
-    >
-      <div class="password-dialog">
-        <el-input
-          v-model="passwordForm.currentPassword"
-          type="password"
-          show-password
-          autocomplete="current-password"
-          placeholder="当前密码"
-        />
-        <el-input
-          v-model="passwordForm.newPassword"
-          type="password"
-          show-password
-          autocomplete="new-password"
-          placeholder="新密码，至少 6 位"
-        />
-        <el-input
-          v-model="passwordForm.confirmPassword"
-          type="password"
-          show-password
-          autocomplete="new-password"
-          placeholder="再次输入新密码"
-          @keyup.enter="submitPasswordChange"
-        />
-        <p class="panel-subcopy">修改成功后，当前账号会退出登录，其他设备上的旧登录态也会失效。</p>
-      </div>
+    <el-dialog v-model="passwordDialogVisible" title="修改统一登录密码" width="min(92vw, 420px)">
+      <p>登录密码由统一身份平台管理，修改后用于各学习系统的统一登录。</p>
       <template #footer>
-        <div class="row-actions">
-          <button class="ghost-button" :disabled="passwordChanging" @click="passwordDialogVisible = false">取消</button>
-          <button class="primary-button" :disabled="passwordChanging" @click="submitPasswordChange">
-            {{ passwordChanging ? '修改中...' : '确认修改' }}
-          </button>
-        </div>
+        <button class="ghost-button" @click="passwordDialogVisible = false">取消</button>
+        <button class="primary-button" @click="goToUnifiedPassword">前往统一身份平台</button>
       </template>
+    </el-dialog>
+    <el-dialog v-model="imagePreviewVisible" title="查看题图" width="min(96vw, 1000px)" @closed="previewAttachment = null">
+      <div class="row-actions">
+        <button class="ghost-button" @click="imagePreviewZoom = Math.min(4, imagePreviewZoom + 0.5)">放大</button>
+        <button class="ghost-button" @click="imagePreviewZoom = Math.max(1, imagePreviewZoom - 0.5)">缩小</button>
+      </div>
+      <div class="chat-image-preview">
+        <img v-if="imagePreviewUrl && !imagePreviewError" :src="imagePreviewUrl" :alt="previewAttachment?.filename || '题图'" :style="{ width: `${imagePreviewZoom * 100}%`, maxWidth: 'none' }" @error="imagePreviewError = '图片加载失败，请重试'" />
+        <p v-else>{{ imagePreviewError || '图片加载中...' }}</p>
+      </div>
+      <button v-if="imagePreviewError" class="ghost-button" @click="openMessageAttachment(previewAttachment)">重试加载</button>
     </el-dialog>
   </section>
 </template>

@@ -17,7 +17,6 @@ from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.services.metrics_service import (
     chat_image_vision_call_failures_total,
-    llm_stream_fallback_total,
     llm_stream_provider_failure_total,
 )
 
@@ -212,6 +211,13 @@ class LLMStreamEvent:
     usage: LLMUsage | None = None
     provider_name: str = ""
     provider_model: str = ""
+
+
+MODEL_CALL_FAILED_MESSAGE = "模型调用失败，请联系管理员老师或稍后再试。"
+
+
+class LLMCallError(RuntimeError):
+    """A provider failure must never masquerade as a teaching response."""
 
 
 class LLMService:
@@ -728,11 +734,12 @@ class LLMService:
                     str(exc)[:300],
                 )
                 self._mark_provider_failure(provider)
+                if yielded_text:
+                    # A second provider must not append a new answer to a partial one.
+                    raise LLMCallError(MODEL_CALL_FAILED_MESSAGE) from exc
 
-        if fallback_text:
-            llm_stream_fallback_total.labels(model_key=selected_model_key, reason=fallback_reason).inc()
-            logger.warning("llm_stream_fallback reason=%s model_key=%s", fallback_reason, selected_model_key)
-            yield LLMStreamEvent(type="chunk", content=fallback_text)
+        logger.warning("llm_stream_failed reason=%s model_key=%s", fallback_reason, selected_model_key)
+        raise LLMCallError(MODEL_CALL_FAILED_MESSAGE)
 
     async def extract_image_text(
         self,

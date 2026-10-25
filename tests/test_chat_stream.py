@@ -958,7 +958,7 @@ def test_chat_heartbeat_preserves_pending_provider_read_and_cleans_up(monkeypatc
         session.close()
 
 
-def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch):
+def test_chat_stream_empty_response_reports_error_without_saving_answer(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
 
@@ -986,13 +986,11 @@ def test_chat_stream_replaces_empty_llm_stream_with_student_fallback(monkeypatch
             )
         )
         events = _parse_sse(asyncio.run(_read_streaming_response(response)))
-        assert [event for event, _ in events] == ["meta", "done"]
-        assert events[-1][1]["content"] == chat_router.EMPTY_CHAT_RESPONSE_FALLBACK
-
+        assert [event for event, _ in events] == ["meta", "error"]
+        assert events[-1][1]["message"] == chat_router.MODEL_CALL_FAILED_MESSAGE
         stored_messages = session.scalars(select(Message).order_by(Message.id.asc())).all()
-        assert len(stored_messages) == 2
-        assert stored_messages[1].role == MessageRole.ASSISTANT
-        assert stored_messages[1].content == chat_router.EMPTY_CHAT_RESPONSE_FALLBACK
+        assert len(stored_messages) == 1
+        assert stored_messages[0].role == MessageRole.USER
     finally:
         session.close()
 
@@ -1052,7 +1050,7 @@ def test_unsupported_deep_reasoning_is_rejected_before_saving_question(monkeypat
         assert db.scalar(select(Message)) is None
 
 
-def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
+def test_chat_stream_empty_image_response_reports_failure(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
 
@@ -1088,15 +1086,10 @@ def test_chat_stream_empty_image_response_uses_guided_fallback(monkeypatch):
 
     assert response.status_code == 200
     events = _parse_sse(response.text)
-    final_text = events[-1][1]["content"]
-    assert [event for event, _ in events] == ["meta", "done"]
-    assert final_text != chat_router.filter_service.image_uncertainty_text
-    assert "我识别到这张数学题图里主要有" in final_text
-    assert "函数图像经过点 A" in final_text
-    # 题干含“函数/图像/单调”信号，命中数学函数专项模式的引导式兜底
-    assert "大致图像" in final_text
-    assert "函数" in final_text
-    assert "我是 AI" not in final_text
+    assert [event for event, _ in events] == ["meta", "error"]
+    assert events[-1][1]["message"] == chat_router.MODEL_CALL_FAILED_MESSAGE
+    with session_factory() as db:
+        assert db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT)) is None
 
 
 def test_chat_stream_rewrites_unsafe_output_before_emitting(monkeypatch):
@@ -2018,12 +2011,11 @@ def test_chat_stream_short_circuits_low_confidence_images(monkeypatch):
         files={"image": ("blur.png", _make_test_image_bytes("gray"), "image/png")},
     )
 
-    assert response.status_code == 200
-    events = _parse_sse(response.text)
-    assert [event for event, _ in events] == ["meta", "done"]
-    assert "识别失败" in events[-1][1]["content"]
-    assert "重新上传" in events[-1][1]["content"]
+    assert response.status_code == 502
+    assert "图片识别失败" in response.json()["detail"]
     assert llm_called["value"] == 0
+    with session_factory() as db:
+        assert db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT)) is None
 
 
 def test_chat_stream_low_confidence_image_uses_quality_specific_retake_advice(monkeypatch):
@@ -3285,3 +3277,74 @@ def test_safety_rewrite_closes_provider_before_done(monkeypatch):
         asyncio.run(run())
     finally:
         session.close()
+
+
+def test_pins_are_owned_persistent_and_activity_is_independent():
+    from datetime import UTC, datetime, timedelta
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    stranger = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    now = datetime.now(UTC)
+    with factory() as db:
+        old = Conversation(student_id=student.id, subject="数学", created_at=now - timedelta(days=2))
+        recent = Conversation(student_id=student.id, subject="数学", created_at=now - timedelta(days=1))
+        foreign = Conversation(student_id=stranger.id, subject="数学")
+        db.add_all([old, recent, foreign]); db.commit()
+        old_id, recent_id, foreign_id = old.id, recent.id, foreign.id
+        db.add(Message(conversation_id=old_id, role=MessageRole.USER, content="函数", turn_index=1, created_at=now))
+        db.commit()
+    assert [c['id'] for c in client.get('/api/chat/history').json()] == [old_id, recent_id]
+    pin = client.patch(f'/api/chat/{recent_id}/pin', json={'is_pinned': True})
+    assert pin.status_code == 200 and pin.json()['is_pinned'] is True
+    assert [c['id'] for c in client.get('/api/chat/history').json()] == [recent_id, old_id]
+    assert client.patch(f'/api/chat/{foreign_id}/pin', json={'is_pinned': True}).status_code == 404
+    client.patch(f'/api/chat/{recent_id}/pin', json={'is_pinned': False})
+    assert [c['id'] for c in client.get('/api/chat/history').json()] == [old_id, recent_id]
+    client.delete(f'/api/chat/{recent_id}')
+    assert client.patch(f'/api/chat/{recent_id}/pin', json={'is_pinned': True}).status_code == 404
+
+
+def test_partial_provider_failure_never_rewards_caches_or_replays(monkeypatch):
+    from backend.services.llm_service import LLMCallError
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    async def failing(*args, **kwargs):
+        yield "你可以先整理已知条件吗？"
+        raise LLMCallError('failed')
+    monkeypatch.setattr(chat_router.llm_service, 'stream_response', failing)
+    monkeypatch.setattr(chat_router.rag_service, 'retrieve', lambda *a, **k: RetrievalResult(context='', chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, 'is_cacheable', lambda **k: False)
+    def unexpected(*a, **k):
+        pytest.fail('failed answer must not be rewarded, cached or replayed')
+    monkeypatch.setattr(chat_router, '_record_turn_incentives', unexpected)
+    monkeypatch.setattr(chat_router.question_cache_service, 'store_answer', unexpected)
+    monkeypatch.setattr(chat_router.request_replay_service, 'mark_completed', unexpected)
+    response = _build_chat_test_client(factory, student).post('/api/chat/stream', json={
+        'subject': '数学', 'message': '函数单调性怎么判断', 'request_id': 'failure-turn-unique',
+    })
+    events = _parse_sse(response.text)
+    assert events[-1][0] == 'error'
+    assert all(event != 'done' for event, _ in events)
+    with factory() as db:
+        assert db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT)) is None
+
+
+def test_image_disconnect_cancels_awaited_recognition(monkeypatch):
+    cancelled = []
+    async def slow(**kwargs):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.append(True)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, 'understand', slow)
+    class Disconnected:
+        async def is_disconnected(self):
+            return True
+    async def run():
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            await chat_router._await_image_understanding(Disconnected())
+        assert exc.value.status_code == 499
+    asyncio.run(run())
+    assert cancelled == [True]

@@ -172,6 +172,8 @@ class ConversationRead(BaseModel):
     resolved: bool
     duration_seconds: int
     created_at: datetime
+    is_pinned: bool = False
+    last_message_at: datetime | None = None
     messages: list[MessageRead] = []
     incentive: IncentiveGrantRead | None = None
 
@@ -275,6 +277,10 @@ class QuestionRecommendationRequest(BaseModel):
         if self.conversation_id is None:
             raise ValueError("Conversation id is required for context recommendations")
         return self
+
+
+class PinConversationRequest(BaseModel):
+    is_pinned: bool
 
 
 class ResolveConversationRequest(BaseModel):

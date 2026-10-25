@@ -27,10 +27,34 @@ export function isSupportedChatImageFile(file: File): boolean {
   return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|heic|heif)$/i.test(file.name)
 }
 
-export async function prepareChatImageUpload(file: File): Promise<PreparedChatImageUpload> {
-  if (!isSupportedChatImageFile(file)) {
-    throw new Error('只支持上传 1 张图片')
+export const INVALID_IMAGE_MESSAGE = '文件无法识别为图片，请选择有效图片；专有截图格式请先导出为 PNG 或 JPG'
+
+export async function normalizeSelectedImage(file: File): Promise<File> {
+  // A file picker may report an empty MIME or .pho for an ordinary image.
+  // Trust decoded content, never the extension alone.
+  if (file.size > 32 * 1024 * 1024) throw new Error(CHAT_IMAGE_TOO_LARGE_MESSAGE)
+  const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer())
+  const ascii = (start: number, end: number) => String.fromCharCode(...bytes.slice(start, end))
+  let format = ''
+  if (bytes[0] === 0x89 && ascii(1, 4) === 'PNG') format = 'png'
+  else if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) format = 'jpeg'
+  else if (ascii(0, 3) === 'GIF') format = 'gif'
+  else if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') format = 'webp'
+  if (!format) {
+    if (isLikelyHeic(file)) {
+      try { await loadImage(file); return file } catch { throw new Error(HEIC_EXPORT_MESSAGE) }
+    }
+    throw new Error(INVALID_IMAGE_MESSAGE)
   }
+  const normalized = new File([file], `${file.name.replace(/\.[^.]+$/, '')}.${format === 'jpeg' ? 'jpg' : format}`, {
+    type: `image/${format}`, lastModified: file.lastModified,
+  })
+  try { await loadImage(normalized) } catch { throw new Error(INVALID_IMAGE_MESSAGE) }
+  return normalized
+}
+
+export async function prepareChatImageUpload(file: File): Promise<PreparedChatImageUpload> {
+  file = await normalizeSelectedImage(file)
 
   const heic = isLikelyHeic(file)
   let image: HTMLImageElement

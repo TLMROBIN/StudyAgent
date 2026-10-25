@@ -102,7 +102,7 @@ class QuestionCacheService:
         if role_revision_hash:
             payload["role_revision_hash"] = role_revision_hash
         digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-        return f"question_cache:{digest}"
+        return f"question_cache:v2:{digest}"
 
 
 question_cache_service = QuestionCacheService()

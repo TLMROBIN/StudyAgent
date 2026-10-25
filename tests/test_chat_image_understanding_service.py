@@ -615,3 +615,34 @@ def test_image_understanding_rejects_no_image_received_text():
 
     assert service._assess_ocr_confidence("目前没有收到任何图片可供识别。") == "low"
     assert service._assess_multimodal_confidence("我没有看到图片，请重新上传。") == "low"
+
+
+def test_paddleocr_cancellation_stops_only_owned_worker(monkeypatch):
+    from threading import Event
+    cancel = Event()
+    worker = image_service_module._PaddleOCRWorker()
+    stopped = []
+    class Tasks:
+        def put(self, *args, **kwargs):
+            pass
+    class Results:
+        def get(self, **kwargs):
+            cancel.set()
+            raise image_service_module.queue.Empty
+    monkeypatch.setattr(worker, '_ensure_started', lambda: None)
+    monkeypatch.setattr(worker, '_stop_locked', lambda **kwargs: stopped.append(True))
+    worker._process = object()
+    worker._task_queue = Tasks()
+    worker._result_queue = Results()
+    assert worker.run('synthetic.png', timeout_seconds=10, cancel_event=cancel) is None
+    assert stopped == [True]
+    assert worker._request_lock.acquire(blocking=False)
+    worker._request_lock.release()
+    # A request cancelled while waiting must not kill another student's active worker.
+    stopped.clear()
+    worker._request_lock.acquire()
+    try:
+        assert worker.run('queued.png', timeout_seconds=10, cancel_event=cancel) is None
+    finally:
+        worker._request_lock.release()
+    assert stopped == []

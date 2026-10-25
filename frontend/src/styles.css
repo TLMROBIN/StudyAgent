@@ -2611,3 +2611,9 @@ textarea {
   line-height: 1.6;
 }
 .reasoning-progress__body p { margin: 0 0 8px; }
+
+/* Student feedback repairs: bounded dialogs and in-page attachment viewing. */
+.el-message-box { width: 420px; max-width: calc(100vw - 32px); }
+.chat-error { color: #b42318; background: #fff0ee; padding: 12px; border-radius: 8px; }
+.chat-image-preview { overflow: auto; max-height: 65vh; margin-top: 12px; }
+.chat-image-preview img { display: block; height: auto; }

@@ -80,6 +80,7 @@ export function useAuthorizedAssets() {
 
   return {
     assetUrl,
+    ensureAssetUrl,
     openAsset,
     preloadAssets,
   }

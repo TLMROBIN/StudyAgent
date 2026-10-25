@@ -12,7 +12,9 @@ import multiprocessing as mp
 import os
 import queue
 import re
-from threading import Lock
+from threading import Event, Lock
+from contextvars import ContextVar
+from time import monotonic
 from typing import Any
 
 from backend.config import Settings, get_settings
@@ -20,6 +22,7 @@ from backend.services.llm_service import llm_service
 from backend.services.metrics_service import chat_image_understanding_total
 
 logger = logging.getLogger(__name__)
+_OCR_CANCEL: ContextVar[Event | None] = ContextVar("ocr_cancel", default=None)
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _PADDLEOCR_THREAD_ENV_DEFAULTS = {
     "OMP_NUM_THREADS": "2",
@@ -479,6 +482,8 @@ class ChatImageUnderstandingService:
             return None
         timeout_seconds = max(0.0, float(self.settings.chat_image_ocr_timeout_seconds))
         outer_timeout_seconds = timeout_seconds + 1 if timeout_seconds > 0 else 0
+        cancel_event = Event()
+        token = _OCR_CANCEL.set(cancel_event)
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self._try_paddleocr_sync, image_path=image_path),
@@ -487,6 +492,9 @@ class ChatImageUnderstandingService:
         except TimeoutError:
             logger.warning("chat_image_paddleocr_timeout timeout_seconds=%s", timeout_seconds)
             return None
+        finally:
+            cancel_event.set()
+            _OCR_CANCEL.reset(token)
 
     def _try_paddleocr_sync(self, *, image_path: str) -> ImageUnderstandingResult | None:
         try:
@@ -523,7 +531,7 @@ class ChatImageUnderstandingService:
     def _run_paddleocr_in_subprocess(self, *, image_path: str, timeout_seconds: float) -> str | None:
         if timeout_seconds <= 0:
             return None
-        return _get_paddleocr_worker().run(image_path, timeout_seconds=timeout_seconds)
+        return _get_paddleocr_worker().run(image_path, timeout_seconds=timeout_seconds, cancel_event=_OCR_CANCEL.get())
 
     def _run_paddleocr_once_in_subprocess(self, *, image_path: str, timeout_seconds: float) -> str | None:
         if timeout_seconds <= 0:
@@ -779,17 +787,36 @@ class _PaddleOCRWorker:
         with self._request_lock:
             self._ensure_started()
 
-    def run(self, image_path: str, *, timeout_seconds: float) -> str | None:
+    def run(self, image_path: str, *, timeout_seconds: float, cancel_event: Event | None = None) -> str | None:
         if timeout_seconds <= 0:
             return None
-        with self._request_lock:
+        deadline = monotonic() + timeout_seconds
+        while not self._request_lock.acquire(timeout=0.1):
+            if (cancel_event and cancel_event.is_set()) or monotonic() >= deadline:
+                return None
+        try:
+            if cancel_event and cancel_event.is_set():
+                return None
             self._ensure_started()
             if self._process is None or self._task_queue is None or self._result_queue is None:
                 return None
             task_id = str(next(self._task_ids))
             try:
                 self._task_queue.put((task_id, image_path), timeout=1)
-                result_task_id, status, payload = self._result_queue.get(timeout=timeout_seconds)
+                while True:
+                    if cancel_event and cancel_event.is_set():
+                        # The lock guarantees only this request owns this worker.
+                        self._stop_locked(force=True)
+                        return None
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise queue.Empty
+                    try:
+                        result_task_id, status, payload = self._result_queue.get(timeout=min(0.1, remaining))
+                        break
+                    except queue.Empty:
+                        if monotonic() >= deadline:
+                            raise
             except queue.Empty:
                 logger.warning("chat_image_paddleocr_worker_timeout timeout_seconds=%s", timeout_seconds)
                 self._stop_locked(force=True)
@@ -813,6 +840,9 @@ class _PaddleOCRWorker:
             if self._process is not None and not self._process.is_alive():
                 self._stop_locked(force=True)
             return None
+
+        finally:
+            self._request_lock.release()
 
     def stop(self) -> None:
         with self._request_lock:

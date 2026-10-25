@@ -61,6 +61,7 @@ export interface ChatMessageRead {
   reasoning_finished?: boolean
   learning_summary?: string
   deep_reasoning?: boolean
+  error?: string
 }
 
 export interface AgentRoleSnapshot {
@@ -89,6 +90,8 @@ export interface ChatConversationRead {
   resolved: boolean
   duration_seconds: number
   created_at: string
+  is_pinned: boolean
+  last_message_at?: string | null
   messages: ChatMessageRead[]
   incentive?: IncentiveGrant | null
 }
@@ -724,6 +727,8 @@ export async function streamChat(
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
     let sawDone = false
     try {
+      options.signal?.throwIfAborted?.()
+      if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       if (attempt > 0) {
         onEvent({ event: 'restart', data: { request_id: requestId, attempt } })
       }
@@ -776,6 +781,9 @@ export async function streamChat(
             event,
             data: JSON.parse(dataLine.replace('data:', '').trim()),
           }
+          if (event === 'error') {
+            throw new StreamResponseError(parsedEvent.data.message || '模型调用失败，请联系管理员老师或稍后再试。', 502)
+          }
           if (event === 'done') {
             sawDone = true
             completed = true
@@ -795,12 +803,22 @@ export async function streamChat(
       if (isSessionExpiredError(error)) {
         throw error
       }
+      if (error instanceof StreamResponseError || completed) throw error
       if (attempt >= maxAttempts) {
         throw error
       }
       attempt += 1
-      await new Promise((resolve) => {
-        window.setTimeout(resolve, options.retryDelayMs ?? 800 * attempt)
+      await new Promise<void>((resolve, reject) => {
+        const stop = () => {
+          window.clearTimeout(timer)
+          reject(new DOMException('Aborted', 'AbortError'))
+        }
+        const timer = window.setTimeout(() => {
+          options.signal?.removeEventListener('abort', stop)
+          resolve()
+        }, options.retryDelayMs ?? 800 * attempt)
+        options.signal?.addEventListener('abort', stop, { once: true })
+        if (options.signal?.aborted) stop()
       })
     } finally {
       if (reader) {

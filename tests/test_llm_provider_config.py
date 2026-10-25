@@ -502,7 +502,7 @@ def test_llm_service_rejects_stopped_builtin_local_vl_model():
         service.normalize_chat_model_key("qwen2.5-vl")
 
 
-def test_llm_service_logs_empty_stream_fallback(monkeypatch):
+def test_llm_service_logs_empty_stream_failure(monkeypatch):
     service = LLMService()
     service.providers[0].api_key = "test-key"
     monkeypatch.setattr(service, "_providers_for_chat_model", lambda model_key: [service.providers[0]])
@@ -522,9 +522,11 @@ def test_llm_service_logs_empty_stream_fallback(monkeypatch):
     async def collect_chunks() -> list[str]:
         return [chunk async for chunk in service.stream_response([{"role": "user", "content": "看图"}], "兜底")]
 
-    chunks = asyncio.run(collect_chunks())
+    import pytest
+    from backend.services.llm_service import LLMCallError
+    with pytest.raises(LLMCallError, match="模型调用失败"):
+        asyncio.run(collect_chunks())
 
-    assert chunks == ["兜底"]
     assert any("empty_stream" in item for item in warnings)
     assert any("MiniMax-M2.7-highspeed" in item for item in warnings)
 
