@@ -241,12 +241,6 @@ const canSend = computed(() => (
   && !selectedModelQuotaExhausted.value
 ))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
-const notificationText = computed(() => {
-  if (!notifications.value.length) {
-    return '暂无通知'
-  }
-  return notifications.value.map((item) => `${item.title}：${item.content}`).join('   /   ')
-})
 const notificationTitle = computed(() => notifications.value[0]?.title || '学校通知')
 const canRequestRecommendations = computed(() => {
   if (recommendationMode.value === 'keyword') {
@@ -1822,7 +1816,12 @@ onMounted(async () => {
           <span class="student-notice__preview">{{ notificationTitle }}</span>
           <span class="student-notice__action">查看</span>
         </summary>
-        <p>{{ notificationText }}</p>
+        <div class="student-notice__contents">
+          <article v-for="notice in notifications" :key="notice.id" class="notification-article">
+            <h3>{{ notice.title }}</h3>
+            <div class="message-body notification-body" v-html="renderRichText(notice.content)"></div>
+          </article>
+        </div>
       </details>
       <div v-else class="student-notice student-notice--empty" aria-label="学校通知">
         <span class="student-notice__label">学校通知</span>

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
+import { renderRichText } from '../utils/richText'
 import MetricTile from '../components/MetricTile.vue'
 import { buildSubjectPieModel } from '../utils/subjectPieChart'
 import {
@@ -207,6 +208,10 @@ async function submitNotification() {
     ElMessage.info('请填写通知标题和内容')
     return
   }
+  if (Array.from(content).length > 20000) {
+    ElMessage.warning('通知正文最多 20,000 字，请缩短后再发布')
+    return
+  }
   notificationSaving.value = true
   try {
     if (editingNotificationId.value) {
@@ -389,11 +394,15 @@ onMounted(() => {
           <textarea
             v-model="notificationForm.content"
             class="textarea"
-            maxlength="500"
-            rows="3"
-            placeholder="通知内容"
+            rows="8"
+            placeholder="通知内容（支持 Markdown）"
             :disabled="notificationSaving"
           ></textarea>
+          <p class="panel-subcopy" aria-live="polite">{{ Array.from(notificationForm.content.trim()).length }} / 20,000 字。支持标题、加粗、列表、链接、表格和代码块；超限时不会发布。</p>
+          <details v-if="notificationForm.content" class="notification-preview">
+            <summary>预览通知</summary>
+            <div class="message-body notification-body" v-html="renderRichText(notificationForm.content)"></div>
+          </details>
           <div class="row-actions">
             <button class="primary-button" :disabled="notificationSaving" type="submit">
               {{ editingNotificationId ? '保存修改' : '发布通知' }}
@@ -404,7 +413,7 @@ onMounted(() => {
           <article v-for="item in notifications" :key="item.id" class="table-row table-row-wrap notification-row">
             <div class="table-main table-main--grow">
               <strong>{{ item.title }}</strong>
-              <span>{{ item.content }}</span>
+              <div class="message-body notification-body" v-html="renderRichText(item.content)"></div>
             </div>
             <div class="detail-chip-group">
               <span :class="['detail-chip', { 'detail-chip--muted': item.is_archived }]">

@@ -94,3 +94,21 @@ def test_admin_manages_schoolwide_notifications_and_students_only_see_active_ite
     admin_items = admin_client.get("/api/admin/notifications").json()
     assert len(admin_items) == 1
     assert admin_items[0]["is_archived"] is True
+
+
+def test_long_markdown_notification_roundtrip_and_limit():
+    factory = build_session()
+    admin = build_client(factory, create_user(factory, UserRole.ADMIN))
+    student = build_client(factory, create_user(factory, UserRole.STUDENT))
+    content = '# 更新公告\n\n**重点**\n\n- 新功能\n\n' + '测' * 19974
+    content = content.ljust(20000, '试')
+    assert len(content) == 20000
+    created = admin.post('/api/admin/notifications', json={'title': '公告', 'content': content})
+    assert created.status_code == 201
+    assert student.get('/api/notifications/active').json()[0]['content'] == content
+    url = f"/api/admin/notifications/{created.json()['id']}"
+    edited = content[:-1] + '新'
+    assert admin.put(url, json={'title': '更新', 'content': edited}).json()['content'] == edited
+    for method, target in [(admin.post, '/api/admin/notifications'), (admin.put, url)]:
+        assert method(target, json={'title': '公告', 'content': content + '超'}).status_code == 422
+    assert student.get('/api/notifications/active').json()[0]['content'] == edited

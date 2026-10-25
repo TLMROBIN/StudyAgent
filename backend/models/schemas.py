@@ -624,7 +624,7 @@ class AgentRoleImportResult(BaseModel):
 
 class NotificationWrite(BaseModel):
     title: str = Field(min_length=1, max_length=80)
-    content: str = Field(min_length=1, max_length=500)
+    content: str = Field(min_length=1, max_length=20000)
 
 
 class NotificationRead(BaseModel):

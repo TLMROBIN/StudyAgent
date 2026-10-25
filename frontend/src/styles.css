@@ -2617,3 +2617,16 @@ textarea {
 .chat-error { color: #b42318; background: #fff0ee; padding: 12px; border-radius: 8px; }
 .chat-image-preview { overflow: auto; max-height: 65vh; margin-top: 12px; }
 .chat-image-preview img { display: block; height: auto; }
+
+/* Long notices stay readable without displacing the chat composer. */
+.student-notice__contents,
+.notification-body {
+  max-height: 50vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.student-notice__contents { padding: 0 16px 16px; }
+.student-notice__contents .notification-body { max-height: none; overflow: visible; }
+.notification-article + .notification-article { border-top: 1px solid #ddd; margin-top: 16px; }
+.notification-preview { min-width: 0; }
