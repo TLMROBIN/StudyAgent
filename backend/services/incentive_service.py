@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 import logging
 from typing import Any, Iterable
 
-from sqlalchemy import distinct, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 

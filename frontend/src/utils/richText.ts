@@ -151,10 +151,6 @@ function normalizeMathContent(content: string): string {
     .replace(/\s+/g, ' ')
 }
 
-function renderTextSegment(text: string): string {
-  return escapeHtml(text).replace(/\n/g, '<br>')
-}
-
 function renderMathFallback(content: string, displayMode: boolean): string {
   const tag = displayMode ? 'div' : 'span'
   return `<${tag} class="message-math-fallback">${escapeHtml(content)}</${tag}>`

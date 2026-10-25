@@ -4,10 +4,10 @@ from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
+from backend.models.conversation import Conversation, GuidanceStage, MessageRole
 from backend.models.user import User, UserRole
 from backend.services.physics_error_profile_service import physics_error_profile_service
 
