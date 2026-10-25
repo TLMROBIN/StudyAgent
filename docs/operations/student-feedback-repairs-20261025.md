@@ -30,3 +30,15 @@
 ## 保留的验收边界
 
 旧平板/手心输入法、实际专有 .pho 样本属于第三批，尚未真机验收。模拟故障浏览器测试不代表真实模型故障注入；不为验证而破坏线上模型配置。未操作任何学生的真实密码。
+
+
+## 实际发布结果
+
+- 业务提交：399cfd5；159.63 的 backend/worker 已重启，Nginx 新镜像已替换。
+- 线上原库 9,822 个会话、110,168 条消息，备份路径 `backups/student-feedback-20261025/pre-release.db`；演练副本 30 张表原有字段哈希全部一致。
+- 正式 Alembic 为 20261025_0022，integrity_check=ok，foreign_key_check=0，last_message_at 空值=0。
+- Docker Hub 元数据等待阻塞常规构建，已停止该构建；使用本地 VITE_PUBLIC_BASE=/studyagent/ 生产包，在服务器现存 Nginx 镜像基础上构建发布。旧镜像保留为 studyagent-nginx:before-feedback-20261025；发布包与 Dockerfile 位于备份目录的 frontend-release/。
+- 严格 deploy_verify 通过：本地、远端、origin/main、GitHub main 同步；health、101 条 OpenAPI 路由、/login、backend/worker/nginx 均通过。
+- 学校统一入口 /studyagent/login 与本地生产 index 字节一致，68 个 JS/CSS 文件全部逐字节一致；改密返回 303、UPDATE_PASSWORD、S256；未认证置顶请求返回 401。
+- 在真实后端容器中调用当前配置模型，返回非空 156 字符；没有为测试修改线上模型配置或学生密码。
+- 详细工具日志与本地浏览器截图在忽略目录 artifacts/student-feedback-20261025/。浏览器截图使用合成用户、合成图片和模拟 API。
