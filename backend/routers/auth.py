@@ -15,13 +15,13 @@ from backend.models.schemas import (
     TokenResponse,
     UserRead,
 )
-from backend.security import decode_token, verify_password
+from backend.security import decode_token
 from backend.services.auth_service import auth_service
 from backend.services.oidc_service import OidcAuthError, oidc_service
 from backend.config import get_settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-OIDC_DISABLED_MESSAGE = "统一平台登录暂未启用，请使用账号密码登录。"
+OIDC_DISABLED_MESSAGE = "统一平台登录暂未启用，请联系管理员。"
 PASSWORD_LOGIN_DISABLED_MESSAGE = "本系统已切换为统一认证登录，请通过统一平台入口登录"
 
 
@@ -61,7 +61,7 @@ def oidc_login() -> RedirectResponse:
 
 @router.get("/oidc/change-password")
 def oidc_change_password() -> RedirectResponse:
-    return _oidc_redirect(change_password=True)
+    raise HTTPException(status_code=410, detail="子系统改密已停用，请返回统一目录页修改统一密码")
 
 
 def _oidc_redirect(*, change_password: bool = False) -> RedirectResponse:
@@ -174,9 +174,4 @@ def read_me(current_user: CurrentUser) -> UserRead:
 
 @router.post("/change-password", response_model=UserRead)
 def change_password(payload: PasswordChangeRequest, db: DbSession, current_user: CurrentUser) -> UserRead:
-    if get_settings().oidc_enabled:
-        raise HTTPException(status_code=409, detail="请通过统一身份平台修改密码")
-    if not verify_password(payload.current_password, current_user.password_hash):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password incorrect")
-    updated = auth_service.update_password(db, current_user, payload.new_password)
-    return UserRead.model_validate(updated)
+    raise HTTPException(status_code=409, detail="本地密码已停用，请在统一目录页管理统一密码")

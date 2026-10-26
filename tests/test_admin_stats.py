@@ -1,4 +1,6 @@
 import asyncio
+import pytest
+from backend.security import get_password_hash
 import io
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -226,7 +228,6 @@ def test_import_users_returns_detailed_feedback(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()
     try:
-        monkeypatch.setattr(admin_router, "get_password_hash", lambda password: f"hash:{password}")
         admin_user = User(
             username="admin",
             full_name="管理员",
@@ -285,7 +286,6 @@ def test_import_users_supports_xlsx_and_teacher_rows(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()
     try:
-        monkeypatch.setattr(admin_router, "get_password_hash", lambda password: f"hash:{password}")
         admin_user = User(
             username="admin",
             full_name="管理员",
@@ -412,11 +412,10 @@ def test_list_classroom_options_can_follow_grade_filter():
         session.close()
 
 
-def test_create_user_auto_generates_username_and_default_password(monkeypatch):
+def test_create_user_generates_shadow_identity_without_local_password(monkeypatch):
     SessionLocal = build_session()
     session = SessionLocal()
     try:
-        monkeypatch.setattr(admin_router, "get_password_hash", lambda password: f"hash:{password}")
         admin_user = User(
             username="admin",
             full_name="管理员",
@@ -443,7 +442,8 @@ def test_create_user_auto_generates_username_and_default_password(monkeypatch):
         created_student = session.query(User).filter(User.full_name == "高二学生").one()
         assert result.username == build_generated_username("高二学生", UserRole.STUDENT, "2班")
         assert result.grade_label == "高二"
-        assert created_student.password_hash == f"hash:{build_default_password('高二学生')}"
+        assert created_student.password_hash == "sso-managed"
+        assert created_student.must_change_password is False
         assert created_student.classroom_label == "高二2班"
     finally:
         session.close()
@@ -576,76 +576,19 @@ def test_delete_user_rejects_student_with_archived_conversations(monkeypatch):
         session.close()
 
 
-def test_reset_password_uses_generated_default(monkeypatch):
+def test_local_password_reset_is_disabled_without_mutation():
+    from fastapi import HTTPException
     SessionLocal = build_session()
     session = SessionLocal()
     try:
-        monkeypatch.setattr(admin_router.auth_service, "update_password", lambda db, user, new_password: setattr(user, "password_hash", f"hash:{new_password}") or user)
-        admin_user = User(
-            username="admin",
-            full_name="管理员",
-            role=UserRole.ADMIN,
-            password_hash="hash",
-        )
-        teacher = User(
-            username="zhaolaoshi",
-            full_name="赵老师",
-            role=UserRole.TEACHER,
-            password_hash="old-hash",
-        )
-        session.add_all([admin_user, teacher])
+        student = User(username="student",full_name="学生",role=UserRole.STUDENT,password_hash="old-hash",failed_login_count=6)
+        session.add(student)
         session.commit()
-        session.refresh(admin_user)
-        session.refresh(teacher)
-
-        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-        result = admin_router.reset_password(
-            admin_router.PasswordResetRequest(user_id=teacher.id),
-            session,
-            admin_user,
-            request,
-        )
-
-        assert result.username == "zhaolaoshi"
-        assert teacher.password_hash == f"hash:{build_default_password('赵老师')}"
-    finally:
-        session.close()
-
-
-def test_reset_password_clears_failed_login_lock():
-    SessionLocal = build_session()
-    session = SessionLocal()
-    try:
-        admin_user = User(
-            username="admin",
-            full_name="管理员",
-            role=UserRole.ADMIN,
-            password_hash="hash",
-        )
-        student = User(
-            username="zhoujundong14",
-            full_name="周俊栋",
-            role=UserRole.STUDENT,
-            password_hash="old-hash",
-            failed_login_count=6,
-            locked_until=datetime.now(UTC) + timedelta(minutes=15),
-        )
-        session.add_all([admin_user, student])
-        session.commit()
-        session.refresh(admin_user)
-        session.refresh(student)
-
-        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-        result = admin_router.reset_password(
-            admin_router.PasswordResetRequest(user_id=student.id),
-            session,
-            admin_user,
-            request,
-        )
-
-        assert result.username == "zhoujundong14"
-        assert student.failed_login_count == 0
-        assert student.locked_until is None
+        with pytest.raises(HTTPException) as exc:
+            admin_router.reset_password(admin_router.PasswordResetRequest(user_id=student.id),session,None,None)
+        assert exc.value.status_code == 409
+        assert student.password_hash == "old-hash"
+        assert student.failed_login_count == 6
     finally:
         session.close()
 
@@ -827,7 +770,7 @@ def test_student_can_authenticate_with_generated_login_account(monkeypatch):
             username=build_generated_username("张三", UserRole.STUDENT, "1班"),
             full_name="张三",
             role=UserRole.STUDENT,
-            password_hash=admin_router.get_password_hash(build_default_password("张三")),
+            password_hash=get_password_hash(build_default_password("张三")),
             grade=1,
             classroom=Classroom(grade=1, name="1班"),
         )

@@ -6,7 +6,6 @@ import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
 import {
   api,
-  apiBase,
   type AgentRolePublic,
   type ChatModelOption,
   type ChatModelStatus,
@@ -133,7 +132,6 @@ const resolveDialogVisible = ref(false)
 const resolveSubmitting = ref(false)
 const resolveReflection = ref('')
 const currentConversationResolved = ref(false)
-const passwordDialogVisible = ref(false)
 const pinningConversationIds = ref<Set<number>>(new Set())
 const deletingConversationIds = ref<Set<number>>(new Set())
 const guidanceStage = ref('initial_guidance')
@@ -736,15 +734,6 @@ function applyStarterPrompt(prompt: string) {
   })
 }
 
-function openPasswordDialog() {
-  passwordDialogVisible.value = true
-}
-
-function goToUnifiedPassword() {
-  persistDraft(form.message)
-  window.location.assign(`${apiBase}/auth/oidc/change-password`)
-}
-
 function handleSessionMenuCommand(command: string) {
   if (command === 'settings') {
     settingsOpen.value = !settingsOpen.value
@@ -757,9 +746,6 @@ function handleSessionMenuCommand(command: string) {
       openResolveDialog()
     }
     return
-  }
-  if (command === 'password') {
-    openPasswordDialog()
   }
 }
 
@@ -1306,7 +1292,7 @@ function chatFailureMessage(error: unknown): string {
   if (message === '模型调用失败，请联系管理员老师或稍后再试。'
     || message === '图片识别失败，请联系管理员老师或稍后再试。') return message
   if (message === 'Password change required') {
-    return '请先通过“更多”中的“修改密码”完成改密，再继续提问。草稿已保留。'
+    return '请返回统一目录页处理账号状态，再继续提问。草稿已保留。'
   }
   if (message === 'Question is not a supported academic prompt') {
     return '当前只支持学科相关问题，请换一个和学习内容相关的问题再试。草稿已保留。'
@@ -1757,7 +1743,6 @@ onMounted(async () => {
                 <el-dropdown-item v-if="showCompletionAction" command="resolve" divided>
                   {{ currentConversationResolved ? '恢复继续思考' : '完成本次思考' }}
                 </el-dropdown-item>
-                <el-dropdown-item command="password">修改密码</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -2301,13 +2286,6 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="passwordDialogVisible" title="修改统一登录密码" width="min(92vw, 420px)">
-      <p>登录密码由统一身份平台管理，修改后用于各学习系统的统一登录。</p>
-      <template #footer>
-        <button class="ghost-button" @click="passwordDialogVisible = false">取消</button>
-        <button class="primary-button" @click="goToUnifiedPassword">前往统一身份平台</button>
-      </template>
-    </el-dialog>
     <el-dialog v-model="imagePreviewVisible" title="查看题图" width="min(96vw, 1000px)" @closed="previewAttachment = null">
       <div class="row-actions">
         <button class="ghost-button" @click="imagePreviewZoom = Math.min(4, imagePreviewZoom + 0.5)">放大</button>

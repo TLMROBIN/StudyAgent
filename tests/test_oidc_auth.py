@@ -134,7 +134,7 @@ def test_oidc_config_reports_disabled(monkeypatch):
 
     assert auth_router.oidc_config() == {
         "enabled": False,
-        "message": "统一平台登录暂未启用，请使用账号密码登录。",
+        "message": "统一平台登录暂未启用，请联系管理员。",
     }
 
 
@@ -146,7 +146,7 @@ def test_oidc_login_rejects_when_disabled(monkeypatch):
         auth_router.oidc_login()
     except HTTPException as exc:
         assert exc.status_code == 503
-        assert exc.detail == "统一平台登录暂未启用，请使用账号密码登录。"
+        assert exc.detail == "统一平台登录暂未启用，请联系管理员。"
     else:
         raise AssertionError("Expected disabled OIDC login to be rejected")
 
@@ -159,7 +159,7 @@ def test_oidc_callback_rejects_when_disabled_before_state_validation(monkeypatch
         auth_router.oidc_callback("abc", "bad", request=None, db=None)  # type: ignore[arg-type]
     except HTTPException as exc:
         assert exc.status_code == 503
-        assert exc.detail == "统一平台登录暂未启用，请使用账号密码登录。"
+        assert exc.detail == "统一平台登录暂未启用，请联系管理员。"
     else:
         raise AssertionError("Expected disabled OIDC callback to be rejected")
 
@@ -202,12 +202,9 @@ def test_password_action_uses_pkce_and_does_not_mutate_local_password(monkeypatc
     settings = Settings(OIDC_ENABLED=True, OIDC_ISSUER='https://identity.example/realms/school', OIDC_CLIENT_ID='studyagent')
     monkeypatch.setattr(oidc_service, 'settings', settings)
     monkeypatch.setattr(auth_router, 'get_settings', lambda: settings)
-    response = auth_router.oidc_change_password()
-    query = parse_qs(urlparse(response.headers['location']).query)
-    assert query['kc_action'] == ['UPDATE_PASSWORD']
-    assert query['code_challenge_method'] == ['S256']
-    assert query['state'] and query['code_challenge']
-    assert 'studyagent_oidc_state=' in str(response.raw_headers)
+    with pytest.raises(HTTPException) as removed:
+        auth_router.oidc_change_password()
+    assert removed.value.status_code == 410
     with pytest.raises(HTTPException) as exc:
         auth_router.change_password(PasswordChangeRequest(current_password='old-password', new_password='new-password-123'), None, None)
     assert exc.value.status_code == 409

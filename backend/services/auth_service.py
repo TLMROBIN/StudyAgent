@@ -32,8 +32,8 @@ class AuthService:
             username=self.settings.bootstrap_admin_username,
             full_name="系统管理员",
             role=UserRole.ADMIN,
-            password_hash=get_password_hash(self.settings.bootstrap_admin_password),
-            must_change_password=True,
+            password_hash="sso-managed",
+            must_change_password=False,
         )
         db.add(admin)
         db.commit()

@@ -36,10 +36,8 @@ from backend.models.schemas import (
     UserUpdate,
 )
 from backend.models.user import Classroom, User, UserRole
-from backend.security import get_password_hash
-from backend.services.account_service import build_default_password, build_generated_username
+from backend.services.account_service import build_generated_username
 from backend.services.audit_service import audit_service
-from backend.services.auth_service import auth_service
 from backend.services.filter_service import filter_service
 from backend.services.student_grade_service import student_grade_service
 from backend.services.system_config_service import system_config_service
@@ -526,7 +524,7 @@ def _apply_managed_user_payload(
         username = build_generated_username(normalized_name, role, normalized_classroom_name)
         student_grade_service.apply_manual_grade_state(user, grade=grade, is_graduated=is_graduated)
         user.classroom_id = classroom.id if classroom else None
-        user.must_change_password = True
+        user.must_change_password = False
     else:
         username = build_generated_username(normalized_name, role)
         user.grade = None
@@ -610,9 +608,9 @@ def create_user(payload: UserCreate, db: DbSession, current_user: CurrentAdmin, 
         student_no=None,
         full_name=payload.full_name.strip(),
         role=role,
-        password_hash=get_password_hash(build_default_password(payload.full_name)),
+        password_hash="sso-managed",
         classroom_id=None,
-        must_change_password=role == UserRole.STUDENT,
+        must_change_password=False,
     )
     _apply_managed_user_payload(
         db,
@@ -725,25 +723,7 @@ def delete_user(user_id: int, db: DbSession, current_user: CurrentAdmin, request
 
 @router.post("/users/reset-password", response_model=UserRead)
 def reset_password(payload: PasswordResetRequest, db: DbSession, current_user: CurrentAdmin, request: Request) -> UserRead:
-    user = db.get(User, payload.user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    updated = auth_service.update_password(db, user, build_default_password(user.full_name))
-    updated.must_change_password = updated.role == UserRole.STUDENT
-    db.add(updated)
-    db.commit()
-    db.refresh(updated)
-    audit_service.log(
-        db,
-        actor=current_user,
-        action="reset_password",
-        target_type="user",
-        target_id=str(updated.id),
-        result="success",
-        ip_address=request.client.host if request.client else None,
-        detail={"username": updated.username},
-    )
-    return UserRead.model_validate(updated)
+    raise HTTPException(status_code=409, detail="本地密码已停用，请在统一目录管理统一账号")
 
 
 def _parse_import_rows(file_name: str, content: bytes) -> list[dict[str, str]]:
@@ -824,8 +804,8 @@ def _import_users(file_name: str, content: bytes, db: DbSession, current_user: C
             student_no=None,
             full_name=full_name,
             role=role,
-            password_hash=get_password_hash(build_default_password(full_name)),
-            must_change_password=role == UserRole.STUDENT,
+            password_hash="sso-managed",
+            must_change_password=False,
         )
         _apply_managed_user_payload(
             db,

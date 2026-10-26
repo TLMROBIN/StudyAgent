@@ -154,7 +154,7 @@ async function createUser() {
     ...parseGradePayload(form.grade_status),
   }
   await api.post('/admin/users', payload)
-  ElMessage.success('用户已创建，默认密码为：姓名拼音+123456')
+  ElMessage.success('本地档案已创建；登录账号请在统一目录管理')
   Object.assign(form, {
     full_name: '',
     role: 'teacher',
@@ -173,12 +173,6 @@ async function importStudents(file: File) {
   importResult.value = data
   ElMessage.success(`批量创建已处理：新增 ${data.created}，跳过 ${data.skipped_existing}，异常 ${data.invalid}`)
   await Promise.all([loadUsers(), loadClassrooms()])
-}
-
-async function resetPassword(userId: number) {
-  await api.post('/admin/users/reset-password', { user_id: userId })
-  ElMessage.success('密码已重置为默认密码：姓名拼音+123456')
-  await loadUsers()
 }
 
 function openEditDialog(user: UserRow) {
@@ -255,7 +249,7 @@ onMounted(async () => {
           <p class="eyebrow">User Operations</p>
           <h2>创建用户与批量导入</h2>
           <p class="panel-subcopy">
-            登录账号自动为姓名拼音 + 班级数字（教师无班级后缀）；默认密码为姓名拼音 + 123456。
+            这里只管理本地档案；登录账号及密码统一在目录页管理，不设置本地密码。
           </p>
         </div>
       </div>
@@ -316,9 +310,9 @@ onMounted(async () => {
               <span>填写了也会被忽略</span>
             </article>
             <article class="table-row table-row-wrap">
-              <strong>账号与密码</strong>
+              <strong>账号关联</strong>
               <span>登录账号自动生成为姓名拼音</span>
-              <span>学生会追加班级数字后缀；默认密码为姓名拼音 + <code>123456</code></span>
+              <span>学生会追加班级数字后缀；使用统一认证登录</span>
             </article>
           </div>
           <div class="table-like">
@@ -399,9 +393,8 @@ onMounted(async () => {
         <span>{{ item.grade_label || '-' }}</span>
         <span>{{ item.classroom_label || '-' }}</span>
         <span>{{ item.is_active ? '启用' : '停用' }}</span>
-        <span>{{ item.must_change_password ? '需改密' : '正常' }}</span>
+        <span>统一认证</span>
         <button class="ghost-button" @click="openEditDialog(item)">编辑</button>
-        <button class="ghost-button" @click="resetPassword(item.id)">重置密码</button>
         <button class="ghost-button danger-text" @click="deleteUser(item)">删除</button>
       </article>
       <p v-if="!users.length" class="panel-subcopy">暂无匹配账号。</p>
