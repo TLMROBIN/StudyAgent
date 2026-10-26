@@ -6,7 +6,7 @@ import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
 import {
   api,
-  resolveApiUrl,
+  apiBase,
   type AgentRolePublic,
   type ChatModelOption,
   type ChatModelStatus,
@@ -742,7 +742,7 @@ function openPasswordDialog() {
 
 function goToUnifiedPassword() {
   persistDraft(form.message)
-  window.location.assign(resolveApiUrl('/auth/oidc/change-password'))
+  window.location.assign(`${apiBase}/auth/oidc/change-password`)
 }
 
 function handleSessionMenuCommand(command: string) {
