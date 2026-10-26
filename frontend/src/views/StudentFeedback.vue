@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { normalizeSelectedImage } from '../utils/chatImageUpload'
+import { prepareChatImageUpload } from '../utils/chatImageUpload'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 
@@ -63,8 +63,10 @@ function formatTime(value?: string | null) {
 }
 
 function responseDetail(error: unknown, fallback: string) {
-  const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail
-  return detail || fallback
+  const response = (error as { response?: { status?: number; data?: { detail?: unknown } } }).response
+  if (response?.status === 413) return '图片总大小超过上传限制，请减少图片后重试；文字和图片已保留'
+  const detail = response?.data?.detail
+  return typeof detail === 'string' ? detail : `${fallback}，文字和图片已保留，请重试`
 }
 
 async function loadFeedback() {
@@ -186,7 +188,7 @@ async function addSelectedImages(event: Event) {
         break
       }
       try {
-        const normalized = await normalizeSelectedImage(file)
+        const { file: normalized } = await prepareChatImageUpload(file)
         selectedImages.value.push({
           id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
           file: normalized,
@@ -228,11 +230,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="dashboard-stack">
+  <section class="dashboard-stack student-feedback-page">
     <section class="panel">
       <div class="panel-header panel-header--wrap">
         <div>
-          <p class="eyebrow">Feedback</p>
           <h2>意见反馈</h2>
           <p class="panel-subcopy">把使用中遇到的问题或建议发给管理员；管理员回复后会显示在这里。</p>
         </div>
@@ -281,7 +282,8 @@ onMounted(() => {
           v-model="content"
           class="textarea"
           maxlength="1000"
-          rows="6"
+          rows="4"
+          aria-label="反馈内容"
           :disabled="saving || preparingImages || feedbackBanned || dailyRemaining <= 0"
           placeholder="请描述你遇到的问题、建议或希望改进的地方"
         ></textarea>

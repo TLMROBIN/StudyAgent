@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from './stores/auth'
@@ -19,14 +19,14 @@ function readSidebarCollapsed() {
   if (typeof window === 'undefined') {
     return false
   }
-  return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1'
+  const saved = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)
+  return saved === null ? window.location.pathname.includes('/student') : saved === '1'
 }
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const sidebarCollapsed = ref(readSidebarCollapsed())
-const compactStudentShell = ref(false)
 const unreadSummary = ref<FeedbackUnreadSummary>({
   unread_feedback_replies: 0,
   unread_release_notes: 0,
@@ -38,8 +38,8 @@ const requiresAuth = computed(() => route.matched.some((record) => record.meta.r
 const showShell = computed(() => route.path !== '/login')
 const shellActive = computed(() => showShell.value && !!auth.user)
 const studentChatActive = computed(() => route.path === '/student')
-const forceCompactStudentShell = computed(() => studentChatActive.value && compactStudentShell.value)
-const sidebarIsCollapsed = computed(() => sidebarCollapsed.value || forceCompactStudentShell.value)
+const sidebarIsCollapsed = computed(() => sidebarCollapsed.value)
+const chatView = ref<{ openHistory: () => void; newQuestion: () => void; openNotices: () => void } | null>(null)
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
 const navigationItems = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = []
@@ -90,33 +90,16 @@ const sidebarUserBadge = computed(() => {
   return name.slice(Math.max(0, name.length - 2))
 })
 
-let compactStudentShellQuery: MediaQueryList | null = null
-
-function syncCompactStudentShell() {
-  compactStudentShell.value = Boolean(compactStudentShellQuery?.matches)
-}
-
-onMounted(() => {
-  compactStudentShellQuery = window.matchMedia('(max-width: 1280px)')
-  syncCompactStudentShell()
-  compactStudentShellQuery.addEventListener('change', syncCompactStudentShell)
-})
-
-onBeforeUnmount(() => {
-  compactStudentShellQuery?.removeEventListener('change', syncCompactStudentShell)
-})
-
 watchEffect(() => {
   if (auth.initialized && requiresAuth.value && !auth.user && route.path !== '/login') {
     forceLoginRedirect()
   }
 })
 
-watch(sidebarCollapsed, (value) => {
-  if (typeof window === 'undefined') {
-    return
+watch(() => auth.user?.role, (role) => {
+  if (window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === null) {
+    sidebarCollapsed.value = role === 'student'
   }
-  window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, value ? '1' : '0')
 })
 
 watch(
@@ -165,6 +148,7 @@ async function handleLogout() {
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
+  window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, sidebarCollapsed.value ? '1' : '0')
 }
 </script>
 
@@ -194,11 +178,16 @@ function toggleSidebar() {
             <p class="brand-title">{{ sidebarIsCollapsed ? '答疑' : '高中学科答疑' }}</p>
             <p v-if="!sidebarIsCollapsed" class="brand-copy">专属知识库 + 苏格拉底引导，先帮你想清楚，再帮你做出来。</p>
           </div>
-          <button v-if="!forceCompactStudentShell" class="sidebar-toggle" @click="toggleSidebar">
+          <button class="sidebar-toggle" :aria-expanded="!sidebarIsCollapsed" aria-label="展开或收起侧边栏" @click="toggleSidebar">
             {{ sidebarIsCollapsed ? '展开' : '收起' }}
           </button>
         </div>
         <nav class="nav-list">
+          <template v-if="studentChatActive">
+            <button type="button" title="对话历史" aria-label="对话历史" @click="chatView?.openHistory()">{{ sidebarIsCollapsed ? '历史' : '对话历史' }}</button>
+            <button type="button" title="新问题" @click="chatView?.newQuestion()">新问题</button>
+            <button type="button" title="学校通知" @click="chatView?.openNotices()">{{ sidebarIsCollapsed ? '通知' : '学校通知' }}</button>
+          </template>
           <RouterLink
             v-for="item in navigationItems"
             :key="item.to"
@@ -210,6 +199,7 @@ function toggleSidebar() {
             <span v-if="!sidebarIsCollapsed" class="nav-link__label">{{ item.label }}</span>
             <span v-if="item.showUnreadDot" class="nav-unread-dot" aria-label="有未读内容"></span>
           </RouterLink>
+
         </nav>
       </div>
       <div class="sidebar-footer">
@@ -234,7 +224,7 @@ function toggleSidebar() {
       <div v-if="!routeReady" class="auth-guard">
         <p class="panel-subcopy">正在检查登录状态...</p>
       </div>
-      <RouterView v-else />
+      <RouterView v-else v-slot="{ Component }"><component :is="Component" ref="chatView" /></RouterView>
     </main>
   </div>
 </template>

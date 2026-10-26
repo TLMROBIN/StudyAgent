@@ -127,6 +127,12 @@ const incentiveSummary = ref<IncentiveSummary>({
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
 const historyOpen = ref(false)
+const noticesOpen = ref(false)
+defineExpose({
+  openHistory: () => { historyOpen.value = true },
+  newQuestion: () => { if (!sending.value && !resolveSubmitting.value) startNewConversation() },
+  openNotices: () => { noticesOpen.value = true },
+})
 const settingsOpen = ref(false)
 const resolveDialogVisible = ref(false)
 const resolveSubmitting = ref(false)
@@ -239,7 +245,6 @@ const canSend = computed(() => (
   && !selectedModelQuotaExhausted.value
 ))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
-const notificationTitle = computed(() => notifications.value[0]?.title || '学校通知')
 const canRequestRecommendations = computed(() => {
   if (recommendationMode.value === 'keyword') {
     return recommendationKeyword.value.trim().length >= 2
@@ -488,8 +493,7 @@ function queueScrollToBottom() {
 
 function handleMessageInputFocus() {
   window.setTimeout(() => {
-    const root = messageInputRef.value?.$el || document.querySelector<HTMLElement>('.chat-message-input')
-    root?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    if (followLatest.value) scrollToBottom()
   }, 300)
 }
 
@@ -1717,9 +1721,6 @@ onMounted(async () => {
               {{ selectedSubjectCapabilityLabel }}
             </span>
           </div>
-          <button type="button" class="study-tool-button" :disabled="resolveSubmitting" @click="historyOpen = true">
-            历史<span v-if="conversations.length" class="study-tool-count">{{ conversations.length }}</span>
-          </button>
           <el-dropdown
             :disabled="sending || resolveSubmitting"
             trigger="click"
@@ -1746,14 +1747,6 @@ onMounted(async () => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <button
-            type="button"
-            class="primary-button study-new-question"
-            :disabled="sending || resolveSubmitting"
-            @click="startNewConversation()"
-          >
-            新问题
-          </button>
         </div>
       </header>
 
@@ -1795,24 +1788,15 @@ onMounted(async () => {
         </label>
       </section>
 
-      <details v-if="notifications.length" class="student-notice">
-        <summary>
-          <span class="student-notice__label">学校通知</span>
-          <span class="student-notice__preview">{{ notificationTitle }}</span>
-          <span class="student-notice__action">查看</span>
-        </summary>
-        <div class="student-notice__contents">
-          <article v-for="notice in notifications" :key="notice.id" class="notification-article">
-            <h3>{{ notice.title }}</h3>
-            <div class="message-body notification-body" v-html="renderRichText(notice.content)"></div>
-          </article>
-        </div>
-      </details>
-      <div v-else class="student-notice student-notice--empty" aria-label="学校通知">
-        <span class="student-notice__label">学校通知</span>
-        <span>暂无新通知，专心解决眼前的问题。</span>
-      </div>
+      <el-drawer v-model="noticesOpen" title="学校通知" size="min(520px, 100%)" append-to-body>
+        <article v-for="notice in notifications" :key="notice.id" class="notification-article">
+          <h3>{{ notice.title }}</h3>
+          <div class="message-body notification-body" v-html="renderRichText(notice.content)"></div>
+        </article>
+        <p v-if="!notifications.length">暂无新通知。</p>
+      </el-drawer>
 
+      <div class="chat-reading-area">
       <div
         ref="chatStreamRef"
         @scroll.passive="handleChatScroll"
@@ -1896,7 +1880,8 @@ onMounted(async () => {
         </div>
       </div>
 
-      <button v-if="!followLatest" type="button" class="ghost-button" @click="returnToLatest">回到最新回复</button>
+      <button v-if="!followLatest" type="button" class="chat-return-latest" aria-label="回到最新回复" title="回到最新回复" @click="returnToLatest"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 4v16m-6-6 6 6 6-6" /></svg></button>
+      </div>
       <div class="chat-controls">
         <input ref="fileInputRef" type="file" style="display: none" @change="handleImageSelection" />
         <input

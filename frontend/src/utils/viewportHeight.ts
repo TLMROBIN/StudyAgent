@@ -7,9 +7,10 @@ type ViewportEventTarget = {
 
 type ViewportWindow = ViewportEventTarget & {
   innerHeight?: number
-  visualViewport?: ViewportEventTarget & { height?: number | null }
+  visualViewport?: ViewportEventTarget & { height?: number | null; offsetTop?: number } | null
   document?: {
     documentElement?: {
+      dataset?: Record<string, string>
       style?: {
         setProperty: (property: string, value: string) => void
       }
@@ -50,6 +51,8 @@ export function syncViewportHeight(win: ViewportWindow | null = defaultWindow())
   }
 
   root.style.setProperty(VIEWPORT_HEIGHT_PROPERTY, `${height}px`)
+  root.style.setProperty('--app-viewport-offset-top', `${Math.max(0, win?.visualViewport?.offsetTop || 0)}px`)
+  if (root.dataset) root.dataset.compactViewport = String(height < 500)
   return height
 }
 
@@ -60,15 +63,30 @@ export function installViewportHeight(win: ViewportWindow | null = defaultWindow
 
   const sync = () => {
     syncViewportHeight(win)
+    // Ordinary pages scroll; the fixed chat shell instead follows visualViewport.
+    if (typeof document !== 'undefined') {
+      const active = document.activeElement as HTMLElement | null
+      if (active?.matches('.student-feedback-page textarea')) {
+        active.scrollIntoView({ block: 'nearest' })
+      }
+    }
   }
 
+  let focusTimer: ReturnType<typeof setTimeout> | undefined
+  const focusSync = () => {
+    clearTimeout(focusTimer)
+    focusTimer = setTimeout(sync, 350)
+  }
   sync()
+  win.addEventListener?.('focusin', focusSync)
   win.addEventListener?.('resize', sync)
   win.addEventListener?.('orientationchange', sync)
   win.visualViewport?.addEventListener?.('resize', sync)
   win.visualViewport?.addEventListener?.('scroll', sync)
 
   return () => {
+    clearTimeout(focusTimer)
+    win.removeEventListener?.('focusin', focusSync)
     win.removeEventListener?.('resize', sync)
     win.removeEventListener?.('orientationchange', sync)
     win.visualViewport?.removeEventListener?.('resize', sync)

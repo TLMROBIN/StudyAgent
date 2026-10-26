@@ -99,13 +99,9 @@ assert.doesNotMatch(studentChatSource, /Student Workspace/, 'student surface sho
 assert.doesNotMatch(studentChatSource, /class="student-notice-bar"/, 'school notices should not use the old marquee container')
 assert.doesNotMatch(styles, /notice-marquee/, 'school notices should not animate continuously')
 
-assert.match(appSource, /window\.matchMedia\('\(max-width: 1280px\)'\)/, 'student task mode should compact the global shell on tablets')
-assert.match(appSource, /app-root--student-chat/, 'the app shell should expose a student task-mode styling hook')
-assert.match(
-  appSource,
-  /sidebarIsCollapsed = computed\(\(\) => sidebarCollapsed\.value \|\| forceCompactStudentShell\.value\)/,
-  'tablet task mode should default the global sidebar to its compact state',
-)
+assert.match(appSource, /saved === null \? window\.location\.pathname\.includes\('\/student'\)/, 'sidebar should collapse by default while allowing manual expansion')
+assert.match(appSource, /chatView\?\.openHistory/, 'history should live in the sidebar')
+assert.match(studentChatSource, /class="chat-return-latest"/, 'return-to-latest should float over the reading area')
 
 assert.match(
   styles,
