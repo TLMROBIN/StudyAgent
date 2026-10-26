@@ -11,11 +11,10 @@ import {
   markFeedbackRead,
   markReleaseNoteRead,
   type FeedbackUnreadSummary,
-  type FeedbackAttachment,
   type ReleaseNoteItem,
   type StudentFeedbackItem,
 } from '../utils/api'
-import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
+import FeedbackImages from '../components/FeedbackImages.vue'
 
 type FeedbackSection = 'feedback' | 'release-notes'
 type PendingFeedbackImage = {
@@ -49,7 +48,6 @@ const unreadSummary = ref<FeedbackUnreadSummary>({
 
 const hasUnreadFeedbackReplies = computed(() => unreadSummary.value.unread_feedback_replies > 0)
 const hasUnreadReleaseNotes = computed(() => unreadSummary.value.unread_release_notes > 0)
-const { assetUrl, openAsset, preloadAssets } = useAuthorizedAssets()
 
 function formatTime(value?: string | null) {
   if (!value) {
@@ -74,7 +72,6 @@ async function loadFeedback() {
   try {
     const data = await fetchMyFeedback()
     items.value = data.items
-    await preloadAssets(items.value.flatMap((item) => item.attachments || []))
     dailyLimit.value = data.daily_limit
     dailyRemaining.value = data.daily_remaining
     feedbackBanned.value = data.feedback_banned
@@ -219,13 +216,6 @@ function clearSelectedImages() {
   resetImageInputs()
 }
 
-function openFeedbackAttachment(attachment: FeedbackAttachment) {
-  void openAsset(attachment).catch((error) => {
-    console.error(error)
-    ElMessage.error('图片打开失败，请稍后重试')
-  })
-}
-
 onBeforeUnmount(() => {
   clearSelectedImages()
 })
@@ -357,20 +347,7 @@ onMounted(() => {
             </strong>
             <span>提交 {{ formatTime(item.created_at) }}</span>
           </div>
-          <div v-if="item.attachments?.length" class="feedback-image-grid">
-            <a
-              v-for="attachment in item.attachments"
-              :key="attachment.attachment_id"
-              class="feedback-image-thumb"
-              :href="assetUrl(attachment) || undefined"
-              target="_blank"
-              rel="noreferrer"
-              @click.prevent="openFeedbackAttachment(attachment)"
-            >
-              <img v-if="assetUrl(attachment)" :src="assetUrl(attachment)" :alt="attachment.filename" loading="lazy" />
-              <span v-else>图片加载中...</span>
-            </a>
-          </div>
+          <FeedbackImages :attachments="item.attachments || []" />
           <div v-if="item.reply_content" class="feedback-reply">
             <strong>管理员回复</strong>
             <p>{{ item.reply_content }}</p>
