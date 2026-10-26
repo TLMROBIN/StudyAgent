@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { renderRichText } from '../utils/richText'
@@ -70,8 +70,21 @@ const classStats = ref<ClassroomStat[]>([])
 const portraits = ref<StudentPortrait[]>([])
 const incentivePortraits = ref<TeacherIncentivePortrait[]>([])
 const notifications = ref<NotificationItem[]>([])
-const loading = ref(false)
-const trendLoading = ref(false)
+type DashboardSection = 'overview' | 'classes' | 'portraits' | 'incentives'
+const sectionStates = reactive<Record<DashboardSection, { loading: boolean; loaded: boolean; error: string }>>({
+  overview: { loading: true, loaded: false, error: '' },
+  classes: { loading: true, loaded: false, error: '' },
+  portraits: { loading: true, loaded: false, error: '' },
+  incentives: { loading: true, loaded: false, error: '' },
+})
+const loading = computed(() => Object.values(sectionStates).some((state) => state.loading))
+const sectionControllers = new Map<DashboardSection, AbortController>()
+const trendLoading = ref(true)
+const trendLoaded = ref(false)
+const trendError = ref('')
+let trendController: AbortController | undefined
+let trendRequest = 0
+let trendTimer: ReturnType<typeof setTimeout> | undefined
 const notificationLoading = ref(false)
 const notificationSaving = ref(false)
 const editingNotificationId = ref<number | null>(null)
@@ -251,24 +264,54 @@ async function archiveNotification(item: NotificationItem) {
   }
 }
 
-async function loadDashboard() {
-  loading.value = true
+async function loadSection<T>(
+  section: DashboardSection,
+  fetchData: (signal: AbortSignal) => Promise<T>,
+  applyData: (data: T) => void,
+) {
+  sectionControllers.get(section)?.abort()
+  const controller = new AbortController()
+  sectionControllers.set(section, controller)
+  const state = sectionStates[section]
+  state.loading = true
+  state.error = ''
   try {
-    const [{ data: overviewData }, { data: classData }, { data: portraitData }] = await Promise.all([
-      api.get<OverviewData>('/stats/overview'),
-      api.get<ClassroomStat[]>('/stats/classes'),
-      api.get<StudentPortrait[]>('/stats/portraits', { params: { limit: 12 } }),
-    ])
-    overview.value = overviewData
-    classStats.value = classData
-    portraits.value = portraitData
-    incentivePortraits.value = await fetchTeacherIncentivePortraits()
+    const data = await fetchData(controller.signal)
+    if (controller.signal.aborted || sectionControllers.get(section) !== controller) return
+    applyData(data)
+    state.loaded = true
   } catch (error) {
+    if (controller.signal.aborted || sectionControllers.get(section) !== controller) return
     console.error(error)
-    ElMessage.error('统计数据加载失败')
+    state.error = '加载失败，请重试。'
   } finally {
-    loading.value = false
+    if (sectionControllers.get(section) === controller) state.loading = false
   }
+}
+
+function loadOverview() {
+  return loadSection('overview', async (signal) => (await api.get<OverviewData>('/stats/overview', { signal })).data,
+    (data) => { overview.value = data })
+}
+
+function loadClasses() {
+  return loadSection('classes', async (signal) => (await api.get<ClassroomStat[]>('/stats/classes', { signal })).data,
+    (data) => { classStats.value = data })
+}
+
+function loadPortraits() {
+  return loadSection('portraits', async (signal) => (await api.get<StudentPortrait[]>('/stats/portraits', {
+    params: { limit: 12 }, signal,
+  })).data, (data) => { portraits.value = data })
+}
+
+function loadIncentives() {
+  return loadSection('incentives', (signal) => fetchTeacherIncentivePortraits(undefined, signal),
+    (data) => { incentivePortraits.value = data })
+}
+
+async function loadDashboard() {
+  await Promise.all([loadOverview(), loadClasses(), loadPortraits(), loadIncentives()])
 }
 
 async function sendPraise(item: TeacherIncentivePortrait) {
@@ -286,7 +329,7 @@ async function sendPraise(item: TeacherIncentivePortrait) {
     )
     await praiseStudent(item.student_id, result.value.trim())
     ElMessage.success('表扬已发送')
-    incentivePortraits.value = await fetchTeacherIncentivePortraits()
+    await loadIncentives()
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') {
       console.error(error)
@@ -311,7 +354,13 @@ async function showReflections(item: TeacherIncentivePortrait) {
 }
 
 async function loadTrend() {
+  clearTimeout(trendTimer)
+  trendController?.abort()
+  const controller = new AbortController()
+  trendController = controller
+  const request = ++trendRequest
   trendLoading.value = true
+  trendError.value = ''
   try {
     const params = new URLSearchParams()
     params.set('granularity', trendGranularity.value)
@@ -323,13 +372,16 @@ async function loadTrend() {
       params.set('end_date', endDate)
     }
     selectedSubjects.value.forEach((subject) => params.append('subjects', subject))
-    const { data } = await api.get<UsageTrend>('/stats/usage-trend', { params })
+    const { data } = await api.get<UsageTrend>('/stats/usage-trend', { params, signal: controller.signal })
+    if (controller.signal.aborted || request !== trendRequest) return
     trend.value = data
+    trendLoaded.value = true
   } catch (error) {
+    if (controller.signal.aborted || request !== trendRequest) return
     console.error(error)
-    ElMessage.error('趋势数据加载失败')
+    trendError.value = '趋势数据加载失败，请重试。'
   } finally {
-    trendLoading.value = false
+    if (request === trendRequest) trendLoading.value = false
   }
 }
 
@@ -351,7 +403,20 @@ async function exportStats() {
   }
 }
 
-watch([trendGranularity, selectedSubjects, trendDateRange], loadTrend, { deep: true })
+watch([trendGranularity, selectedSubjects, trendDateRange], () => {
+  ++trendRequest
+  trendController?.abort()
+  clearTimeout(trendTimer)
+  trendLoading.value = true
+  trendTimer = setTimeout(() => { void loadTrend() }, 250)
+}, { deep: true })
+
+onBeforeUnmount(() => {
+  clearTimeout(trendTimer)
+  ++trendRequest
+  trendController?.abort()
+  sectionControllers.forEach((controller) => controller.abort())
+})
 
 onMounted(() => {
   void loadDashboard()
@@ -436,7 +501,12 @@ onMounted(() => {
         </div>
       </div>
     </section>
-    <div class="metric-grid">
+    <p v-if="sectionStates.overview.error" class="panel-subcopy" role="alert">
+      概览{{ sectionStates.overview.error }}
+      <button class="ghost-button" :disabled="sectionStates.overview.loading" @click="loadOverview">重试</button>
+    </p>
+    <p v-else-if="!sectionStates.overview.loaded" class="panel-subcopy" role="status">概览加载中…</p>
+    <div v-if="sectionStates.overview.loaded" class="metric-grid">
       <MetricTile label="累计提问" :value="overview.total_questions" hint="学生所有会话累计" />
       <MetricTile label="已解决率" :value="`${(overview.resolved_rate * 100).toFixed(1)}%`" hint="学生主动标记完成" />
       <MetricTile label="平均轮次" :value="overview.average_turns" hint="反映引导深度" />
@@ -448,7 +518,10 @@ onMounted(() => {
           <h2>学科分布</h2>
         </div>
       </div>
-      <div class="subject-pie">
+      <p v-if="!sectionStates.overview.loaded" class="panel-subcopy" role="status">
+        {{ sectionStates.overview.error ? '学科分布加载失败，请重试概览。' : '学科分布加载中…' }}
+      </p>
+      <div v-else class="subject-pie">
         <svg
           v-if="subjectPieModel.slices.length"
           class="subject-pie-svg"
@@ -515,6 +588,10 @@ onMounted(() => {
           <el-checkbox v-for="subject in trend.available_subjects" :key="subject" :label="subject" :value="subject" />
         </el-checkbox-group>
       </div>
+      <p v-if="trendError" class="panel-subcopy" role="alert">
+        {{ trendError }}
+        <button class="ghost-button" :disabled="trendLoading" @click="loadTrend">重试</button>
+      </p>
       <div v-loading="trendLoading" class="trend-chart">
         <svg
           v-if="trend.labels.length"
@@ -549,7 +626,8 @@ onMounted(() => {
             </circle>
           </g>
         </svg>
-        <p v-else class="panel-subcopy">当前范围暂无使用数据。</p>
+        <p v-else-if="!trendLoading && trendLoaded && !trendError" class="panel-subcopy">当前范围暂无使用数据。</p>
+        <p v-else-if="trendLoading" class="panel-subcopy" role="status">趋势加载中…</p>
       </div>
       <div class="trend-legend">
         <span v-for="line in chartModel.lines" :key="line.name" class="trend-legend-item">
@@ -565,6 +643,11 @@ onMounted(() => {
           <h2>班级统计</h2>
         </div>
       </div>
+      <p v-if="sectionStates.classes.error" class="panel-subcopy" role="alert">
+        班级统计{{ sectionStates.classes.error }}
+        <button class="ghost-button" :disabled="sectionStates.classes.loading" @click="loadClasses">重试</button>
+      </p>
+      <p v-else-if="!sectionStates.classes.loaded" class="panel-subcopy" role="status">班级统计加载中…</p>
       <div class="table-like">
         <article v-for="item in classStats" :key="item.classroom_label" class="table-row table-row-wrap">
           <div class="table-main">
@@ -577,7 +660,7 @@ onMounted(() => {
             <span class="detail-chip">平均轮次 {{ item.average_turns }}</span>
           </div>
         </article>
-        <p v-if="!classStats.length" class="panel-subcopy">暂无班级统计数据。</p>
+        <p v-if="sectionStates.classes.loaded && !sectionStates.classes.loading && !sectionStates.classes.error && !classStats.length" class="panel-subcopy">暂无班级统计数据。</p>
       </div>
     </section>
     <section class="panel">
@@ -587,6 +670,11 @@ onMounted(() => {
           <h2>班级学习参与度</h2>
         </div>
       </div>
+      <p v-if="sectionStates.incentives.error" class="panel-subcopy" role="alert">
+        班级学习参与度{{ sectionStates.incentives.error }}
+        <button class="ghost-button" :disabled="sectionStates.incentives.loading" @click="loadIncentives">重试</button>
+      </p>
+      <p v-else-if="!sectionStates.incentives.loaded" class="panel-subcopy" role="status">班级学习参与度加载中…</p>
       <div class="table-like">
         <article v-for="item in incentivePortraits.slice(0, 50)" :key="item.student_id" class="table-row table-row-wrap">
           <div class="table-main">
@@ -605,7 +693,7 @@ onMounted(() => {
             <button class="primary-button" @click="sendPraise(item)">发表扬</button>
           </div>
         </article>
-        <p v-if="!incentivePortraits.length" class="panel-subcopy">激励机制尚未启用或暂无学习记录。</p>
+        <p v-if="sectionStates.incentives.loaded && !sectionStates.incentives.loading && !sectionStates.incentives.error && !incentivePortraits.length" class="panel-subcopy">激励机制尚未启用或暂无学习记录。</p>
       </div>
     </section>
     <section class="panel">
@@ -615,6 +703,11 @@ onMounted(() => {
           <h2>学生画像</h2>
         </div>
       </div>
+      <p v-if="sectionStates.portraits.error" class="panel-subcopy" role="alert">
+        学生画像{{ sectionStates.portraits.error }}
+        <button class="ghost-button" :disabled="sectionStates.portraits.loading" @click="loadPortraits">重试</button>
+      </p>
+      <p v-else-if="!sectionStates.portraits.loaded" class="panel-subcopy" role="status">学生画像加载中…</p>
       <div class="table-like">
         <article v-for="item in portraits" :key="item.student_id" class="table-row table-row-wrap">
           <div class="table-main">
@@ -629,7 +722,7 @@ onMounted(() => {
             <span class="detail-chip">最近活跃 {{ formatTime(item.last_active_at) }}</span>
           </div>
         </article>
-        <p v-if="!portraits.length" class="panel-subcopy">暂无学生画像数据。</p>
+        <p v-if="sectionStates.portraits.loaded && !sectionStates.portraits.loading && !sectionStates.portraits.error && !portraits.length" class="panel-subcopy">暂无学生画像数据。</p>
       </div>
     </section>
   </section>

@@ -952,8 +952,9 @@ export async function markIncentivePraisesRead(): Promise<IncentiveSummary> {
   return data
 }
 
-export async function fetchTeacherIncentivePortraits(classroomId?: number): Promise<TeacherIncentivePortrait[]> {
+export async function fetchTeacherIncentivePortraits(classroomId?: number, signal?: AbortSignal): Promise<TeacherIncentivePortrait[]> {
   const { data } = await api.get<TeacherIncentivePortrait[]>('/incentive/teacher/portraits', {
+    signal,
     params: typeof classroomId === 'number' ? { classroom_id: classroomId } : undefined,
   })
   return data

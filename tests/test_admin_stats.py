@@ -910,3 +910,122 @@ def test_student_portrait_serializes_naive_utc_to_beijing():
     payload = portrait.model_dump(mode="json")
 
     assert payload["last_active_at"] == "2026-04-09T18:15:00+08:00"
+
+
+def test_dashboard_aggregates_preserve_scope_empty_students_and_message_roles():
+    """Counting must retain archived/inactive history without exposing another class."""
+    from sqlalchemy import event
+
+    SessionLocal = build_session()
+    with SessionLocal() as session:
+        class_one = Classroom(grade=1, name="1班")
+        class_two = Classroom(grade=2, name="1班")
+        admin = User(username="aggregate-admin", full_name="管理员", role=UserRole.ADMIN, password_hash="hash")
+        teacher = User(username="aggregate-teacher", full_name="任课教师", role=UserRole.TEACHER, password_hash="hash")
+        unassigned_teacher = User(username="no-classes", full_name="无班教师", role=UserRole.TEACHER, password_hash="hash")
+        teacher.teacher_classrooms.append(class_one)
+        first = User(username="aggregate-first", full_name="甲", role=UserRole.STUDENT, grade=1, classroom=class_one, password_hash="hash")
+        inactive = User(username="aggregate-inactive", full_name="乙", role=UserRole.STUDENT, grade=1, classroom=class_one, password_hash="hash", is_active=False)
+        empty = User(username="aggregate-empty", full_name="丙", role=UserRole.STUDENT, grade=1, classroom=class_one, password_hash="hash")
+        other = User(username="aggregate-other", full_name="丁", role=UserRole.STUDENT, grade=2, classroom=class_two, password_hash="hash")
+        session.add_all([admin, teacher, unassigned_teacher, first, inactive, empty, other])
+        session.flush()
+        conversations = [
+            Conversation(student_id=first.id, subject="物理", resolved=True, guidance_stage=GuidanceStage.FALLBACK, deleted_by_student_at=datetime(2026, 5, 3, tzinfo=UTC)),
+            Conversation(student_id=first.id, subject="数学", resolved=False),
+            Conversation(student_id=first.id, subject="数学", resolved=False),
+            Conversation(student_id=first.id, subject="物理", resolved=False),
+            Conversation(student_id=inactive.id, subject="", resolved=True),
+            Conversation(student_id=other.id, subject="化学", resolved=True),
+            Conversation(student_id=admin.id, subject="管理测试", resolved=True),
+        ]
+        session.add_all(conversations)
+        session.flush()
+        session.add_all([
+            Message(conversation_id=conversations[0].id, role=MessageRole.USER, content="甲"),
+            Message(conversation_id=conversations[0].id, role=MessageRole.USER, content="乙"),
+            Message(conversation_id=conversations[0].id, role=MessageRole.ASSISTANT, content="引导"),
+            Message(conversation_id=conversations[1].id, role=MessageRole.SYSTEM, content="系统"),
+            Message(conversation_id=conversations[4].id, role=MessageRole.USER, content="停用前历史"),
+            Message(conversation_id=conversations[5].id, role=MessageRole.USER, content="其他班"),
+            Message(conversation_id=conversations[6].id, role=MessageRole.USER, content="非学生"),
+        ])
+        session.commit()
+        ids = {key: obj.id for key, obj in [('admin', admin), ('teacher', teacher), ('none', unassigned_teacher), ('first', first)]}
+
+    loaded = []
+    statements = []
+
+    def record_load(db, obj):
+        loaded.append(type(obj))
+
+    def record_sql(conn, cursor, statement, params, context, many):
+        statements.append(statement)
+
+    # A fresh identity map ensures existing fixture instances cannot mask eager loading.
+    with SessionLocal() as db:
+        event.listen(db, 'loaded_as_persistent', record_load)
+        event.listen(db.bind, 'before_cursor_execute', record_sql)
+        try:
+            viewers = {key: db.get(User, identity) for key, identity in ids.items()}
+            assert stats_service.overview(db, viewers['admin']) == {
+                'total_questions': 6, 'resolved_rate': 0.5, 'average_turns': 0.67,
+                'by_subject': [{'subject': '数学', 'count': 2}, {'subject': '物理', 'count': 2}, {'subject': '化学', 'count': 1}],
+            }
+            assert stats_service.overview(db, viewers['teacher']) == {
+                'total_questions': 5, 'resolved_rate': 0.4, 'average_turns': 0.6,
+                'by_subject': [{'subject': '数学', 'count': 2}, {'subject': '物理', 'count': 2}],
+            }
+            assert stats_service.overview(db, viewers['first'])['total_questions'] == 4
+            assert stats_service.overview(db, viewers['none']) == {
+                'total_questions': 0, 'resolved_rate': 0.0, 'average_turns': 0.0, 'by_subject': [],
+            }
+            classes = stats_service.classroom_breakdown(db, viewers['teacher'])
+            assert classes == [{
+                'classroom_label': '高一1班', 'grade': 1, 'classroom_name': '1班', 'student_count': 3,
+                'total_conversations': 5, 'resolved_rate': 0.4, 'average_turns': 0.6,
+            }]
+            assert stats_service.classroom_breakdown(db, viewers['none']) == []
+            portraits = stats_service.student_portraits(db, viewers['teacher'], limit=1)
+            assert len(portraits) == 1
+            assert portraits[0]['student_id'] == ids['first']
+            assert portraits[0]['total_conversations'] == 4
+            assert portraits[0]['resolved_rate'] == 0.25
+            assert portraits[0]['fallback_ratio'] == 0.25
+            assert portraits[0]['focus_subject'] == '物理', 'equal subject counts retain first-conversation tie break'
+            assert len(stats_service.student_portraits(db, viewers['teacher'], limit=12)) == 2
+            assert stats_service.student_portraits(db, viewers['admin'], limit=0) == []
+            assert stats_service.student_portraits(db, viewers['none']) == []
+            stats_service.usage_trend(db, viewers['teacher'], start_date='2026-05-01', end_date='2026-05-31')
+            assert Conversation not in loaded and Message not in loaded
+            assert not any('messages.content' in sql or 'messages.assets' in sql for sql in statements)
+        finally:
+            event.remove(db.bind, 'before_cursor_execute', record_sql)
+
+
+def test_usage_trend_aggregates_boundaries_week_month_and_available_subject_scope():
+    SessionLocal = build_session()
+    with SessionLocal() as db:
+        classroom = Classroom(grade=1, name='1班')
+        teacher = User(username='trend-teacher', full_name='教师', role=UserRole.TEACHER, password_hash='hash')
+        teacher.teacher_classrooms.append(classroom)
+        student = User(username='trend-student', full_name='学生', role=UserRole.STUDENT, password_hash='hash', classroom=classroom)
+        other = User(username='trend-other', full_name='其他班', role=UserRole.STUDENT, password_hash='hash')
+        db.add_all([teacher, student, other]); db.flush()
+        dates = [datetime(2026, 4, 30, 23, 59, 59), datetime(2026, 5, 1), datetime(2026, 5, 3, 23, 59, 59, 999999), datetime(2026, 5, 4)]
+        db.add_all([Conversation(student_id=student.id, subject='数学', created_at=value) for value in dates])
+        db.add_all([
+            Conversation(student_id=student.id, subject='物理', created_at=datetime(2026, 1, 1)),
+            Conversation(student_id=other.id, subject='化学', created_at=datetime(2026, 5, 1)),
+        ]); db.commit()
+        daily = stats_service.usage_trend(db, teacher, start_date='2026-05-03', end_date='2026-05-01', subjects=[' 数学 ', '物理'])
+        assert daily['start_date'] == '2026-05-01' and daily['end_date'] == '2026-05-03'
+        assert daily['available_subjects'] == ['数学', '物理']
+        assert daily['labels'] == ['2026-05-01', '2026-05-02', '2026-05-03']
+        assert [row['data'] for row in daily['series']] == [[1, 0, 1], [1, 0, 1], [0, 0, 0]]
+        weekly = stats_service.usage_trend(db, teacher, granularity='week', start_date='2026-05-01', end_date='2026-05-04')
+        assert weekly['labels'] == ['2026-04-27', '2026-05-04']
+        assert weekly['series'][0]['data'] == [2, 1]
+        monthly = stats_service.usage_trend(db, teacher, granularity='month', start_date='2026-04-30', end_date='2026-05-04')
+        assert monthly['labels'] == ['2026-04', '2026-05']
+        assert monthly['series'][0]['data'] == [1, 3]

@@ -1,36 +1,43 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from backend.models.conversation import Conversation, GuidanceStage, MessageRole
-from backend.models.user import User, UserRole
+from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
+from backend.models.user import User, UserRole, teacher_classes
 from backend.services.physics_error_profile_service import physics_error_profile_service
 
 
 class StatsService:
     def overview(self, db: Session, viewer: User) -> dict:
-        students = self._scoped_students(db, viewer)
-        conversations = self._flatten_conversations(students)
-        total_questions = len(conversations)
-        resolved_rate = (sum(1 for item in conversations if item.resolved) / total_questions) if total_questions else 0.0
-        average_turns = (
-            sum(self._conversation_turns(conversation) for conversation in conversations) / total_questions
-            if total_questions
-            else 0.0
-        )
-        subject_counter = Counter(conversation.subject for conversation in conversations if conversation.subject)
+        scope = self._student_scope(viewer)
+        total_questions, resolved = db.execute(
+            select(func.count(Conversation.id), func.sum(case((Conversation.resolved.is_(True), 1), else_=0)))
+            .where(Conversation.student_id.in_(scope))
+        ).one()
+        turns = db.scalar(
+            select(func.count(Message.id))
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(Conversation.student_id.in_(scope), Message.role == MessageRole.USER)
+        ) or 0
+        subject_rows = db.execute(
+            select(Conversation.subject, func.count(Conversation.id))
+            .where(Conversation.student_id.in_(scope), Conversation.subject != "")
+            .group_by(Conversation.subject)
+        ).all()
+        resolved_rate = (resolved or 0) / total_questions if total_questions else 0.0
+        average_turns = turns / total_questions if total_questions else 0.0
         return {
             "total_questions": total_questions,
             "resolved_rate": round(resolved_rate, 4),
             "average_turns": round(average_turns, 2),
             "by_subject": [
                 {"subject": subject, "count": count}
-                for subject, count in sorted(subject_counter.items(), key=lambda item: (-item[1], item[0]))
+                for subject, count in sorted(subject_rows, key=lambda item: (-item[1], item[0]))
             ],
         }
 
@@ -44,10 +51,13 @@ class StatsService:
         end_date: str | date | None = None,
         subjects: list[str] | None = None,
     ) -> dict:
-        students = self._scoped_students(db, viewer)
-        conversations = self._flatten_conversations(students)
+        scope = self._student_scope(viewer)
         requested_subjects = [subject.strip() for subject in (subjects or []) if subject.strip()]
-        available_subjects = sorted({conversation.subject for conversation in conversations if conversation.subject})
+        available_subjects = list(db.scalars(
+            select(Conversation.subject).distinct()
+            .where(Conversation.student_id.in_(scope), Conversation.subject != "")
+            .order_by(Conversation.subject)
+        ))
 
         today = datetime.now(UTC).date()
         start = self._coerce_date(start_date) or (today - timedelta(days=29))
@@ -62,16 +72,25 @@ class StatsService:
             subject: dict.fromkeys(labels, 0) for subject in requested_subjects
         }
 
-        for conversation in conversations:
-            conversation_date = self._as_date(conversation.created_at)
-            if conversation_date is None or conversation_date < start or conversation_date > end:
-                continue
+        # Read only daily counts within the requested range, never message bodies.
+        day = func.date(Conversation.created_at)
+        daily_counts = db.execute(
+            select(day, Conversation.subject, func.count(Conversation.id))
+            .where(
+                Conversation.student_id.in_(scope),
+                Conversation.created_at >= datetime.combine(start, time.min, tzinfo=UTC),
+                Conversation.created_at < datetime.combine(end + timedelta(days=1), time.min, tzinfo=UTC),
+            )
+            .group_by(day, Conversation.subject)
+        )
+        for day_value, subject, count in daily_counts:
+            conversation_date = self._coerce_date(day_value)
             label = self._period_label(conversation_date, granularity)
             if label not in label_set:
                 continue
-            total_counts[label] += 1
-            if conversation.subject in subject_counts:
-                subject_counts[conversation.subject][label] += 1
+            total_counts[label] += count
+            if subject in subject_counts:
+                subject_counts[subject][label] += count
 
         series = [
             {
@@ -130,12 +149,21 @@ class StatsService:
 
     def classroom_breakdown(self, db: Session, viewer: User) -> list[dict]:
         students = self._scoped_students(db, viewer)
+        totals = self._student_totals(db, viewer)
+        turns = dict(db.execute(
+            select(Conversation.student_id, func.count(Message.id))
+            .join(Message, Message.conversation_id == Conversation.id)
+            .where(Conversation.student_id.in_(self._student_scope(viewer)), Message.role == MessageRole.USER)
+            .group_by(Conversation.student_id)
+        ).all())
         buckets: dict[str, dict] = defaultdict(
             lambda: {
                 "grade": None,
                 "classroom_name": None,
                 "student_ids": set(),
-                "conversations": [],
+                "total": 0,
+                "resolved": 0,
+                "turns": 0,
             }
         )
         for student in students:
@@ -144,12 +172,15 @@ class StatsService:
             bucket["grade"] = student.grade
             bucket["classroom_name"] = student.classroom.name if student.classroom else None
             bucket["student_ids"].add(student.id)
-            bucket["conversations"].extend(student.conversations)
+            summary = totals.get(student.id)
+            if summary:
+                bucket["total"] += summary.total
+                bucket["resolved"] += summary.resolved
+            bucket["turns"] += turns.get(student.id, 0)
 
         rows = []
         for label, bucket in buckets.items():
-            conversations = bucket["conversations"]
-            total = len(conversations)
+            total = bucket["total"]
             rows.append(
                 {
                     "classroom_label": label,
@@ -158,11 +189,11 @@ class StatsService:
                     "student_count": len(bucket["student_ids"]),
                     "total_conversations": total,
                     "resolved_rate": round(
-                        (sum(1 for conversation in conversations if conversation.resolved) / total) if total else 0.0,
+                        (bucket["resolved"] / total) if total else 0.0,
                         4,
                     ),
                     "average_turns": round(
-                        (sum(self._conversation_turns(conversation) for conversation in conversations) / total) if total else 0.0,
+                        (bucket["turns"] / total) if total else 0.0,
                         2,
                     ),
                 }
@@ -170,68 +201,77 @@ class StatsService:
         return sorted(rows, key=lambda item: (-item["total_conversations"], item["classroom_label"]))
 
     def student_portraits(self, db: Session, viewer: User, limit: int = 12) -> list[dict]:
-        students = [student for student in self._scoped_students(db, viewer) if student.conversations]
+        totals = self._student_totals(db, viewer)
         portraits = []
-        for student in students:
-            conversations = list(student.conversations)
-            total = len(conversations)
-            subject_counter = Counter(conversation.subject for conversation in conversations if conversation.subject)
+        for student in self._scoped_students(db, viewer):
+            summary = totals.get(student.id)
+            if summary is None:
+                continue
             portraits.append(
                 {
                     "student_id": student.id,
                     "student_name": student.full_name,
                     "login_account": student.username,
                     "classroom_label": student.classroom_label,
-                    "total_conversations": total,
-                    "resolved_rate": round(
-                        (sum(1 for conversation in conversations if conversation.resolved) / total) if total else 0.0,
-                        4,
-                    ),
-                    "focus_subject": max(subject_counter, key=subject_counter.get) if subject_counter else None,
-                    "fallback_ratio": round(
-                        (sum(1 for conversation in conversations if conversation.guidance_stage == GuidanceStage.FALLBACK) / total)
-                        if total
-                        else 0.0,
-                        4,
-                    ),
-                    "last_active_at": max((conversation.updated_at for conversation in conversations), default=None),
+                    "total_conversations": summary.total,
+                    "resolved_rate": round(summary.resolved / summary.total, 4),
+                    "focus_subject": None,
+                    "fallback_ratio": round(summary.fallback / summary.total, 4),
+                    "last_active_at": summary.last_active_at,
                 }
             )
-        portraits.sort(
-            key=lambda item: (
-                -item["total_conversations"],
-                item["resolved_rate"],
-                item["student_name"],
-            )
-        )
-        return portraits[:limit]
+        portraits.sort(key=lambda item: (-item["total_conversations"], item["resolved_rate"], item["student_name"]))
+        portraits = portraits[:limit]
+        if portraits:
+            # Match Counter's original tie break: the subject seen in the first conversation wins.
+            subject_rows = db.execute(
+                select(Conversation.student_id, Conversation.subject, func.count(Conversation.id), func.min(Conversation.id))
+                .where(
+                    Conversation.student_id.in_([item["student_id"] for item in portraits]),
+                    Conversation.subject != "",
+                )
+                .group_by(Conversation.student_id, Conversation.subject)
+            ).all()
+            focus = {}
+            for student_id, subject, count, first_id in sorted(subject_rows, key=lambda row: (-row[2], row[3])):
+                focus.setdefault(student_id, subject)
+            for portrait in portraits:
+                portrait["focus_subject"] = focus.get(portrait["student_id"])
+        return portraits
 
-    def _scoped_students(self, db: Session, viewer: User) -> list[User]:
-        statement = (
-            select(User)
-            .where(User.role == UserRole.STUDENT)
-            .options(
-                selectinload(User.classroom),
-                selectinload(User.conversations).selectinload(Conversation.messages),
-            )
-            .order_by(User.full_name.asc())
-        )
+    @staticmethod
+    def _student_scope(viewer: User):
+        statement = select(User.id).where(User.role == UserRole.STUDENT)
         if viewer.role == UserRole.TEACHER:
-            classroom_ids = [classroom.id for classroom in viewer.teacher_classrooms]
-            if not classroom_ids:
-                return []
-            statement = statement.where(User.classroom_id.in_(classroom_ids))
+            statement = statement.where(User.classroom_id.in_(
+                select(teacher_classes.c.classroom_id).where(teacher_classes.c.teacher_id == viewer.id)
+            ))
         elif viewer.role == UserRole.STUDENT:
             statement = statement.where(User.id == viewer.id)
-        return db.scalars(statement).unique().all()
+        return statement
 
-    @staticmethod
-    def _flatten_conversations(students: list[User]) -> list[Conversation]:
-        return [conversation for student in students for conversation in student.conversations]
+    def _student_totals(self, db: Session, viewer: User) -> dict:
+        rows = db.execute(
+            select(
+                Conversation.student_id,
+                func.count(Conversation.id).label("total"),
+                func.sum(case((Conversation.resolved.is_(True), 1), else_=0)).label("resolved"),
+                func.sum(case((Conversation.guidance_stage == GuidanceStage.FALLBACK, 1), else_=0)).label("fallback"),
+                func.max(Conversation.updated_at).label("last_active_at"),
+            )
+            .where(Conversation.student_id.in_(self._student_scope(viewer)))
+            .group_by(Conversation.student_id)
+        ).all()
+        return {row.student_id: row for row in rows}
 
-    @staticmethod
-    def _conversation_turns(conversation: Conversation) -> int:
-        return sum(1 for message in conversation.messages if message.role == MessageRole.USER)
+    def _scoped_students(self, db: Session, viewer: User) -> list[User]:
+        # Metadata only. Loading conversation/message relationships here causes
+        # every dashboard request to materialize the school's full chat history.
+        return list(db.scalars(
+            select(User).where(User.id.in_(self._student_scope(viewer)))
+            .options(selectinload(User.classroom))
+            .order_by(User.full_name.asc())
+        ))
 
     @staticmethod
     def _coerce_date(value: str | date | None) -> date | None:
