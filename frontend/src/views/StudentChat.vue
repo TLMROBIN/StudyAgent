@@ -1309,6 +1309,9 @@ function chatFailureMessage(error: unknown): string {
     return '当前提问较多，请稍等片刻再发送。草稿已保留。'
   }
   if (status === 403) {
+    if (message.startsWith('问答权限已暂停')) {
+      return `${message} 草稿已保留。`
+    }
     return '当前账号暂时无法发送问题，请联系老师或管理员。草稿已保留。'
   }
   if (status && status >= 500) {

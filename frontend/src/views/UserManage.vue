@@ -16,6 +16,9 @@ interface UserRow {
   classroom_name?: string | null
   classroom_label?: string | null
   must_change_password: boolean
+  chat_banned: boolean
+  chat_banned_until?: string | null
+  chat_ban_reason?: string | null
 }
 
 interface ClassroomOption {
@@ -66,6 +69,10 @@ const filters = reactive({
   classroom_name: '',
 })
 const editDialogVisible = ref(false)
+const chatBanDialogVisible = ref(false)
+const chatBanSaving = ref(false)
+const chatBanStudent = ref<UserRow | null>(null)
+const chatBanForm = reactive({ endDate: '', reason: '' })
 const editForm = reactive({
   id: 0,
   role: 'student',
@@ -219,6 +226,53 @@ async function deleteUser(user: UserRow) {
     if (detail) {
       ElMessage.error(detail)
     }
+  }
+}
+
+function formatChatBanTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : ''
+}
+
+function openChatBanDialog(user: UserRow) {
+  chatBanStudent.value = user
+  // The picker selects the final disabled day in Beijing time, inclusive.
+  const lastDay = user.chat_banned && user.chat_banned_until
+    ? new Date(new Date(user.chat_banned_until).getTime() - 1)
+    : new Date(Date.now() + 7 * 86400000)
+  chatBanForm.endDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(lastDay)
+  chatBanForm.reason = user.chat_ban_reason || ''
+  chatBanDialogVisible.value = true
+}
+
+async function saveChatBan(remove = false) {
+  const student = chatBanStudent.value
+  if (!student || chatBanSaving.value) return
+  if (!remove && (!chatBanForm.endDate || !chatBanForm.reason.trim())) {
+    ElMessage.warning('请选择截止日期并填写原因')
+    return
+  }
+  const until = new Date(new Date(`${chatBanForm.endDate}T00:00:00+08:00`).getTime() + 86400000)
+  if (!remove && (!Number.isFinite(until.getTime()) || until.getTime() <= Date.now())) {
+    ElMessage.warning('截止日期不能早于今天')
+    return
+  }
+  chatBanSaving.value = true
+  try {
+    if (remove) {
+      await api.delete(`/admin/users/${student.id}/chat-ban`)
+    } else {
+      await api.put(`/admin/users/${student.id}/chat-ban`, {
+        until: until.toISOString(), reason: chatBanForm.reason.trim(),
+      })
+    }
+    ElMessage.success(remove ? '问答权限已恢复' : '问答权限已禁用，到期自动恢复')
+    chatBanDialogVisible.value = false
+    await loadUsers()
+  } catch (error) {
+    const detail = (error as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : '问答权限设置失败，请稍后重试')
+  } finally {
+    chatBanSaving.value = false
   }
 }
 
@@ -394,12 +448,33 @@ onMounted(async () => {
         <span>{{ item.classroom_label || '-' }}</span>
         <span>{{ item.is_active ? '启用' : '停用' }}</span>
         <span>统一认证</span>
+        <span v-if="item.role === 'student'">
+          {{ item.chat_banned ? `问答禁用至 ${formatChatBanTime(item.chat_banned_until)}（北京时间）` : '问答正常' }}
+        </span>
+        <button v-if="item.role === 'student'" class="ghost-button" @click="openChatBanDialog(item)">问答权限</button>
         <button class="ghost-button" @click="openEditDialog(item)">编辑</button>
         <button class="ghost-button danger-text" @click="deleteUser(item)">删除</button>
       </article>
       <p v-if="!users.length" class="panel-subcopy">暂无匹配账号。</p>
     </section>
   </section>
+
+  <el-dialog v-model="chatBanDialogVisible" title="设置学生问答权限" width="min(480px, 94vw)" :close-on-click-modal="!chatBanSaving" :show-close="!chatBanSaving">
+    <div v-if="chatBanStudent" class="dashboard-stack">
+      <strong>{{ chatBanStudent.classroom_label }} · {{ chatBanStudent.full_name }}</strong>
+      <p class="panel-subcopy">禁用后暂停发送问题和获取推荐题目，仍可登录、查看历史与通知、提交反馈。到期自动恢复，也可提前解除。</p>
+      <p v-if="chatBanStudent.chat_banned" class="danger-text">当前已禁用，将于北京时间 {{ formatChatBanTime(chatBanStudent.chat_banned_until) }} 恢复。</p>
+      <label>禁用至（北京时间，包含当天）</label>
+      <el-date-picker v-model="chatBanForm.endDate" type="date" value-format="YYYY-MM-DD" placeholder="选择最后禁用日期" :disabled="chatBanSaving" />
+      <label>禁用原因</label>
+      <el-input v-model="chatBanForm.reason" type="textarea" :rows="3" maxlength="500" show-word-limit :disabled="chatBanSaving" />
+    </div>
+    <template #footer>
+      <button v-if="chatBanStudent?.chat_banned" class="ghost-button" :disabled="chatBanSaving" @click="saveChatBan(true)">解除禁用</button>
+      <button class="ghost-button" :disabled="chatBanSaving" @click="chatBanDialogVisible = false">取消</button>
+      <button class="primary-button" :disabled="chatBanSaving" @click="saveChatBan(false)">{{ chatBanSaving ? '保存中…' : '保存禁用设置' }}</button>
+    </template>
+  </el-dialog>
 
   <el-dialog v-model="editDialogVisible" title="编辑用户" width="480px">
     <div class="dashboard-stack">

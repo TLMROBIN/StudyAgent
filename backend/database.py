@@ -287,6 +287,10 @@ def apply_runtime_schema_updates() -> None:
             statements.append("ALTER TABLE users ADD COLUMN last_grade_promotion_year INTEGER")
         if "graduated_at" not in user_columns:
             statements.append("ALTER TABLE users ADD COLUMN graduated_at DATETIME")
+        if "chat_banned_until" not in user_columns:
+            statements.append("ALTER TABLE users ADD COLUMN chat_banned_until DATETIME")
+        if "chat_ban_reason" not in user_columns:
+            statements.append("ALTER TABLE users ADD COLUMN chat_ban_reason VARCHAR(500)")
 
     if "conversations" in table_names:
         conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}

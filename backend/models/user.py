@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.database import Base
 from backend.grade_utils import format_grade_label
 from backend.models.base import TimestampMixin
+from backend.time_utils import assume_utc
 
 
 class UserRole(str, Enum):
@@ -53,6 +54,8 @@ class User(TimestampMixin, Base):
     classroom_id: Mapped[int | None] = mapped_column(ForeignKey("classrooms.id", ondelete="SET NULL"), nullable=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    chat_banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    chat_ban_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -77,6 +80,14 @@ class User(TimestampMixin, Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+
+    @property
+    def chat_banned(self) -> bool:
+        return (
+            self.role == UserRole.STUDENT
+            and self.chat_banned_until is not None
+            and assume_utc(self.chat_banned_until) > datetime.now(UTC)
+        )
 
     @property
     def is_graduated(self) -> bool:

@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.database import SessionLocal
 from backend.dependencies import CurrentUser, DbSession
+from backend.services.chat_permission_service import ensure_chat_allowed
 from backend.models.agent_config import AgentConfig
 from backend.models.conversation import (
     ChatMessageAttachment,
@@ -1599,6 +1600,7 @@ def recommend_questions(
     db: DbSession,
     current_user: CurrentUser,
 ) -> list[QuestionRecommendationRead]:
+    ensure_chat_allowed(current_user)
     if not is_valid_subject(payload.subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     recommendation_query = _resolve_recommendation_query(db, current_user, payload)
@@ -1621,6 +1623,7 @@ def recommend_questions(
 
 @router.post("/stream")
 async def stream_chat_endpoint(request: Request, db: DbSession, current_user: CurrentUser):
+    ensure_chat_allowed(current_user)
     payload, image_upload = await _parse_stream_request_payload(request)
     return await stream_chat(payload, db, current_user, request, image_upload=image_upload)
 
@@ -1650,6 +1653,7 @@ async def stream_chat(
     *,
     image_upload: UploadFile | None = None,
 ):
+    ensure_chat_allowed(current_user)
     if not is_valid_subject(payload.subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     started = perf_counter()

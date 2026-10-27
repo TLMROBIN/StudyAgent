@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 from typing import Literal
 
-from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
@@ -78,6 +78,19 @@ class UserRead(BaseModel):
     classroom_label: str | None = None
     must_change_password: bool
     is_active: bool
+    chat_banned: bool = False
+    chat_banned_until: datetime | None = None
+    chat_ban_reason: str | None = None
+
+
+class StudentChatBanWrite(BaseModel):
+    until: AwareDatetime
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class ClassroomOptionRead(BaseModel):

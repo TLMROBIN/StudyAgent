@@ -34,6 +34,7 @@ from backend.models.schemas import (
     UserImportResult,
     UserRead,
     UserUpdate,
+    StudentChatBanWrite,
 )
 from backend.models.user import Classroom, User, UserRole
 from backend.services.account_service import build_generated_username
@@ -41,6 +42,7 @@ from backend.services.audit_service import audit_service
 from backend.services.filter_service import filter_service
 from backend.services.student_grade_service import student_grade_service
 from backend.services.system_config_service import system_config_service
+from backend.services.chat_permission_service import set_student_chat_restriction
 from backend.routers.feedback import _feedback_attachment_read, feedback_reply_is_unread
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -570,6 +572,39 @@ def list_users(
 
     users = db.scalars(statement).all()
     return [UserRead.model_validate(user) for user in users]
+
+
+@router.put("/users/{student_id}/chat-ban", response_model=UserRead)
+def ban_student_chat(
+    student_id: int, payload: StudentChatBanWrite, db: DbSession,
+    current_user: CurrentAdmin, request: Request,
+) -> UserRead:
+    student = db.get(User, student_id)
+    if student is None:
+        raise HTTPException(status_code=404, detail="学生不存在")
+    set_student_chat_restriction(
+        db, student=student, actor=current_user, until=payload.until, reason=payload.reason,
+        ip_address=request.client.host if request.client else None,
+    )
+    db.commit()
+    db.refresh(student)
+    return UserRead.model_validate(student)
+
+
+@router.delete("/users/{student_id}/chat-ban", response_model=UserRead)
+def unban_student_chat(
+    student_id: int, db: DbSession, current_user: CurrentAdmin, request: Request,
+) -> UserRead:
+    student = db.get(User, student_id)
+    if student is None:
+        raise HTTPException(status_code=404, detail="学生不存在")
+    set_student_chat_restriction(
+        db, student=student, actor=current_user, until=None,
+        ip_address=request.client.host if request.client else None,
+    )
+    db.commit()
+    db.refresh(student)
+    return UserRead.model_validate(student)
 
 
 @router.get("/classrooms", response_model=list[ClassroomOptionRead])

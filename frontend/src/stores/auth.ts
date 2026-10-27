@@ -16,6 +16,9 @@ export interface UserInfo {
   full_name: string
   role: 'student' | 'teacher' | 'admin'
   must_change_password: boolean
+  chat_banned?: boolean
+  chat_banned_until?: string | null
+  chat_ban_reason?: string | null
 }
 
 let sessionReadyPromise: Promise<boolean> | null = null
