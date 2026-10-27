@@ -1958,8 +1958,8 @@ onMounted(async () => {
           </label>
           <div class="chat-primary-actions">
             <button v-if="sending" type="button" class="ghost-button" @click="stopStreaming()">停止生成</button>
-            <button type="button" class="primary-button send-question-button" :disabled="sending || !canSend" @click="sendMessage">
-              {{ sending ? '正在思考...' : '发送问题' }}
+            <button v-else type="button" class="primary-button send-question-button" :disabled="!canSend" @click="sendMessage">
+              发送问题
             </button>
           </div>
         </div>

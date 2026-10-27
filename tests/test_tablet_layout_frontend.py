@@ -30,13 +30,17 @@ def test_viewport_meta_declares_interactive_widget():
     assert "interactive-widget=resizes-content" in html
 
 
-def test_chat_input_scrolls_into_view_on_focus():
+def test_chat_focus_only_follows_latest_without_scrolling_the_fixed_shell():
     source = Path("frontend/src/views/StudentChat.vue").read_text()
 
     assert "ref=\"messageInputRef\"" in source
     assert "@focus=\"handleMessageInputFocus\"" in source
     assert "handleMessageInputFocus" in source
-    assert "scrollIntoView" in source
+    start = source.index("function handleMessageInputFocus()")
+    end = source.index("async function loadConversations", start)
+    focus_handler = source[start:end]
+    assert "if (followLatest.value) scrollToBottom()" in focus_handler
+    assert "scrollIntoView" not in focus_handler
 
 
 def test_student_chat_main_uses_resized_viewport_height():

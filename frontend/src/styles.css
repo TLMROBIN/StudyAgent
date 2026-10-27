@@ -2648,7 +2648,7 @@ textarea {
   max-height: var(--student-panel-height);
   min-height: 0;
   gap: 6px;
-  padding: 8px 20px 10px;
+  padding: 8px 20px max(16px, env(safe-area-inset-bottom, 0px));
   border-radius: 0;
   box-shadow: none;
 }
@@ -2665,7 +2665,7 @@ textarea {
 .student-study-page .study-stage-chip,
 .student-study-page .session-subject-capability { display: none; }
 .student-study-page .study-session-tools { width: auto; flex-wrap: nowrap; }
-.chat-reading-area { position: relative; display: flex; flex: 1 1 0; min-height: 0; }
+.chat-reading-area { position: relative; display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; }
 .chat-reading-area .chat-stream { width: 100%; padding-bottom: 56px; }
 .chat-return-latest {
   position: absolute;
@@ -2683,12 +2683,28 @@ textarea {
   cursor: pointer;
 }
 .chat-return-latest:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-.student-study-page .chat-controls { flex: 0 0 auto; gap: 6px; padding-top: 6px; border: 0; }
+.student-study-page .chat-controls {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 6px;
+  padding-top: 6px;
+  border: 0;
+}
 .student-study-page .chat-controls .el-textarea__inner { height: 56px; min-height: 56px !important; }
-.student-study-page .chat-composer-footer { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 6px; }
+.student-study-page .chat-composer-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--study-surface);
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .student-study-page .chat-composer-footer button { min-height: 44px; padding: 8px 12px; }
 .student-study-page .composer-helper { display: none; }
-.student-study-page .chat-primary-actions { margin-left: auto; }
+.student-study-page .chat-primary-actions { margin-left: auto; flex: 0 0 auto; flex-wrap: nowrap; }
 .student-study-page .message-row.assistant { max-width: min(92%, 760px); }
 .student-study-page .bubble.assistant { background: transparent; border: 0; padding: 10px 0; box-shadow: none; }
 .app-sidebar .sidebar-body { min-height: 0; overflow-y: auto; gap: 12px; }
@@ -2717,11 +2733,21 @@ html[data-compact-viewport="true"] .student-study-page .study-session-heading,
 html[data-compact-viewport="true"] .student-study-page .study-session-settings { display: none; }
 html[data-compact-viewport="true"] .student-study-page .study-session-header { justify-content: flex-end; }
 html[data-compact-viewport="true"] .student-study-page .composer-attachment-preview { max-height: 64px; overflow-y: auto; }
+html[data-compact-viewport="true"] .student-study-page .stream-hint { display: none; }
 html[data-compact-viewport="true"] .student-feedback-page .panel-header h2 { font-size: 20px; }
 html[data-compact-viewport="true"] .student-feedback-page .panel-header .panel-subcopy { display: none; }
 @media (max-width: 640px) {
+  .app-root--student-chat { --sidebar-expanded-width: min(188px, 36vw); }
   .student-study-page .chat-panel { padding-inline: 10px; }
   .student-study-page .study-session-title-row h1 { font-size: 15px; }
+  .student-study-page .chat-composer-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .student-study-page .chat-secondary-actions { grid-column: 1; grid-row: 2; }
+  .student-study-page .deep-reasoning-control { grid-column: 1 / -1; grid-row: 1; }
+  .student-study-page .chat-primary-actions { grid-column: 2; grid-row: 2; }
+  .student-study-page .send-question-button { min-width: 0; }
 }
 .app-sidebar--collapsed .nav-list a { min-height: 44px; padding: 8px 0; border-radius: 8px; }
 .app-sidebar--collapsed .nav-link__short { min-width: 0; padding: 0; white-space: nowrap; background: transparent; }
