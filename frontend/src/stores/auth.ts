@@ -19,6 +19,7 @@ export interface UserInfo {
   chat_banned?: boolean
   chat_banned_until?: string | null
   chat_ban_reason?: string | null
+  chat_ban_message?: string | null
 }
 
 let sessionReadyPromise: Promise<boolean> | null = null

@@ -12,7 +12,7 @@ from backend.dependencies import get_current_user
 from backend.models.audit_log import AuditLog
 from backend.models.user import User, UserRole
 from backend.routers import admin, auth, chat, notifications
-from backend.services.chat_permission_service import ensure_chat_allowed
+from backend.services.chat_permission_service import ensure_chat_allowed, format_chat_ban_message
 
 
 @pytest.fixture
@@ -67,7 +67,12 @@ def test_ban_blocks_existing_session_before_body_parsing_and_keeps_read_access(e
     assert result.status_code == 403
     assert "北京时间" in result.json()["detail"]
     assert client.post("/api/chat/recommendations", json={"subject": "数学", "question": "函数单调性"}).status_code == 403
-    assert client.get("/api/auth/me").json()["chat_banned"] is True
+    profile = client.get("/api/auth/me").json()
+    assert profile["chat_banned"] is True
+    assert profile["chat_ban_message"] == result.json()["detail"]
+    assert "意见反馈" in profile["chat_ban_message"] and "申诉" in profile["chat_ban_message"]
+    assert "管理员不一定有时间查看或回复" in profile["chat_ban_message"]
+    assert "您" not in profile["chat_ban_message"]
     assert client.get("/api/chat/history").status_code == 200
     assert client.get("/api/notifications/active").status_code == 200
     with factory() as db:
@@ -107,6 +112,7 @@ def test_validation_unban_and_expiry_automatically_restore_access(env):
     assert response.status_code == 200
     assert response.json()["chat_banned"] is False
     assert response.json()["chat_banned_until"] is None
+    assert response.json()["chat_ban_message"] is None
     with factory() as db:
         assert db.scalar(select(AuditLog).where(AuditLog.action == "unban_student_chat"))
 
@@ -139,3 +145,15 @@ def test_existing_database_migration_is_idempotent_and_preserves_users(monkeypat
         assert {"chat_banned_until", "chat_ban_reason"} <= {c["name"] for c in inspect(connection).get_columns("users")}
         assert connection.execute(text("SELECT full_name, chat_banned_until FROM users")).one() == ("既有学生", None)
     engine.dispose()
+
+
+@pytest.mark.parametrize("end, expected", [
+    ("2027-07-07T00:00:00+08:00", "2027年7月6日 23:59:59（北京时间）"),
+    ("2027-01-03T00:00:00+08:00", "2027年1月2日 23:59:59（北京时间）"),
+    ("2027-08-01T07:30:00+08:00", "2027年8月1日 07:29:59（北京时间）"),
+])
+def test_student_notice_uses_actual_inclusive_deadline(end, expected):
+    message = format_chat_ban_message(datetime.fromisoformat(end))
+    assert message.startswith("你因违规使用答疑平台 AI 功能，已被禁止问答权限。")
+    assert expected in message
+    assert "意见反馈" in message and "申诉" in message

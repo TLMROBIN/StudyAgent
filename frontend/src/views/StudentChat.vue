@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
@@ -128,6 +129,9 @@ const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
 const historyOpen = ref(false)
 const noticesOpen = ref(false)
+const chatBanDialogVisible = ref(false)
+const chatBanDialogMessage = ref('')
+const router = useRouter()
 defineExpose({
   openHistory: () => { historyOpen.value = true },
   newQuestion: () => { if (!sending.value && !resolveSubmitting.value) startNewConversation() },
@@ -1291,6 +1295,35 @@ function currentRecommendationContextLabel(): string {
   return '当前问答上下文'
 }
 
+function chatBanFailureMessage(error: unknown): string | null {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  const message = typeof detail === 'string' ? detail : requestErrorMessage(error)
+  return requestStatus(error) === 403
+    && (message.startsWith('你因违规使用答疑平台 AI 功能') || message.startsWith('问答权限已暂停'))
+    ? message : null
+}
+
+function showChatBanNotice(message: string) {
+  chatBanDialogMessage.value = message
+  chatBanDialogVisible.value = true
+}
+
+async function refreshChatPermissionNotice() {
+  try {
+    await authStore.fetchProfile()
+    if (authStore.user?.chat_banned && authStore.user.chat_ban_message) {
+      showChatBanNotice(authStore.user.chat_ban_message)
+    }
+  } catch (error) {
+    console.error('问答权限状态暂时无法刷新', error)
+  }
+}
+
+function openChatBanAppeal() {
+  chatBanDialogVisible.value = false
+  void router.push('/student/feedback')
+}
+
 function chatFailureMessage(error: unknown): string {
   const message = requestErrorMessage(error)
   if (message === '模型调用失败，请联系管理员老师或稍后再试。'
@@ -1309,8 +1342,9 @@ function chatFailureMessage(error: unknown): string {
     return '当前提问较多，请稍等片刻再发送。草稿已保留。'
   }
   if (status === 403) {
-    if (message.startsWith('问答权限已暂停')) {
-      return `${message} 草稿已保留。`
+    const banMessage = chatBanFailureMessage(error)
+    if (banMessage) {
+      return `${banMessage} 草稿已保留。`
     }
     return '当前账号暂时无法发送问题，请联系老师或管理员。草稿已保留。'
   }
@@ -1375,6 +1409,12 @@ async function requestRecommendations(options: { silent?: boolean } = {}) {
     }
   } catch (error) {
     recommendationPool.value = []
+    const banMessage = chatBanFailureMessage(error)
+    if (banMessage) {
+      recommendationError.value = banMessage
+      showChatBanNotice(banMessage)
+      return
+    }
     recommendationError.value = recommendationDetail(error)
     if (!options.silent) {
       ElMessage.error(recommendationError.value)
@@ -1637,6 +1677,19 @@ async function sendMessage() {
     if (image && !pendingImageFile.value) {
       updatePendingImage(image)
     }
+    const banMessage = chatBanFailureMessage(error)
+    if (banMessage) {
+      // No turn was stored by the server; keep the draft without a fake AI reply.
+      if (last?.role === 'assistant' && !last.content.trim()) {
+        messages.value.pop()
+        const pendingUser = messages.value[messages.value.length - 1]
+        if (pendingUser?.role === 'user' && pendingUser.content === content) messages.value.pop()
+      }
+      screenReaderAnnouncement.value = banMessage
+      showChatBanNotice(banMessage)
+      void authStore.fetchProfile().catch((profileError) => console.error(profileError))
+      return
+    }
     if (last && last.role === 'assistant') {
       last.error = failureMessage
       last.suggested_replies = []
@@ -1665,6 +1718,7 @@ onBeforeUnmount(() => {
 })
 
 onMounted(async () => {
+  void refreshChatPermissionNotice()
   void loadNotifications()
   await Promise.all([loadChatSubjects(), loadChatModels()])
   try {
@@ -2271,6 +2325,20 @@ onMounted(async () => {
             {{ cropApplying ? '裁剪中...' : '使用裁剪区域' }}
           </button>
         </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="chatBanDialogVisible"
+      title="问答权限已封禁"
+      width="min(460px, 92vw)"
+      :close-on-click-modal="false"
+      append-to-body
+    >
+      <p style="white-space: pre-line; line-height: 1.8; overflow-wrap: anywhere">{{ chatBanDialogMessage }}</p>
+      <template #footer>
+        <button type="button" class="ghost-button" @click="openChatBanAppeal">意见反馈/申诉</button>
+        <button type="button" class="primary-button" @click="chatBanDialogVisible = false">我知道了</button>
       </template>
     </el-dialog>
 

@@ -1,5 +1,5 @@
 """Time-limited permission to ask questions; account access stays independent."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -9,13 +9,23 @@ from backend.models.user import User, UserRole
 from backend.time_utils import assume_utc, to_beijing
 
 
+def format_chat_ban_message(until: datetime) -> str:
+    # The stored instant is exclusive; show the final disabled second to students.
+    last_disabled = to_beijing(until) - timedelta(microseconds=1)
+    expires = f"{last_disabled.year}年{last_disabled.month}月{last_disabled.day}日 {last_disabled:%H:%M:%S}（北京时间）"
+    return (
+        "你因违规使用答疑平台 AI 功能，已被禁止问答权限。\n"
+        f"封禁期至 {expires}。\n"
+        "如有不同意见需要申诉，可以通过意见反馈发送。管理员不一定有时间查看或回复。"
+    )
+
+
 def ensure_chat_allowed(user: User) -> None:
     until = getattr(user, "chat_banned_until", None)
     if user.role == UserRole.STUDENT and until is not None and assume_utc(until) > datetime.now(UTC):
-        expires = to_beijing(until).strftime("%Y年%m月%d日 %H:%M")
         raise HTTPException(
             status_code=403,
-            detail=f"问答权限已暂停，将于北京时间{expires}恢复。如有疑问，请联系老师或管理员。",
+            detail=format_chat_ban_message(until),
         )
 
 

@@ -3,13 +3,14 @@ from datetime import datetime
 from typing import Any
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel as PydanticBaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel as PydanticBaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator, model_validator
 
 from backend.models.conversation import GuidanceStage, MessageRole
 from backend.models.knowledge import DifficultyLevel, DocumentStatus, ResourceType
 from backend.models.user import UserRole
 from backend.subjects import SUBJECT_SET
 from backend.time_utils import serialize_datetime_for_api
+from backend.services.chat_permission_service import format_chat_ban_message
 
 
 class BaseModel(PydanticBaseModel):
@@ -81,6 +82,13 @@ class UserRead(BaseModel):
     chat_banned: bool = False
     chat_banned_until: datetime | None = None
     chat_ban_reason: str | None = None
+
+    @computed_field
+    @property
+    def chat_ban_message(self) -> str | None:
+        if self.chat_banned and self.chat_banned_until is not None:
+            return format_chat_ban_message(self.chat_banned_until)
+        return None
 
 
 class StudentChatBanWrite(BaseModel):
