@@ -7,6 +7,7 @@ type ViewportEventTarget = {
 
 type ViewportWindow = ViewportEventTarget & {
   innerHeight?: number
+  navigator?: { userAgent?: string }
   visualViewport?: ViewportEventTarget & { height?: number | null; offsetTop?: number } | null
   document?: {
     documentElement?: {
@@ -52,7 +53,12 @@ export function syncViewportHeight(win: ViewportWindow | null = defaultWindow())
 
   root.style.setProperty(VIEWPORT_HEIGHT_PROPERTY, `${height}px`)
   root.style.setProperty('--app-viewport-offset-top', `${Math.max(0, win?.visualViewport?.offsetTop || 0)}px`)
-  if (root.dataset) root.dataset.compactViewport = String(height < 500)
+  if (root.dataset) {
+    root.dataset.compactViewport = String(height < 500)
+    // Older Android WebViews can report a full viewport and zero safe-area
+    // insets even while three-button system navigation overlays the page.
+    root.dataset.androidViewport = String(/Android/i.test(win?.navigator?.userAgent || ''))
+  }
   return height
 }
 

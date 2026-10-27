@@ -2632,6 +2632,9 @@ textarea {
 .notification-preview { min-width: 0; }
 
 /* Keep the conversation inside the visible viewport, including older Android WebViews. */
+html[data-android-viewport="true"] {
+  --student-system-bar-clearance: 72px;
+}
 .app-root--student-chat {
   position: fixed;
   inset: var(--app-viewport-offset-top, 0px) 0 auto;
@@ -2648,7 +2651,9 @@ textarea {
   max-height: var(--student-panel-height);
   min-height: 0;
   gap: 6px;
-  padding: 8px 20px max(16px, env(safe-area-inset-bottom, 0px));
+  /* Keep a plain calc fallback for WebViews without CSS max()/env(). */
+  padding: 8px 20px calc(16px + var(--student-system-bar-clearance, 0px));
+  padding-bottom: max(calc(16px + var(--student-system-bar-clearance, 0px)), env(safe-area-inset-bottom, 0px));
   border-radius: 0;
   box-shadow: none;
 }
@@ -2754,6 +2759,13 @@ html[data-compact-viewport="true"] .student-feedback-page .panel-header .panel-s
 .app-sidebar--collapsed .nav-list { gap: 4px; font-size: 14px; }
 html[data-compact-viewport="true"] .app-sidebar .sidebar-brand,
 html[data-compact-viewport="true"] .app-sidebar .profile-chip { display: none; }
-html[data-compact-viewport="true"] .app-sidebar { padding-block: 6px; }
+html[data-compact-viewport="true"] .app-sidebar {
+  padding-top: 6px;
+  padding-bottom: calc(6px + var(--student-system-bar-clearance, 0px));
+}
 .app-sidebar--collapsed .sidebar-toggle { padding-inline: 8px; white-space: nowrap; }
 .app-sidebar--collapsed .profile-chip strong { white-space: nowrap; font-size: 14px; }
+.app-root--student-chat .app-sidebar {
+  padding-bottom: calc(20px + var(--student-system-bar-clearance, 0px));
+  padding-bottom: max(calc(20px + var(--student-system-bar-clearance, 0px)), env(safe-area-inset-bottom, 0px));
+}

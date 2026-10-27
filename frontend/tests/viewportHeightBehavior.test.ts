@@ -7,6 +7,7 @@ const visualEvents = new Map<string, () => void>()
 const root = { style: { setProperty: (key: string, value: string) => { properties[key] = value } }, dataset: {} as Record<string, string> }
 const win = {
   innerHeight: 768,
+  navigator: { userAgent: 'Mozilla/5.0 (Linux; Android 8.1; Tablet) AppleWebKit/537.36 Chrome/74.0.3729.157' },
   visualViewport: { height: 768, offsetTop: 0,
     addEventListener: (name: string, fn: () => void) => { visualEvents.set(name, fn) },
     removeEventListener: (name: string) => { visualEvents.delete(name) },
@@ -17,6 +18,7 @@ const win = {
 }
 const stop = installViewportHeight(win)
 assert.equal(properties['--app-viewport-height'], '768px')
+assert.equal(root.dataset.androidViewport, 'true')
 win.visualViewport.height = 320
 win.visualViewport.offsetTop = 100
 visualEvents.get('resize')!()
@@ -27,5 +29,8 @@ win.visualViewport.height = 768
 win.visualViewport.offsetTop = 0
 visualEvents.get('resize')!()
 assert.equal(root.dataset.compactViewport, 'false')
+win.navigator.userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X)'
+events.get('resize')!()
+assert.equal(root.dataset.androidViewport, 'false')
 stop()
 assert.equal(events.size + visualEvents.size, 0)
