@@ -36,6 +36,7 @@ declare module 'vue' {
     ElTableColumn: typeof import('element-plus/es')['ElTableColumn']
     ElUpload: typeof import('element-plus/es')['ElUpload']
     FeedbackImages: typeof import('./src/components/FeedbackImages.vue')['default']
+    FormulaEditor: typeof import('./src/components/FormulaEditor.vue')['default']
     MetricTile: typeof import('./src/components/MetricTile.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

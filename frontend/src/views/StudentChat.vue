@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 
+import FormulaEditor from '../components/FormulaEditor.vue'
+
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
 import { useAuthStore } from '../stores/auth'
 import {
@@ -1987,6 +1989,11 @@ onMounted(async () => {
           placeholder="把题目发给我，也可以先说说你试过什么、卡在哪里"
           aria-label="输入你的问题或当前思路"
           @focus="handleMessageInputFocus"
+        />
+        <FormulaEditor
+          v-model="form.message"
+          :disabled="sending"
+          @finished="messageInputRef?.$el?.querySelector('textarea')?.focus()"
         />
         <div v-if="pendingImagePreviewUrl" class="composer-attachment-preview">
           <a
