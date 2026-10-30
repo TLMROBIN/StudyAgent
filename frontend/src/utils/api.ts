@@ -736,7 +736,7 @@ export async function streamChat(
       }
 
       const response = await fetch(options.resumeRequestId
-        ? `${apiBase}/chat/requests/${encodeURIComponent(options.resumeRequestId)}/stream`
+        ? `${apiBase}/chat/stream/${encodeURIComponent(options.resumeRequestId)}`
         : `${apiBase}/chat/stream`, {
         method: options.resumeRequestId ? 'GET' : 'POST',
         signal: options.signal,

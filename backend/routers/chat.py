@@ -1697,7 +1697,7 @@ class _BackgroundRequest(Request):
         return False
 
 
-@router.get("/requests/{request_id}/stream")
+@router.get("/stream/{request_id}")
 async def resume_chat_request(request_id: str, request: Request, db: DbSession, current_user: CurrentUser):
     ensure_chat_allowed(current_user)
     try:

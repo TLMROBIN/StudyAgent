@@ -42,7 +42,7 @@ try {
   assert.equal(calls, 1)
   const recovered: string[] = []
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/chat/requests/saved-request/stream')
+    assert.equal(url, '/api/chat/stream/saved-request')
     assert.equal(options?.method, 'GET')
     assert.equal(options?.body, undefined, 'recovery must not submit another question or require the image again')
     return new Response('event: meta\ndata: {"conversation_id":42}\n\nevent: chunk\ndata: {"content":"先圈出已知条件。"}\n\nevent: done\ndata: {"content":"先圈出已知条件。"}\n\n')

@@ -1764,7 +1764,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
       }
     }
     const failureMessage = chatFailureMessage(error)
-    restoreSubmittedDraft(submissionDraftKey, draftText)
+    restoreSubmittedDraft(submissionDraftKey, recovery?.message ?? draftText)
     if (image && !pendingImageFile.value) {
       updatePendingImage(image)
     }
