@@ -45,5 +45,36 @@ assert.doesNotMatch(
 
 assert.doesNotMatch(appSource, /<h1 class="brand-title">/, 'the sidebar brand should not create a second page H1')
 assert.match(appSource, /class="ghost-button sidebar-logout" aria-label="退出登录"/, 'compact logout should keep a stable accessible name')
-assert.match(styles, /--sidebar-muted:\s*#cbd5e1/, 'the dark sidebar should use a dedicated readable muted token')
+// Preserve readability when the visual palette changes; do not pin an old hex value.
+const mutedToken = styles.match(/--sidebar-muted:\s*(#[0-9a-f]{6})\s*;/i)
+assert.ok(mutedToken, 'the sidebar should define a dedicated muted color')
+assert.match(
+  styles,
+  /\.app-sidebar \.brand-copy,\s*\.app-sidebar \.profile-chip span\s*\{\s*color:\s*var\(--sidebar-muted\)/,
+  'sidebar supporting text should use its dedicated muted color',
+)
+const sidebarRules = [...styles.matchAll(/(?:^|\n)\.app-sidebar\s*\{([^}]+)\}/g)]
+const background = sidebarRules.flatMap((rule) => [...rule[1].matchAll(/(?:^|;)\s*background:\s*(#[0-9a-f]{6})\s*;/gi)]).at(-1)
+assert.ok(background, 'the sidebar should have a solid background for contrast validation')
+function rgb(hex: string): number[] {
+  return [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255)
+}
+function luminance(channels: number[]): number {
+  const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
+}
+const textLuminance = luminance(rgb(mutedToken[1]))
+const sidebarBackground = rgb(background[1])
+const profileRules = [...styles.matchAll(/(?:^|\n)\.profile-chip\s*\{([^}]+)\}/g)]
+const profileOverlay = profileRules.flatMap((rule) => [...rule[1].matchAll(/background:\s*rgba\(255,\s*255,\s*255,\s*([\d.]+)\)/g)]).at(-1)
+assert.ok(profileOverlay, 'the profile chip should use the expected translucent white background')
+const opacity = Number(profileOverlay[1])
+for (const [label, channels] of [
+  ['sidebar', sidebarBackground],
+  ['profile chip', sidebarBackground.map((channel) => channel * (1 - opacity) + opacity)],
+] as const) {
+  const backgroundLuminance = luminance(channels)
+  const contrast = (Math.max(textLuminance, backgroundLuminance) + 0.05) / (Math.min(textLuminance, backgroundLuminance) + 0.05)
+  assert.ok(contrast >= 4.5, `${label} supporting text should reach 4.5:1 contrast; got ${contrast.toFixed(2)}:1`)
+}
 assert.match(styles, /\.app-sidebar--collapsed \.sidebar-logout[\s\S]*?white-space:\s*nowrap/, 'compact logout should not wrap vertically')
