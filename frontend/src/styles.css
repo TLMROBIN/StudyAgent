@@ -462,6 +462,12 @@ textarea {
   gap: 8px;
 }
 
+.history-drawer-actions .ghost-button.history-filter-active {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+}
+
 .history-drawer-actions .primary-button,
 .history-drawer-actions .ghost-button {
   min-height: 44px;

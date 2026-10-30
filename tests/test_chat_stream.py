@@ -3348,3 +3348,75 @@ def test_image_disconnect_cancels_awaited_recognition(monkeypatch):
         assert exc.value.status_code == 499
     asyncio.run(run())
     assert cancelled == [True]
+
+
+def test_student_archive_preserves_history_and_can_be_restored():
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    with factory() as db:
+        conv = Conversation(student_id=student.id, subject="数学", resolved=True, is_pinned=True)
+        db.add(conv)
+        db.flush()
+        conv_id = conv.id
+        db.add(Message(conversation_id=conv_id, role=MessageRole.USER, content="函数的单调性", turn_index=1))
+        db.commit()
+        db.refresh(conv)
+        activity = conv.last_message_at
+    assert client.get('/api/chat/history').json()[0]['is_archived'] is False
+    for _ in range(2):
+        response = client.patch(f'/api/chat/{conv_id}/archive', json={'is_archived': True})
+        assert response.status_code == 200
+        assert response.json()['is_archived'] is True
+    assert client.get('/api/chat/history').json() == []
+    archived = client.get('/api/chat/history?include_archived=true').json()
+    assert len(archived) == 1 and archived[0]['is_archived'] is True
+    detail = client.get(f'/api/chat/history/{conv_id}').json()
+    assert detail['messages'][0]['content'] == '函数的单调性'
+    assert detail['resolved'] is True and detail['is_pinned'] is True
+    with factory() as db:
+        assert db.get(Conversation, conv_id).last_message_at == activity
+    assert client.patch(f'/api/chat/{conv_id}/archive', json={'is_archived': False}).status_code == 200
+    assert client.get('/api/chat/history').json()[0]['is_archived'] is False
+
+
+def test_archive_rejects_foreign_missing_and_deleted_conversations():
+    factory = _build_session_factory()
+    owner = _create_student(factory)
+    other = _create_student(factory)
+    client = _build_chat_test_client(factory, owner)
+    stranger_client = _build_chat_test_client(factory, other)
+    with factory() as db:
+        conv = Conversation(student_id=owner.id, subject="数学")
+        db.add(conv)
+        db.commit()
+        conv_id = conv.id
+    assert stranger_client.patch(f'/api/chat/{conv_id}/archive', json={'is_archived': True}).status_code == 404
+    assert stranger_client.get('/api/chat/history?include_archived=true').json() == []
+    assert stranger_client.get(f'/api/chat/history/{conv_id}').status_code == 404
+    assert client.patch('/api/chat/999999/archive', json={'is_archived': True}).status_code == 404
+    assert client.patch(f'/api/chat/{conv_id}/archive', json={}).status_code == 422
+    assert client.patch(f'/api/chat/{conv_id}/archive', json={'is_archived': True}).status_code == 200
+    assert client.delete(f'/api/chat/{conv_id}').status_code == 200
+    assert client.get('/api/chat/history?include_archived=true').json() == []
+    assert client.patch(f'/api/chat/{conv_id}/archive', json={'is_archived': False}).status_code == 404
+
+
+def test_archive_runtime_upgrade_preserves_existing_conversations(monkeypatch):
+    from sqlalchemy import text
+    from backend import database
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    with factory() as db:
+        conv = Conversation(student_id=student.id, subject="物理")
+        db.add(conv)
+        db.commit()
+        conv_id = conv.id
+    engine = factory.kw['bind']
+    with engine.begin() as connection:
+        connection.execute(text('ALTER TABLE conversations DROP COLUMN is_archived'))
+    monkeypatch.setattr(database, 'engine', engine)
+    database.apply_runtime_schema_updates()
+    database.apply_runtime_schema_updates()
+    with factory() as db:
+        assert db.get(Conversation, conv_id).is_archived is False

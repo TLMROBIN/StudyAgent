@@ -298,6 +298,8 @@ def apply_runtime_schema_updates() -> None:
             statements.append("ALTER TABLE conversations ADD COLUMN deleted_by_student_at DATETIME")
         if "active_practice" not in conversation_columns:
             statements.append("ALTER TABLE conversations ADD COLUMN active_practice JSON")
+        if "is_archived" not in conversation_columns:
+            statements.append("ALTER TABLE conversations ADD COLUMN is_archived BOOLEAN DEFAULT 0 NOT NULL")
         if "is_pinned" not in conversation_columns:
             statements.append("ALTER TABLE conversations ADD COLUMN is_pinned BOOLEAN DEFAULT 0 NOT NULL")
         if "last_message_at" not in conversation_columns:

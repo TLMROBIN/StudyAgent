@@ -47,6 +47,7 @@ interface ConversationSummary {
   topic: string
   guidance_stage: string
   resolved: boolean
+  is_archived: boolean
   is_pinned: boolean
   last_message_at?: string | null
 }
@@ -113,6 +114,9 @@ const form = reactive({
   roleId: null as number | null,
 })
 const conversations = ref<ConversationSummary[]>([])
+const showArchived = ref(false)
+const archivingConversationIds = ref<Set<number>>(new Set())
+const visibleConversations = computed(() => conversations.value.filter((item) => item.is_archived === showArchived.value))
 const messages = ref<ChatMessageRead[]>([])
 const notifications = ref<NotificationItem[]>([])
 const incentiveSummary = ref<IncentiveSummary>({
@@ -502,7 +506,7 @@ function handleMessageInputFocus() {
 }
 
 async function loadConversations() {
-  const { data } = await api.get<ConversationSummary[]>('/chat/history')
+  const { data } = await api.get<ConversationSummary[]>('/chat/history', { params: { include_archived: true } })
   conversations.value = data
   if (currentConversationId.value) {
     currentConversationResolved.value = Boolean(
@@ -768,6 +772,22 @@ async function toggleConversationPin(item: ConversationSummary) {
     const pending = new Set(pinningConversationIds.value)
     pending.delete(item.id)
     pinningConversationIds.value = pending
+  }
+}
+
+async function toggleConversationArchive(item: ConversationSummary) {
+  if (sending.value || archivingConversationIds.value.has(item.id)) return
+  archivingConversationIds.value = new Set(archivingConversationIds.value).add(item.id)
+  try {
+    const { data } = await api.patch<ChatConversationRead>(`/chat/${item.id}/archive`, { is_archived: !item.is_archived })
+    item.is_archived = data.is_archived
+    ElMessage.success(data.is_archived ? '对话已归档，可在“已归档”中查看和恢复' : '对话已恢复到历史记录')
+  } catch {
+    ElMessage.error('归档设置未保存，请稍后重试')
+  } finally {
+    const pending = new Set(archivingConversationIds.value)
+    pending.delete(item.id)
+    archivingConversationIds.value = pending
   }
 }
 
@@ -2180,18 +2200,22 @@ onMounted(async () => {
           <button type="button" class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
           <button type="button" class="ghost-button" @click="loadConversations">刷新</button>
         </div>
+        <div class="history-drawer-actions" role="group" aria-label="筛选学习记录">
+          <button type="button" class="ghost-button" :class="{ 'history-filter-active': !showArchived }" :aria-pressed="!showArchived" @click="showArchived = false">历史对话</button>
+          <button type="button" class="ghost-button" :class="{ 'history-filter-active': showArchived }" :aria-pressed="showArchived" @click="showArchived = true">已归档</button>
+        </div>
         <RouterLink to="/student/growth" class="incentive-summary-card" @click="historyOpen = false">
           <div><span>成长积分</span><strong>{{ incentiveSummary.total_points }}</strong></div>
           <div><span>等级</span><strong>L{{ incentiveSummary.level }}</strong></div>
           <div><span>连续学习</span><strong>{{ incentiveSummary.current_streak_days }} 天</strong></div>
         </RouterLink>
-        <div v-if="!conversations.length" class="history-empty-state">
-          <strong>还没有学习记录</strong>
-          <span>发送第一个问题后，这里会保留你的思考过程。</span>
+        <div v-if="!visibleConversations.length" class="history-empty-state">
+          <strong>{{ showArchived ? '还没有归档对话' : '还没有历史对话' }}</strong>
+          <span>{{ showArchived ? '归档的对话会保留在这里，可随时查看和恢复。' : '发送问题后会保留思考过程，也可在已归档中查看旧对话。' }}</span>
         </div>
         <div v-else class="conversation-list">
           <article
-            v-for="item in conversations"
+            v-for="item in visibleConversations"
             :key="item.id"
             class="conversation-card conversation-card--compact"
           >
@@ -2201,6 +2225,9 @@ onMounted(async () => {
               <span>{{ item.resolved ? '已解决' : '继续思考' }}</span>
             </button>
             <div class="row-actions conversation-card__actions">
+              <button type="button" class="ghost-button" :disabled="sending || archivingConversationIds.has(item.id) || deletingConversationIds.has(item.id)" :aria-label="`${item.is_archived ? '恢复对话' : '归档对话'}：${conversationTopic(item)}`" @click="toggleConversationArchive(item)">
+                {{ archivingConversationIds.has(item.id) ? '保存中...' : (item.is_archived ? '恢复' : '归档') }}
+              </button>
               <button type="button" class="ghost-button" :disabled="pinningConversationIds.has(item.id)" :aria-pressed="item.is_pinned" @click="toggleConversationPin(item)">
                 {{ item.is_pinned ? '取消置顶' : '置顶' }}
               </button>

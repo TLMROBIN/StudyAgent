@@ -193,6 +193,7 @@ class ConversationRead(BaseModel):
     resolved: bool
     duration_seconds: int
     created_at: datetime
+    is_archived: bool = False
     is_pinned: bool = False
     last_message_at: datetime | None = None
     messages: list[MessageRead] = []
@@ -298,6 +299,10 @@ class QuestionRecommendationRequest(BaseModel):
         if self.conversation_id is None:
             raise ValueError("Conversation id is required for context recommendations")
         return self
+
+
+class ArchiveConversationRequest(BaseModel):
+    is_archived: bool
 
 
 class PinConversationRequest(BaseModel):

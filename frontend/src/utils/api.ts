@@ -90,6 +90,7 @@ export interface ChatConversationRead {
   resolved: boolean
   duration_seconds: number
   created_at: string
+  is_archived: boolean
   is_pinned: boolean
   last_message_at?: string | null
   messages: ChatMessageRead[]

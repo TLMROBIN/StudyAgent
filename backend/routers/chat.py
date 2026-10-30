@@ -42,6 +42,7 @@ from backend.models.schemas import (
     ChatRequest,
     ConversationRead,
     PinConversationRequest,
+    ArchiveConversationRequest,
     QuestionRecommendationRead,
     QuestionRecommendationRequest,
     ResolveConversationRequest,
@@ -1440,14 +1441,32 @@ def list_chat_subjects(db: DbSession, current_user: CurrentUser) -> list[ChatSub
 
 
 @router.get("/history", response_model=list[ConversationRead])
-def list_conversations(db: DbSession, current_user: CurrentUser) -> list[ConversationRead]:
-    conversations = db.scalars(
+def list_conversations(db: DbSession, current_user: CurrentUser, include_archived: bool = False) -> list[ConversationRead]:
+    query = (
         select(Conversation)
         .options(_message_load_option())
         .where(Conversation.student_id == current_user.id, Conversation.deleted_by_student_at.is_(None))
         .order_by(Conversation.is_pinned.desc(), func.coalesce(Conversation.last_message_at, Conversation.created_at).desc(), Conversation.id.desc())
-    ).all()
+    )
+    if not include_archived:
+        query = query.where(Conversation.is_archived.is_(False))
+    conversations = db.scalars(query).all()
     return [ConversationRead.model_validate(item) for item in conversations]
+
+
+@router.patch("/{conversation_id}/archive", response_model=ConversationRead)
+def archive_conversation(conversation_id: int, payload: ArchiveConversationRequest, db: DbSession, current_user: CurrentUser) -> ConversationRead:
+    conversation = db.scalar(select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.student_id == current_user.id,
+        Conversation.deleted_by_student_at.is_(None),
+    ))
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conversation.is_archived = payload.is_archived
+    db.commit()
+    db.refresh(conversation)
+    return ConversationRead.model_validate(conversation)
 
 
 @router.patch("/{conversation_id}/pin", response_model=ConversationRead)

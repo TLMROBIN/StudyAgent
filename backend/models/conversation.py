@@ -74,6 +74,7 @@ class Conversation(TimestampMixin, Base):
     subject: Mapped[str] = mapped_column(String(32), index=True)
     guidance_stage: Mapped[GuidanceStage] = mapped_column(SqlEnum(GuidanceStage), default=GuidanceStage.INITIAL)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
