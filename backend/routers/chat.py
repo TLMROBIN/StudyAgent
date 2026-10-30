@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from io import BytesIO
 import json
 import logging
 import mimetypes
@@ -16,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import Session, selectinload
 
 from backend.database import SessionLocal
 from backend.dependencies import CurrentUser, DbSession
@@ -83,6 +84,7 @@ from backend.services.question_cache_service import QuestionCacheLookup, questio
 from backend.services.queue_service import QueueFullError, queue_service
 from backend.services.rag_service import RetrievalResult, rag_service
 from backend.services.request_replay_service import request_replay_service
+from backend.services.background_chat_service import background_chat_service
 from backend.services.physics_error_profile_service import physics_error_profile_service
 from backend.services.physics_guidance_service import physics_guidance_service
 from backend.services.socratic_service import socratic_service
@@ -651,7 +653,8 @@ def _instant_stream(
     incentive: dict[str, Any] | None = None,
 ):
     async def stream():
-        sse_active_connections.inc()
+        if not isinstance(request, _BackgroundRequest):
+            sse_active_connections.inc()
         try:
             yield _sse_event(
                 "meta",
@@ -1644,7 +1647,90 @@ def recommend_questions(
 async def stream_chat_endpoint(request: Request, db: DbSession, current_user: CurrentUser):
     ensure_chat_allowed(current_user)
     payload, image_upload = await _parse_stream_request_payload(request)
-    return await stream_chat(payload, db, current_user, request, image_upload=image_upload)
+    if not payload.request_id:
+        return await stream_chat(payload, db, current_user, request, image_upload=image_upload)
+    image_bytes = await image_upload.read() if image_upload else None
+    fingerprint = sha256((payload.model_dump_json() + (sha256(image_bytes).hexdigest() if image_bytes is not None else "")).encode()).hexdigest()
+    bind = db.get_bind()
+    user_id = current_user.id
+
+    async def produce():
+        # Neither the request dependency session nor UploadFile may outlive HTTP.
+        task_db = Session(bind=bind, expire_on_commit=False)
+        task_image = UploadFile(
+            BytesIO(image_bytes), filename=image_upload.filename, headers=image_upload.headers,
+        ) if image_upload is not None else None
+        try:
+            user = task_db.get(User, user_id)
+            if user is None:
+                raise HTTPException(401, "用户不存在")
+            response = await stream_chat(
+                payload, task_db, user, _BackgroundRequest(request.scope), image_upload=task_image,
+            )
+        except BaseException:
+            task_db.close()
+            if task_image:
+                await task_image.close()
+            raise
+        original_iterator = response.body_iterator
+
+        async def consume():
+            try:
+                async for frame in original_iterator:
+                    yield frame
+            finally:
+                await original_iterator.aclose()
+                task_db.close()
+                if task_image:
+                    await task_image.close()
+
+        response.body_iterator = consume()
+        return response
+
+    job = background_chat_service.start(user_id, payload.request_id, fingerprint, produce)
+    await asyncio.shield(job.ready)
+    return StreamingResponse(job.subscribe(), media_type="text/event-stream")
+
+
+class _BackgroundRequest(Request):
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+@router.get("/requests/{request_id}/stream")
+async def resume_chat_request(request_id: str, request: Request, db: DbSession, current_user: CurrentUser):
+    ensure_chat_allowed(current_user)
+    try:
+        job = background_chat_service.get(current_user.id, request_id)
+    except HTTPException as exc:
+        replay = request_replay_service.load(user_id=current_user.id, request_id=request_id)
+        conversation = db.scalar(select(Conversation).where(
+            Conversation.id == replay.conversation_id,
+            Conversation.student_id == current_user.id,
+            Conversation.deleted_by_student_at.is_(None),
+        )) if replay and replay.status == "completed" else None
+        if conversation is None:
+            raise exc
+        return StreamingResponse(_instant_stream(
+            conversation_id=conversation.id,
+            guidance_stage=replay.guidance_stage or conversation.guidance_stage.value,
+            content=replay.final_content,
+            request=request,
+            assets=list(replay.assets or []),
+            suggested_replies=list(replay.suggested_replies or []),
+            role_snapshot=snapshot_from_replay(replay.role_snapshot, None) or ResolvedRoleSnapshot.none(None),
+        ), media_type="text/event-stream")
+    await asyncio.shield(job.ready)
+    return StreamingResponse(job.subscribe(), media_type="text/event-stream")
+
+
+@router.delete("/requests/{request_id}")
+async def stop_chat_request(request_id: str, current_user: CurrentUser):
+    job = background_chat_service.get(current_user.id, request_id)
+    if job.task and not job.task.done():
+        job.task.cancel()
+        await asyncio.shield(job.task)
+    return {"stopped": True}
 
 
 async def _await_image_understanding(request: Request, **kwargs) -> ImageUnderstandingResult:
@@ -3046,6 +3132,7 @@ async def stream_chat(
             finally:
                 if should_send_done:
                     chat_full_response_seconds.observe(perf_counter() - started)
-                sse_active_connections.dec()
+                if not isinstance(request, _BackgroundRequest):
+                    sse_active_connections.dec()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

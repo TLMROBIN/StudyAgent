@@ -28,6 +28,7 @@ export interface StreamChatOptions {
   signal?: AbortSignal
   retryAttempts?: number
   retryDelayMs?: number
+  resumeRequestId?: string
 }
 
 export interface KnowledgeAsset {
@@ -734,13 +735,15 @@ export async function streamChat(
         onEvent({ event: 'restart', data: { request_id: requestId, attempt } })
       }
 
-      const response = await fetch(`${apiBase}/chat/stream`, {
-        method: 'POST',
+      const response = await fetch(options.resumeRequestId
+        ? `${apiBase}/chat/requests/${encodeURIComponent(options.resumeRequestId)}/stream`
+        : `${apiBase}/chat/stream`, {
+        method: options.resumeRequestId ? 'GET' : 'POST',
         signal: options.signal,
         headers: {
           Authorization: `Bearer ${getStoredAccessToken()}`,
         },
-        body: buildStreamChatFormData(nextPayload),
+        body: options.resumeRequestId ? undefined : buildStreamChatFormData(nextPayload),
       })
 
       if (!response.ok || !response.body) {

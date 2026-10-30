@@ -859,8 +859,53 @@ async function handleSubjectChange(nextSubject: string) {
   }
 }
 
+interface PendingChat {
+  requestId: string
+  subject: string
+  message: string
+  conversationId: number | null
+  historyLength: number
+  deepReasoning: boolean
+}
+let activePendingChat: PendingChat | null = null
+
+function pendingChatKey(): string {
+  return `studyagent:pending-chat:${authStore.user?.id ?? authStore.user?.username ?? 'student'}`
+}
+
+function savePendingChat(pending: PendingChat | null) {
+  activePendingChat = pending
+  try {
+    if (pending) window.localStorage.setItem(pendingChatKey(), JSON.stringify(pending))
+    else window.localStorage.removeItem(pendingChatKey())
+  } catch { /* A restricted WebView may disable storage. */ }
+}
+
+async function restorePendingChat(): Promise<boolean> {
+  let pending: PendingChat | null = null
+  try { pending = JSON.parse(window.localStorage.getItem(pendingChatKey()) || 'null') } catch { /* No saved request. */ }
+  if (!pending || typeof pending.requestId !== 'string' || typeof pending.message !== 'string'
+    || typeof pending.subject !== 'string' || !Number.isInteger(pending.historyLength) || pending.historyLength < 0) return false
+  let recoveredAttachment: ChatMessageAttachment | null = null
+  if (pending.conversationId) {
+    if (!await openConversation(pending.conversationId)) return false
+    recoveredAttachment = messages.value[pending.historyLength]?.attachment ?? null
+    messages.value = messages.value.slice(0, pending.historyLength)
+  }
+  form.subject = pending.subject
+  previousSubject.value = pending.subject
+  ElMessage.info('正在恢复上次的回答，离开页面不会中断后台生成。')
+  void runMessage(pending, recoveredAttachment)
+  return true
+}
+
 function stopStreaming(showNotice = true) {
   stopRequested = true
+  if (activePendingChat) {
+    void api.delete(`/chat/requests/${encodeURIComponent(activePendingChat.requestId)}`)
+      .catch(() => ElMessage.warning('停止请求暂未确认，回答可能仍在后台生成。'))
+    savePendingChat(null)
+  }
   streamAbortController?.abort()
   streamAbortController = null
   sending.value = false
@@ -1533,12 +1578,16 @@ async function sendSuggestedReply(reply: string) {
 }
 
 async function sendMessage() {
-  if (!canSend.value) {
+  await runMessage()
+}
+
+async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessageAttachment | null = null) {
+  if (!recovery && !canSend.value) {
     return
   }
   clearActiveSuggestedReplies()
   const draftText = form.message
-  const message = draftText.trim()
+  const message = recovery?.message ?? draftText.trim()
   const submissionDraftKey = activeDraftStorageKey.value || buildDraftStorageKey()
   const image = pendingImageFile.value
   const attachment = image ? {
@@ -1546,8 +1595,17 @@ async function sendMessage() {
     filename: image.name,
     content_type: image.type || 'image/*',
     url: pendingImagePreviewUrl.value,
-  } satisfies ChatMessageAttachment : null
-  const content = message || (attachment ? IMAGE_ONLY_PLACEHOLDER : '')
+  } satisfies ChatMessageAttachment : recoveredAttachment
+  const content = message || (attachment || recovery ? IMAGE_ONLY_PLACEHOLDER : '')
+  const pending: PendingChat = recovery ?? {
+    requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    subject: form.subject,
+    message,
+    conversationId: currentConversationId.value,
+    historyLength: messages.value.length,
+    deepReasoning: form.deepReasoning && canUseDeepReasoning.value,
+  }
+  savePendingChat(pending)
   setDraftInput('')
   resetPendingImage({ preservePreview: Boolean(attachment) })
   sending.value = true
@@ -1561,7 +1619,7 @@ async function sendMessage() {
     content,
     attachment,
   })
-  messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [], deep_reasoning: form.deepReasoning && canUseDeepReasoning.value })
+  messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [], deep_reasoning: pending.deepReasoning })
   queueScrollToBottom()
 
   try {
@@ -1574,6 +1632,7 @@ async function sendMessage() {
         llm_model: form.llmModel,
         deep_reasoning: form.deepReasoning && canUseDeepReasoning.value,
         role_id: form.roleId,
+        request_id: pending.requestId,
         image,
       },
       ({ event, data }) => {
@@ -1583,6 +1642,8 @@ async function sendMessage() {
           if (last?.role === 'assistant') last.deep_reasoning = data.deep_reasoning === true
           if (typeof data.conversation_id === 'number') {
             currentConversationId.value = data.conversation_id
+            pending.conversationId = data.conversation_id
+            savePendingChat(pending)
           }
           if (typeof data.guidance_stage === 'string') {
             guidanceStage.value = data.guidance_stage
@@ -1665,7 +1726,7 @@ async function sendMessage() {
           void loadIncentiveSummary()
         }
       },
-      { signal: controller.signal, retryAttempts: 2, retryDelayMs: 1200 },
+      { signal: controller.signal, retryAttempts: 2, retryDelayMs: 1200, resumeRequestId: recovery?.requestId },
     )
     if (controller.signal.aborted || streamAbortController !== controller) return
     const last = messages.value[messages.value.length - 1]
@@ -1673,6 +1734,7 @@ async function sendMessage() {
       throw new Error('模型调用失败，请联系管理员老师或稍后再试。')
     }
     clearSubmittedDraft(submissionDraftKey)
+    savePendingChat(null)
     try {
       await loadConversations()
     } catch (refreshError) {
@@ -1694,6 +1756,13 @@ async function sendMessage() {
     }
 
     console.error(error)
+    // A lost connection keeps its pointer so reopening can attach again.
+    if (typeof (error as { status?: number })?.status === 'number') {
+      savePendingChat(null)
+      if (recovery && pending.conversationId) {
+        await openConversation(pending.conversationId)
+      }
+    }
     const failureMessage = chatFailureMessage(error)
     restoreSubmittedDraft(submissionDraftKey, draftText)
     if (image && !pendingImageFile.value) {
@@ -1732,7 +1801,9 @@ onBeforeUnmount(() => {
     window.clearInterval(modelStatusTimer)
     modelStatusTimer = null
   }
-  stopStreaming(false)
+  // Leaving the page detaches this viewer; only the Stop button cancels the job.
+  streamAbortController?.abort()
+  streamAbortController = null
   resetResolveDialog()
   resetCropDialog()
   resetPendingImage()
@@ -1749,7 +1820,8 @@ onMounted(async () => {
     console.error(error)
     ElMessage.warning('学习记录暂时无法加载，不影响开始新的提问。')
   }
-  const restoredDraft = await restoreLatestDraftContext()
+  const restoredPending = await restorePendingChat()
+  const restoredDraft = restoredPending || await restoreLatestDraftContext()
   if (!restoredDraft) {
     loadDraftForCurrentContext()
   }

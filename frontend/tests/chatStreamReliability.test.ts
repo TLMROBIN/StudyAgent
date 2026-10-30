@@ -40,6 +40,15 @@ try {
   setTimeout(() => active.abort(), 10)
   await assert.rejects(reading, { name: 'AbortError' })
   assert.equal(calls, 1)
+  const recovered: string[] = []
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, '/api/chat/requests/saved-request/stream')
+    assert.equal(options?.method, 'GET')
+    assert.equal(options?.body, undefined, 'recovery must not submit another question or require the image again')
+    return new Response('event: meta\ndata: {"conversation_id":42}\n\nevent: chunk\ndata: {"content":"先圈出已知条件。"}\n\nevent: done\ndata: {"content":"先圈出已知条件。"}\n\n')
+  }
+  await streamChat(payload, ({ event }) => recovered.push(event), { resumeRequestId: 'saved-request' })
+  assert.deepEqual(recovered, ['meta', 'chunk', 'done'])
   console.log('stream failure / retry cancellation / active cancellation: passed')
 } finally {
   await rm(dir, { recursive: true, force: true })

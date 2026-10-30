@@ -90,6 +90,8 @@ async def lifespan(_: FastAPI):
     finally:
         warmup_task.cancel()
         ocr_warmup_task.cancel()
+        from backend.services.background_chat_service import background_chat_service
+        await background_chat_service.shutdown()
         try:
             stop_paddleocr_worker()
         finally:
