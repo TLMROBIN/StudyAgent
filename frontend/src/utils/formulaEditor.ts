@@ -32,15 +32,48 @@ export const formulaExamples: FormulaTemplate[] = [
   { label: '列表', source: '- 第一个条件\n- 第二个条件' },
 ]
 
+/** Find math content boundaries, skipping Markdown code and escaped delimiters. */
+function mathContentAt(text: string, start: number, end: number): boolean {
+  const tokens = /(`+)[\s\S]*?\1|\\\\|\\\$|\$\$|\$|\\[()[\]]/g
+  let open: { close: string; start: number } | undefined
+  for (const match of text.matchAll(tokens)) {
+    const token = match[0]
+    const index = match.index!
+    if (open) {
+      if (token === open.close) {
+        if (start >= open.start && end <= index) return true
+        open = undefined
+      }
+    } else if (token === '$' || token === '$$' || token === '\\(' || token === '\\[') {
+      open = { close: token === '\\(' ? '\\)' : token === '\\[' ? '\\]' : token, start: index + token.length }
+    }
+  }
+  // Also support an unfinished formula while the student is still typing.
+  return !!open && start >= open.start
+}
+
+function formulaContent(source: string): string {
+  for (const [before, after] of [['$$', '$$'], ['$', '$'], ['\\(', '\\)'], ['\\[', '\\]']]) {
+    if (source.startsWith(before) && source.endsWith(after)) {
+      return source.slice(before.length, -after.length)
+    }
+  }
+  return source
+}
+
 /** Insert at a DOM textarea selection (UTF-16 offsets), without changing other text. */
 export function insertFormulaTemplate(text: string, start: number, end: number, template: FormulaTemplate) {
   const from = Math.max(0, Math.min(text.length, start))
   const to = Math.max(from, Math.min(text.length, end))
   const selected = text.slice(from, to)
   const wraps = template.before !== undefined && template.after !== undefined
-  const inserted = wraps ? template.before! + (selected || 'x') + template.after! : template.source
-  const selectionStart = wraps ? from + template.before!.length : from + inserted.length
-  const selectionEnd = wraps ? selectionStart + (selected || 'x').length : selectionStart
+  const insideMath = mathContentAt(text, from, to)
+  const content = selected || 'x'
+  const inserted = wraps
+    ? insideMath ? content : template.before! + content + template.after!
+    : insideMath ? formulaContent(template.source) : template.source
+  const selectionStart = wraps ? from + (insideMath ? 0 : template.before!.length) : from + inserted.length
+  const selectionEnd = wraps ? selectionStart + content.length : selectionStart
   return {
     text: text.slice(0, from) + inserted + text.slice(to),
     selectionStart,

@@ -14,6 +14,26 @@ assert.equal(fraction.selectionStart, fraction.selectionEnd)
 const continued = insertFormulaTemplate(fraction.text, fraction.selectionEnd, fraction.selectionEnd, inline)
 assert.equal(continued.text, String.raw`a$\frac{a}{b}$$x$c`)
 assert.equal(insertFormulaTemplate('', 100, 100, inline).text, '$x$')
+// Replace the radical's placeholder with a fraction without nesting delimiters.
+for (const [open, close] of [['$', '$'], ['$$\n', '\n$$'], ['\\(', '\\)'], ['\\[', '\\]']]) {
+  const source = `${open}\\sqrt{x}${close}`
+  const at = source.indexOf('x')
+  const nested = insertFormulaTemplate(source, at, at + 1, formulaTemplates[2])
+  assert.equal(nested.text, `${open}\\sqrt{\\frac{a}{b}}${close}`)
+  assert.doesNotMatch(renderRichText(nested.text), /message-math-fallback|katex-error/)
+  const unchanged = insertFormulaTemplate(source, at, at + 1, inline)
+  assert.equal(unchanged.text, source)
+  assert.equal(unchanged.text.slice(unchanged.selectionStart, unchanged.selectionEnd), 'x')
+}
+assert.equal(insertFormulaTemplate('$x$', 1, 1, formulaTemplates[4]).text, '$\\sqrt{x}x$')
+assert.equal(insertFormulaTemplate('$\\sqrt{', 7, 7, formulaTemplates[2]).text, '$\\sqrt{\\frac{a}{b}')
+assert.equal(insertFormulaTemplate('\\$5 后', 5, 5, formulaTemplates[2]).text, '\\$5 后$\\frac{a}{b}$')
+for (const code of ['`$x$`', '```latex\n$x$\n```']) {
+  const at = code.indexOf('x')
+  assert.equal(insertFormulaTemplate(code, at, at + 1, formulaTemplates[2]).text,
+    code.slice(0, at) + '$\\frac{a}{b}$' + code.slice(at + 1))
+}
+assert.equal(insertFormulaTemplate('$x$ 后 $y$', 5, 5, formulaTemplates[2]).text, '$x$ 后$\\frac{a}{b}$ $y$')
 for (const example of formulaExamples) {
   const html = renderRichText(example.source)
   assert.doesNotMatch(html, /message-math-fallback|katex-error/, example.label)

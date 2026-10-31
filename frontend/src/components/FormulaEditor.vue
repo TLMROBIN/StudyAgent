@@ -76,6 +76,7 @@ function updateText(event: Event) {
   </el-dialog>
   <el-dialog v-model="helpOpen" title="Markdown 与公式语法说明" width="min(900px, 96vw)" class="formula-help-dialog" append-to-body @closed="editorOpen && focusEditor()">
     <p>文字使用 Markdown，公式内部使用 LaTeX 语法。用 <code>$…$</code> 写行内公式，用 <code>$$…$$</code> 写独立公式；也支持 <code>\(…\)</code> 和 <code>\[…\]</code>。</p>
+    <p>在已有公式内插入模板时只插入 LaTeX 内容，不重复添加定界符。嵌套分式时，可选中根号中的 x 再点“分式”，得到 <code>$\sqrt{\frac{a}{b}}$</code>。</p>
     <p>公式定界符应成对闭合，花括号用于分组，例如 <code>x_{12}</code>。命令前输入一个反斜杠；公式请写在代码块之外，三个反引号包裹的代码块不会渲染公式。未闭合或错误公式会保留可读内容，部分未知命令会标红显示。</p>
     <div class="formula-help-examples">
       <article v-for="item in formulaExamples" :key="item.label" class="formula-help-example">

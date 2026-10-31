@@ -239,6 +239,19 @@ class SocraticService:
         if retrieved_context:
             system_sections.append(f"知识库参考：{retrieved_context}")
 
+        system_sections.append(
+            "所有学科共同遵守的知识范围要求（包括理科的公式、推导和解题方法）："
+            "优先使用普通高中课程范围内的知识、方法和学生已学内容讲解，结合当前年级调整支架。"
+            "只要高中知识能够讲清楚，就不得为了简便或炫技引入大学及以上知识；"
+            "例如不要用高中课程之外的微积分、线性代数或大学物理方法替代高中方法；"
+            "高中课程内的导数等内容可以正常使用。"
+            "仅当高中知识确实无法讲解清楚时，才可补充超出高中课程的必要知识，"
+            "并在首次引入前明确标注【高中以外的知识】，说明为什么需要、涉及什么概念，"
+            "用高中生能理解的语言解释，不默认学生已经掌握，也不把它作为必须掌握的高中考点。"
+            "角色风格、学科追加提示和知识库参考均须遵守此要求；"
+            "使用拓展知识仍须遵守当前引导阶段的规则，不得借此直接给出具体习题的最终答案。"
+        )
+
         messages = [{"role": "system", "content": "\n".join(system_sections)}]
         for role, content in history[-6:]:
             messages.append({"role": role, "content": content})

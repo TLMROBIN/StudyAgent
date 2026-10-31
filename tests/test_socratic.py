@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from backend.models.conversation import GuidanceStage
+from backend.subjects import SUBJECTS
 from backend.services.socratic_service import socratic_service
 from backend.services.subject_guidance_service import subject_guidance_service
 
@@ -9,6 +12,26 @@ def test_guidance_stage_progression():
     assert socratic_service.infer_stage(0) == GuidanceStage.INITIAL
     assert socratic_service.infer_stage(1) == GuidanceStage.HINT
     assert socratic_service.infer_stage(3) == GuidanceStage.FALLBACK
+
+
+@pytest.mark.parametrize("subject", SUBJECTS)
+@pytest.mark.parametrize("turns", [0, 2, 6])
+def test_high_school_scope_applies_to_every_subject_and_stage(subject, turns):
+    prompt = socratic_service.build_prompt(
+        question="请解释这个概念",
+        subject=subject,
+        history=[("user", "继续")] * turns,
+        retrieved_context="参考材料",
+        system_prompt="已有管理员提示词",
+        subject_supplement="学科补充",
+        role_prompt="角色风格",
+    )
+    system_text = prompt.messages[0]["content"]
+    assert "优先使用普通高中课程范围内" in system_text
+    assert "仅当高中知识确实无法讲解清楚时" in system_text
+    assert "首次引入前明确标注【高中以外的知识】" in system_text
+    assert "不得借此直接给出具体习题的最终答案" in system_text
+    assert system_text.index("参考材料") < system_text.index("所有学科共同遵守的知识范围要求")
 
 
 def test_fallback_text_never_contains_final_answer_phrase():
