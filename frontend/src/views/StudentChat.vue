@@ -1622,6 +1622,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
   messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [], deep_reasoning: pending.deepReasoning })
   queueScrollToBottom()
 
+  let bodyCompleted = false
   try {
     let roleFallbackNotified = false
     await streamChat(
@@ -1707,6 +1708,16 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
             last.suggested_replies = normalizeSuggestedReplies(data.suggested_replies)
             screenReaderAnnouncement.value = `学习助手回复完成：${data.content}`
             queueScrollToBottom()
+            // The server persists the body before done. A newer request replaces
+            // this controller, so late events cannot update its message or draft.
+            bodyCompleted = true
+            clearSubmittedDraft(submissionDraftKey)
+            savePendingChat(null)
+            sending.value = false
+            void loadConversations().catch(console.error)
+            void loadIncentiveSummary().catch(console.error)
+            void loadChatModels().catch(console.error)
+            resetRecommendations()
           }
         }
         if (event === 'suggested_replies') {
@@ -1729,6 +1740,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
       { signal: controller.signal, retryAttempts: 2, retryDelayMs: 1200, resumeRequestId: recovery?.requestId },
     )
     if (controller.signal.aborted || streamAbortController !== controller) return
+    if (bodyCompleted) return
     const last = messages.value[messages.value.length - 1]
     if (last && last.role === 'assistant' && !last.content.trim()) {
       throw new Error('模型调用失败，请联系管理员老师或稍后再试。')
@@ -1746,6 +1758,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
     resetRecommendations()
   } catch (error) {
     if (controller.signal.aborted || streamAbortController !== controller) return
+    if (bodyCompleted) return
     const last = messages.value[messages.value.length - 1]
     if (error instanceof DOMException && error.name === 'AbortError') {
       if (stopRequested && last && last.role === 'assistant' && !last.content.trim()) {

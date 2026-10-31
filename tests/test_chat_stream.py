@@ -293,6 +293,10 @@ def test_chat_stream_emits_real_chunks_and_persists(monkeypatch):
             yield chunk
 
     async def fake_generate_suggested_replies(**kwargs):
+        with session_factory() as verification_session:
+            saved = verification_session.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+            assert saved is not None, "Answer must be committed before generating trailing suggestions"
+            assert saved.content == "先看定义域。再判断增减性。"
         return suggested_replies
 
     monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)

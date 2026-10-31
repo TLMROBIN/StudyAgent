@@ -61,6 +61,10 @@ from backend.services.filter_service import FilterDecision, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
 from backend.services.llm_service import LLMCallError, MODEL_CALL_FAILED_MESSAGE, LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
 from backend.services.metrics_service import (
+    chat_body_completed_seconds,
+    chat_history_load_seconds,
+    chat_output_validation_seconds,
+    chat_rag_session_cache_total,
     chat_fact_mode_total,
     chat_first_token_seconds,
     chat_full_response_seconds,
@@ -399,6 +403,14 @@ class LearningSummaryParser:
 
 def _message_load_option():
     return selectinload(Conversation.messages).selectinload(Message.attachment)
+
+
+def _validate_stream_answer(text: str, *, skip_direct_answer: bool, subject: str):
+    started = perf_counter()
+    try:
+        return filter_service.validate_answer(text, skip_direct_answer=skip_direct_answer, subject=subject)
+    finally:
+        chat_output_validation_seconds.observe(perf_counter() - started)
 
 
 def _history_pairs_before_turn(conversation: Conversation, turn_index: int) -> list[tuple[str, str]]:
@@ -1259,6 +1271,7 @@ def _complete_early_special_response(
 
 def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -> Conversation:
     if payload.conversation_id:
+        history_started = perf_counter()
         conversation = db.scalar(
             select(Conversation)
             .options(_message_load_option())
@@ -1268,6 +1281,7 @@ def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -
                 Conversation.deleted_by_student_at.is_(None),
             )
         )
+        chat_history_load_seconds.observe(perf_counter() - history_started)
         if not conversation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
         return conversation
@@ -2246,6 +2260,7 @@ async def stream_chat(
             topic_fingerprint=rag_topic_fingerprint,
         )
     if retrieval is None:
+        chat_rag_session_cache_total.labels(result="bypass" if has_image_turn else "miss").inc()
         rag_started = perf_counter()
         try:
             retrieval = await asyncio.to_thread(
@@ -2264,6 +2279,8 @@ async def stream_chat(
                 topic_fingerprint=rag_topic_fingerprint,
                 chunks=retrieval.chunks,
             )
+    else:
+        chat_rag_session_cache_total.labels(result="hit").inc()
     subject_supplement = ((active_config.subject_prompts or {}).get(subject) or None) if active_config else None
     subject_llm_params = _subject_llm_params(active_config.guidance_params if active_config else None, subject)
     intent_started = perf_counter()
@@ -2850,7 +2867,7 @@ async def stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
+                    validation = _validate_stream_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -2900,7 +2917,7 @@ async def stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = filter_service.validate_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
+                    validation = _validate_stream_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -2926,23 +2943,6 @@ async def stream_chat(
             if should_send_done:
                 emitted_text = emitted_text.strip()
                 await release_ticket_once()
-                yield _sse_event(
-                    "done",
-                    {
-                        "content": emitted_text,
-                        "assets": [],
-                        "suggested_replies": [],
-                        "learning_summary": learning_summary,
-                    },
-                )
-                suggested_replies = await _generate_suggested_replies(
-                    subject=subject,
-                    guidance_stage=prompt.stage,
-                    current_question=prompt_question,
-                    assistant_response=emitted_text,
-                    history_pairs=history_pairs,
-                    model_key=selected_model_key,
-                )
                 conversation.subject = subject
                 conversation.guidance_stage = prompt.stage
                 practice_review_persisted = practice_review_turn and bool(emitted_text)
@@ -2984,6 +2984,21 @@ async def stream_chat(
                     guidance_stage_total.labels(stage=prompt.stage.value).inc()
                 db.commit()
                 turn_persisted = True
+                chat_body_completed_seconds.observe(perf_counter() - started)
+                yield _sse_event("done", {
+                    "content": emitted_text, "assets": [], "suggested_replies": [],
+                    "learning_summary": learning_summary,
+                })
+                suggested_replies = await _generate_suggested_replies(
+                    subject=subject, guidance_stage=prompt.stage,
+                    current_question=prompt_question, assistant_response=emitted_text,
+                    history_pairs=history_pairs, model_key=selected_model_key,
+                )
+                if suggested_replies:
+                    persisted_assistant = db.get(Message, assistant_message_id)
+                    if persisted_assistant is not None:
+                        persisted_assistant.suggested_replies = suggested_replies
+                        db.commit()
                 if suggested_replies:
                     yield _sse_event("suggested_replies", {"suggested_replies": suggested_replies})
                 if incentive_grant and (

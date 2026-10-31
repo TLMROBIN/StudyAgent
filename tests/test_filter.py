@@ -85,5 +85,5 @@ def test_chat_router_passes_subject_to_output_validation():
     source = Path("backend/routers/chat.py").read_text()
 
     assert source.count(
-        "validate_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)"
+        "_validate_stream_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)"
     ) == 2

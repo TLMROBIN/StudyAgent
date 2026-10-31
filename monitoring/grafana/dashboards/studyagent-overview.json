@@ -22,6 +22,35 @@
   "links": [],
   "panels": [
     {
+      "id": 101,
+      "type": "timeseries",
+      "title": "Chat stage latency p95 (seconds)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 80},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_body_completed_seconds_bucket[5m])))", "legendFormat": "body persisted"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_image_understanding_seconds_bucket[5m])))", "legendFormat": "image"},
+        {"refId": "C", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_rag_retrieval_seconds_bucket[5m])))", "legendFormat": "retrieval"},
+        {"refId": "D", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_intent_classify_seconds_bucket[5m])))", "legendFormat": "intent"},
+        {"refId": "E", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_queue_wait_seconds_bucket[5m])))", "legendFormat": "queue"},
+        {"refId": "F", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_suggested_replies_seconds_bucket[5m])))", "legendFormat": "suggestions"},
+        {"refId": "G", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_history_load_seconds_bucket[5m])))", "legendFormat": "history load"},
+        {"refId": "H", "expr": "histogram_quantile(0.95, sum by(le)(rate(chat_output_validation_seconds_bucket[5m])))", "legendFormat": "output validation per segment"}
+      ]
+    },
+    {
+      "id": 102,
+      "type": "timeseries",
+      "title": "RAG session cache outcomes and database fallback / second",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 89},
+      "targets": [
+        {"refId": "A", "expr": "sum by(result)(rate(chat_rag_session_cache_total[5m]))", "legendFormat": "cache {{result}}"},
+        {"refId": "B", "expr": "sum(rate(chat_rag_fallback_total[5m]))", "legendFormat": "database fallback"}
+      ]
+    },
+    {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

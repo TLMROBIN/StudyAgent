@@ -64,6 +64,7 @@ from backend.services.chunking.text_chunk_builder import (  # noqa: F401
     TextChunkBuilderMixin,
 )
 from backend.services.embed_service import EmbedService, embed_service
+from backend.services.metrics_service import chat_rag_fallback_total
 from backend.services.mineru_remote_service import mineru_remote_service
 from backend.services.mineru_service import (
     GPUProofFailedError,
@@ -268,6 +269,7 @@ class RagService(DocxChunkBuilderMixin, PdfChunkBuilderMixin, QuestionChunkBuild
         except Exception:
             logger.exception("Vector retrieval failed for subject=%s; using database fallback", subject)
 
+        chat_rag_fallback_total.inc()
         return self._fallback_retrieve(db, subject, question, profile=profile, student_grade=student_grade)
 
     def recommend_questions(

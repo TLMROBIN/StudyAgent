@@ -6,11 +6,18 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from starlette.requests import Request
 
 chat_request_total = Counter("chat_request_total", "Total chat requests")
-chat_first_token_seconds = Histogram("chat_first_token_seconds", "Latency until first streamed token")
-chat_full_response_seconds = Histogram("chat_full_response_seconds", "Full response latency")
+CHAT_LATENCY_BUCKETS = (*Histogram.DEFAULT_BUCKETS[:-1], 15, 30, 60, 120, 300, float("inf"))
+chat_first_token_seconds = Histogram("chat_first_token_seconds", "Latency until first streamed token", buckets=CHAT_LATENCY_BUCKETS)
+chat_full_response_seconds = Histogram("chat_full_response_seconds", "Full response including persistence and suggestions", buckets=CHAT_LATENCY_BUCKETS)
+chat_body_completed_seconds = Histogram("chat_body_completed_seconds", "Latency until persisted answer body is ready", buckets=CHAT_LATENCY_BUCKETS)
+chat_history_load_seconds = Histogram("chat_history_load_seconds", "Conversation and attachment history load latency")
+chat_output_validation_seconds = Histogram("chat_output_validation_seconds", "Per-segment full answer validation latency")
+chat_rag_session_cache_total = Counter("chat_rag_session_cache_total", "RAG session cache outcomes", ["result"])
+chat_rag_fallback_total = Counter("chat_rag_fallback_total", "RAG database fallback invocations")
 chat_image_understanding_seconds = Histogram(
     "chat_image_understanding_seconds",
     "Chat image understanding latency",
+    buckets=CHAT_LATENCY_BUCKETS,
 )
 chat_rag_retrieval_seconds = Histogram("chat_rag_retrieval_seconds", "Chat RAG retrieval latency")
 chat_intent_classify_seconds = Histogram(
