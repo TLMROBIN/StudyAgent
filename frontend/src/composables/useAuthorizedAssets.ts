@@ -13,6 +13,8 @@ function assetKey(asset: AuthorizedAssetResource): string {
 
 export function useAuthorizedAssets() {
   const assetUrls = reactive<Record<string, string>>({})
+  const assetErrors = reactive<Record<string, boolean>>({})
+  let disposed = false
   const pendingLoads = new Map<string, Promise<string>>()
 
   async function ensureAssetUrl(asset: AuthorizedAssetResource): Promise<string> {
@@ -26,8 +28,10 @@ export function useAuthorizedAssets() {
       return pending
     }
 
+    assetErrors[key] = false
     const request = api.get(resolveApiUrl(asset.url), { responseType: 'blob' })
       .then(({ data }) => {
+        if (disposed) return ''
         const nextUrl = URL.createObjectURL(data)
         const previousUrl = assetUrls[key]
         if (previousUrl) {
@@ -36,12 +40,27 @@ export function useAuthorizedAssets() {
         assetUrls[key] = nextUrl
         return nextUrl
       })
+      .catch((error) => {
+        if (!disposed) assetErrors[key] = true
+        throw error
+      })
       .finally(() => {
         pendingLoads.delete(key)
       })
 
     pendingLoads.set(key, request)
     return request
+  }
+
+  function markAssetFailed(asset: AuthorizedAssetResource) {
+    const key = assetKey(asset)
+    if (assetUrls[key]) URL.revokeObjectURL(assetUrls[key])
+    delete assetUrls[key]
+    assetErrors[key] = true
+  }
+
+  function assetFailed(asset: AuthorizedAssetResource): boolean {
+    return Boolean(assetErrors[assetKey(asset)])
   }
 
   function assetUrl(asset: AuthorizedAssetResource): string {
@@ -71,6 +90,7 @@ export function useAuthorizedAssets() {
   }
 
   onBeforeUnmount(() => {
+    disposed = true
     Object.values(assetUrls).forEach((url) => {
       if (url) {
         URL.revokeObjectURL(url)
@@ -80,6 +100,8 @@ export function useAuthorizedAssets() {
 
   return {
     assetUrl,
+    assetFailed,
+    markAssetFailed,
     ensureAssetUrl,
     openAsset,
     preloadAssets,

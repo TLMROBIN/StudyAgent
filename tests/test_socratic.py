@@ -660,3 +660,42 @@ def test_matched_by_trigger_marks_catch_all_rules():
     assert catch_all.matched_by_trigger is False
     assert math_triggered.matched_by_trigger is True
     assert math_catch_all.matched_by_trigger is False
+
+
+def test_long_conversation_keeps_original_task_and_exactly_eight_recent_messages():
+    original = '请评析声音主题作文，重点检查个人成长和时代变化之间的联系。'
+    history = [('user', original), ('assistant', '先看转折段。')]
+    for i in range(6):
+        history += [('user', f'补充{i}'), ('assistant', f'局部追问{i}')]
+    history += [('user', '不是仿写，是作文评析'), ('assistant', '请继续')]
+    prompt = socratic_service.build_prompt('继续', '语文', history, '', '')
+    assert [(m['role'], m['content']) for m in prompt.messages[1:-1]] == history[-8:]
+    system = prompt.messages[0]['content']
+    assert original in system
+    assert '不是仿写，是作文评析' in system
+    assert '学生指出你理解错了时，回查原始材料并及时纠正' in system
+    assert '无法看到完整原文时如实说明' in system
+    assert '不直接给出最终结论或标准答案' in system
+
+
+def test_task_context_is_bounded_and_does_not_treat_assistant_guesses_as_student_facts():
+    from backend.services.conversation_context import task_context
+    history = [('user', '材料' * 50000), ('assistant', '虚构学生的经历')]
+    assert len(task_context(history)) < 6500
+    assert '虚构学生的经历' not in task_context(history)
+
+
+def test_historical_image_context_keeps_confidence_and_excludes_printed_answers():
+    import json
+    from backend.services.conversation_context import stored_image_context, image_context_record
+    from backend.services.chat_image_understanding_service import ImageUnderstandingResult
+    legacy = json.dumps({'question_text': '原图题干', 'printed_answer': '不应透露的参考答案', 'uncertainties': ['文字模糊']})
+    context = stored_image_context(legacy)
+    assert '原图题干' in context and '文字模糊' in context
+    assert '不应透露' not in context
+    result = ImageUnderstandingResult(filter_text='题干', prompt_summary='图片原始材料',
+        ocr_raw_text='', confidence_level='medium', source='paddleocr', must_short_circuit=False,
+        uncertainties=['小字看不清'])
+    restored = stored_image_context(image_context_record(result))
+    assert '图片原始材料' in restored and 'medium' in restored and '小字看不清' in restored
+    assert stored_image_context('not-json') == ''

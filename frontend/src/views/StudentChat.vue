@@ -3,6 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 
+import { rememberConversation, recalledConversation } from '../utils/chatSession'
+
 import FormulaEditor from '../components/FormulaEditor.vue'
 
 import { useAuthorizedAssets } from '../composables/useAuthorizedAssets'
@@ -201,8 +203,47 @@ let cropPointerStart: {
   initial: CropRect
 } | null = null
 const localAttachmentUrls = new Set<string>()
-const { assetUrl, openAsset, preloadAssets, ensureAssetUrl } = useAuthorizedAssets()
+const { assetUrl, assetFailed, markAssetFailed, openAsset, preloadAssets, ensureAssetUrl } = useAuthorizedAssets()
 const authStore = useAuthStore()
+
+const sessionTitle = computed(() => conversations.value.find((item) => item.id === currentConversationId.value)?.topic || '把问题一步步想清楚')
+
+function rememberCurrentConversation(id: number | null) {
+  const student = authStore.user?.id
+  if (student != null) rememberConversation(window.localStorage, student, id)
+}
+
+async function restoreLastConversation(): Promise<boolean> {
+  const student = authStore.user?.id
+  if (student == null) return false
+  const id = recalledConversation(window.localStorage, student)
+  if (!id) return false
+  const known = conversations.value.find((item) => item.id === id)
+  if (known?.is_archived) {
+    rememberCurrentConversation(null)
+    return false
+  }
+  const restored = await openConversation(id)
+  if (restored) ElMessage.info('已回到上次的问题，可以继续追问。')
+  return restored
+}
+
+async function syncSentAttachment(conversationId: number, index: number, message: ChatMessageRead) {
+  try {
+    const { data } = await api.get<ChatConversationRead>(`/chat/history/${conversationId}`)
+    const saved = data.messages[index]
+    if (currentConversationId.value !== conversationId || messages.value[index] !== message
+      || saved?.role !== 'user' || saved.content !== message.content || !saved.attachment) return
+    await ensureAssetUrl(saved.attachment)
+    const oldUrl = message.attachment?.url
+    message.attachment = saved.attachment
+    revokeLocalAttachmentUrl(oldUrl)
+  } catch { /* The local preview stays usable; history can retry the persistent attachment. */ }
+}
+
+async function retryMessageAttachment(attachment: ChatMessageAttachment) {
+  try { await ensureAssetUrl(attachment) } catch { ElMessage.error('图片暂时无法加载，请检查网络后重试。') }
+}
 
 const visibleRecommendations = computed(() => (
   recommendationPool.value.slice(recommendationOffset.value, recommendationOffset.value + RECOMMENDATION_PAGE_SIZE)
@@ -606,6 +647,7 @@ async function openConversation(id: number): Promise<boolean> {
   try {
     const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
     currentConversationId.value = id
+    rememberCurrentConversation(id)
     resetPendingImage()
     clearLocalAttachmentUrls()
     form.subject = data.subject
@@ -725,6 +767,7 @@ async function loadIncentiveSummary() {
 function startNewConversation(options: { subject?: string } = {}) {
   followLatest.value = true
   currentConversationId.value = null
+  rememberCurrentConversation(null)
   currentConversationResolved.value = false
   messages.value = []
   guidanceStage.value = 'initial_guidance'
@@ -783,6 +826,7 @@ async function toggleConversationArchive(item: ConversationSummary) {
   try {
     const { data } = await api.patch<ChatConversationRead>(`/chat/${item.id}/archive`, { is_archived: !item.is_archived })
     item.is_archived = data.is_archived
+    if (item.id === currentConversationId.value) rememberCurrentConversation(data.is_archived ? null : item.id)
     ElMessage.success(data.is_archived ? '对话已归档，可在“已归档”中查看和恢复' : '对话已恢复到历史记录')
   } catch {
     ElMessage.error('归档设置未保存，请稍后重试')
@@ -1643,6 +1687,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
           if (last?.role === 'assistant') last.deep_reasoning = data.deep_reasoning === true
           if (typeof data.conversation_id === 'number') {
             currentConversationId.value = data.conversation_id
+            rememberCurrentConversation(data.conversation_id)
             pending.conversationId = data.conversation_id
             savePendingChat(pending)
           }
@@ -1713,6 +1758,10 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
             bodyCompleted = true
             clearSubmittedDraft(submissionDraftKey)
             savePendingChat(null)
+            const userMessage = messages.value[pending.historyLength]
+            if (currentConversationId.value && userMessage?.attachment && isLocalPreviewUrl(userMessage.attachment.url)) {
+              void syncSentAttachment(currentConversationId.value, pending.historyLength, userMessage)
+            }
             sending.value = false
             void loadConversations().catch(console.error)
             void loadIncentiveSummary().catch(console.error)
@@ -1834,7 +1883,7 @@ onMounted(async () => {
     ElMessage.warning('学习记录暂时无法加载，不影响开始新的提问。')
   }
   const restoredPending = await restorePendingChat()
-  const restoredDraft = restoredPending || await restoreLatestDraftContext()
+  const restoredDraft = restoredPending || await restoreLatestDraftContext() || await restoreLastConversation()
   if (!restoredDraft) {
     loadDraftForCurrentContext()
   }
@@ -1853,7 +1902,7 @@ onMounted(async () => {
       <header class="study-session-header">
         <div class="study-session-heading">
           <div class="study-session-title-row">
-            <h1>把问题一步步想清楚</h1>
+            <h1>{{ sessionTitle }}</h1>
             <span class="study-stage-chip" :data-complete="currentConversationResolved">{{ sessionStageLabel }}</span>
           </div>
           <p>从你卡住的地方开始，我会用问题陪你找到下一步。</p>
@@ -2016,11 +2065,13 @@ onMounted(async () => {
                   v-if="messageAttachmentSrc(item.attachment)"
                   :src="messageAttachmentSrc(item.attachment)"
                   :alt="item.attachment.filename"
+                  @error="markAssetFailed(item.attachment)"
                   loading="lazy"
                 />
-                <span v-else>图片加载中...</span>
+                <span v-else>{{ assetFailed(item.attachment) ? '图片加载失败' : '图片加载中...' }}</span>
                 <span>{{ item.attachment.filename }}</span>
               </a>
+              <button v-if="assetFailed(item.attachment)" type="button" class="ghost-button" @click="retryMessageAttachment(item.attachment)">重试加载题图</button>
             </div>
             <p v-if="item.error" class="chat-error" role="alert">{{ item.error }}</p>
             <div class="message-body" v-html="renderMessageBody(item.content, item.assets || [])"></div>
@@ -2094,7 +2145,7 @@ onMounted(async () => {
             })"
           >
             <img :src="pendingImagePreviewUrl" :alt="pendingImageFile?.name || '待发送图片'" />
-            <span>{{ pendingImageFile?.name || '待发送图片' }}</span>
+            <span>点击检查完整题图 · {{ pendingImageFile?.name || '待发送图片' }}</span>
           </a>
           <div class="row-actions composer-attachment-actions">
             <button type="button" class="ghost-button" :disabled="sending" @click="triggerCameraCapture">重新拍照</button>
@@ -2118,7 +2169,7 @@ onMounted(async () => {
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <span class="composer-helper">一次可上传 1 张题图</span>
+            <span class="composer-helper">先检查题图完整，再发送（一次 1 张）</span>
           </div>
           <label class="deep-reasoning-control">
             <input v-model="form.deepReasoning" type="checkbox" :disabled="sending || !canUseDeepReasoning" />
@@ -2461,16 +2512,17 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="imagePreviewVisible" title="查看题图" width="min(96vw, 1000px)" @closed="previewAttachment = null">
+    <el-dialog v-model="imagePreviewVisible" class="chat-image-dialog" title="查看完整题图" width="min(96vw, 1000px)" @closed="previewAttachment = null">
       <div class="row-actions">
         <button class="ghost-button" @click="imagePreviewZoom = Math.min(4, imagePreviewZoom + 0.5)">放大</button>
         <button class="ghost-button" @click="imagePreviewZoom = Math.max(1, imagePreviewZoom - 0.5)">缩小</button>
       </div>
       <div class="chat-image-preview">
-        <img v-if="imagePreviewUrl && !imagePreviewError" :src="imagePreviewUrl" :alt="previewAttachment?.filename || '题图'" :style="{ width: `${imagePreviewZoom * 100}%`, maxWidth: 'none' }" @error="imagePreviewError = '图片加载失败，请重试'" />
+        <img v-if="imagePreviewUrl && !imagePreviewError" :src="imagePreviewUrl" :alt="previewAttachment?.filename || '题图'" :style="{ width: imagePreviewZoom === 1 ? 'auto' : `${imagePreviewZoom * 100}%`, maxWidth: imagePreviewZoom === 1 ? '100%' : 'none', maxHeight: imagePreviewZoom === 1 ? '50vh' : 'none', marginInline: 'auto' }" @error="imagePreviewError = '图片加载失败，请重试'" />
         <p v-else>{{ imagePreviewError || '图片加载中...' }}</p>
       </div>
       <button v-if="imagePreviewError" class="ghost-button" @click="openMessageAttachment(previewAttachment)">重试加载</button>
+      <template #footer><button type="button" class="primary-button" @click="imagePreviewVisible = false">关闭题图</button></template>
     </el-dialog>
   </section>
 </template>

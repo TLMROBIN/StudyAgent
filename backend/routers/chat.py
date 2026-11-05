@@ -101,6 +101,8 @@ from backend.services.store_service import BaseStore, store
 from backend.subjects import SUBJECTS, is_valid_subject
 from backend.time_utils import now_utc
 
+from backend.services.conversation_context import image_context_record, stored_image_context
+
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 STREAM_HEARTBEAT_SECONDS = 15
@@ -136,10 +138,49 @@ def _clip_followup_context(text: str, limit: int) -> str:
 
 
 def _previous_user_topic(history_pairs: list[tuple[str, str]]) -> str:
-    for role, content in reversed(history_pairs):
-        if role == MessageRole.USER.value and content.strip():
-            return content.strip()
-    return ""
+    users = [content.strip() for role, content in history_pairs if role == MessageRole.USER.value and content.strip()]
+    return next((content for content in reversed(users) if len(content) >= 30), users[0] if users else "")
+
+
+async def _historical_image_context(
+    db: DbSession, conversation: Conversation, before_turn: int, request: Request, model_key: str,
+    *, recover_missing: bool = True,
+) -> str:
+    previous = [message for message in conversation.messages
+                if message.role == MessageRole.USER and message.turn_index < before_turn and message.attachment]
+    if not previous:
+        return ""
+    selected = [previous[0]]
+    if previous[-1].id != previous[0].id:
+        selected.append(previous[-1])
+    contexts = []
+    for message in selected:
+        attachment = message.attachment
+        saved = stored_image_context(attachment.understanding_json)
+        # Backfill the latest legacy attachment once; older originals stay labelled unavailable.
+        if recover_missing and not saved and message.id == previous[-1].id and attachment.ocr_status not in {"failed", "off_topic"}:
+            try:
+                path = chat_attachment_service.resolve_path(attachment.storage_key)
+                result = await _await_image_understanding(
+                    request, image_bytes=path.read_bytes(), mime_type=attachment.mime_type,
+                    subject=conversation.subject, user_text=message.content, model_key=model_key,
+                    image_path=str(path), attachment_id=attachment.id,
+                )
+                if result.source not in {"failed", "off_topic"} and result.prompt_summary:
+                    attachment.understanding_json = image_context_record(result)
+                    db.add(attachment)
+                    db.commit()
+                    saved = stored_image_context(attachment.understanding_json)
+            except HTTPException as exc:
+                if exc.status_code == 499:
+                    raise
+                db.rollback()
+                logger.warning("Historical image context unavailable for attachment %s", attachment.id)
+            except Exception:
+                db.rollback()
+                logger.warning("Historical image context unavailable for attachment %s", attachment.id)
+        contexts.append({"turn": message.turn_index, "识别材料": saved or "暂无可用识别材料，请勿假装看过原图"})
+    return json.dumps(contexts, ensure_ascii=False)
 
 
 def _previous_assistant_prompt(history_pairs: list[tuple[str, str]]) -> str:
@@ -1963,11 +2004,7 @@ async def stream_chat(
             "failed": "failed",
         }.get(image_understanding.source, "pending")
         attachment_record.ocr_confidence = image_understanding.ocr_confidence_value
-        attachment_record.understanding_json = (
-            json.dumps(image_understanding.understanding_json, ensure_ascii=False)
-            if image_understanding.understanding_json is not None
-            else None
-        )
+        attachment_record.understanding_json = image_context_record(image_understanding)
         db.add(attachment_record)
         db.commit()
 
@@ -2296,6 +2333,9 @@ async def stream_chat(
         )
     finally:
         chat_intent_classify_seconds.observe(perf_counter() - intent_started)
+    historical_images = await _historical_image_context(
+        db, conversation, user_turn_index, request, selected_model_key, recover_missing=not has_image_turn,
+    )
     prompt = socratic_service.build_prompt(
         question=prompt_question,
         subject=subject,
@@ -2304,6 +2344,7 @@ async def stream_chat(
         system_prompt=active_config.system_prompt if active_config else socratic_service.base_prompt,
         student_grade=current_user.grade,
         image_summary=image_understanding.prompt_summary if image_understanding else None,
+        historical_image_context=historical_images,
         image_confidence=image_understanding.confidence_level if image_understanding else None,
         image_uncertainties=image_understanding.uncertainties if image_understanding else None,
         image_related=has_image_turn,

@@ -1798,7 +1798,12 @@ def test_chat_stream_persists_understanding_json_for_image_turn(monkeypatch):
     try:
         attachment = session.scalar(select(ChatMessageAttachment))
         assert attachment is not None
-        assert json.loads(attachment.understanding_json) == understanding_payload
+        saved = json.loads(attachment.understanding_json)
+        context = saved.pop("_chat_context")
+        assert saved == understanding_payload
+        assert context["confidence"] == "medium"
+        assert context["uncertainties"] == ["电源电压看不清"]
+        assert "题干：" in context["summary"]
     finally:
         session.close()
 
@@ -3424,3 +3429,40 @@ def test_archive_runtime_upgrade_preserves_existing_conversations(monkeypatch):
     database.apply_runtime_schema_updates()
     with factory() as db:
         assert db.get(Conversation, conv_id).is_archived is False
+
+
+def test_text_followup_recovers_saved_image_material_without_recognizing_again(monkeypatch):
+    session_factory = _build_session_factory()
+    current_user = _create_student(session_factory)
+    prompts = []
+    calls = []
+
+    async def fake_stream(messages, fallback_text, *, model_key=None):
+        prompts.append(messages)
+        yield '先找出你想重点修改的段落。'
+
+    async def fake_understand(**kwargs):
+        calls.append(kwargs)
+        return ImageUnderstandingResult(
+            filter_text='作文评析：声音与个人成长', prompt_summary='原图锚点：校园铃声与个人成长的联系',
+            ocr_raw_text='', confidence_level='high', source='paddleocr', must_short_circuit=False,
+        )
+
+    monkeypatch.setattr(chat_router.llm_service, 'stream_response', fake_stream)
+    monkeypatch.setattr(chat_router.chat_image_understanding_service, 'understand', fake_understand)
+    monkeypatch.setattr(chat_router.rag_service, 'retrieve', lambda *args, **kwargs: RetrievalResult(context='', chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, 'is_cacheable', lambda **kwargs: False)
+    client = _build_chat_test_client(session_factory, current_user)
+    first = client.post('/api/chat/stream', data={'subject': '语文', 'message': '请评析这篇关于声音与成长的作文'},
+        files={'image': ('essay.png', _make_test_image_bytes(), 'image/png')})
+    assert first.status_code == 200
+    conversation_id = _parse_sse(first.text)[0][1]['conversation_id']
+    second = client.post('/api/chat/stream', json={
+        'subject': '语文', 'message': '请继续评析上面的作文，尤其检查全文的结构与原来材料的联系',
+        'conversation_id': conversation_id,
+    })
+    assert second.status_code == 200
+    assert len(calls) == 1, 'saved OCR must be reused without sending the image to recognition every turn'
+    assert len(prompts) == 2
+    assert '原图锚点' in prompts[1][0]['content']
+    assert '请评析这篇关于声音与成长的作文' in prompts[1][0]['content']

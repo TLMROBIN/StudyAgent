@@ -75,6 +75,11 @@ export async function prepareChatImageUpload(file: File): Promise<PreparedChatIm
     const canvas = drawImageToCanvas(image, resizedDimensions(image.naturalWidth, image.naturalHeight))
     const qualityReport = analyzeCanvasQuality(canvas)
     const qualityWarnings = qualityReport.issues.length ? [CHAT_IMAGE_QUALITY_WARNING_MESSAGE] : []
+    // Keep the decoded original whenever it fits. Re-encoding every camera photo
+    // loses fine print and bakes older WebViews' EXIF interpretation into pixels.
+    if (!heic && file.size <= MAX_CHAT_IMAGE_BYTES) {
+      return { file, qualityWarnings, qualityReport }
+    }
     const blob = await canvasToJpegBlob(canvas)
     const preparedFile = new File([blob], jpegFileName(file.name), {
       type: 'image/jpeg',

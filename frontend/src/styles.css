@@ -3540,3 +3540,16 @@ summary,
   .formula-editor-toolbar { max-height: 52px; overflow-y: auto; }
   .formula-editor-dialog .el-dialog__footer { padding-top: 8px; }
 }
+
+/* Keep the whole photo and a reachable close action in short tablet viewports. */
+.chat-image-dialog.el-dialog {
+  margin-top: max(12px, env(safe-area-inset-top));
+  max-height: calc(var(--app-viewport-height, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+}
+.chat-image-dialog .el-dialog__body { min-height: 0; overflow: auto; }
+.chat-image-dialog .el-dialog__footer { flex-shrink: 0; }
+.chat-image-dialog .chat-image-preview { max-height: 50vh; }
+.chat-image-dialog .primary-button { min-height: 48px; }
+.study-session-title-row h1 { overflow-wrap: anywhere; }
