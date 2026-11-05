@@ -3466,3 +3466,16 @@ def test_text_followup_recovers_saved_image_material_without_recognizing_again(m
     assert len(prompts) == 2
     assert '原图锚点' in prompts[1][0]['content']
     assert '请评析这篇关于声音与成长的作文' in prompts[1][0]['content']
+
+
+def test_short_writing_reply_keeps_whole_essay_task_instead_of_concept_grading():
+    context = chat_router._short_followup_context(
+        subject='语文', current_answer='召唤',
+        history_pairs=[('user', '请评析关于校园声音与个人成长的作文，重点检查个人与时代联系是否自然'),
+            ('assistant', '先看转折？'), ('user', '一同出发'), ('assistant', '你希望这里表达共鸣还是召唤？')],
+    )
+    assert context is not None
+    assert '作文评析与修改任务' in context['prompt_question']
+    assert '开放表达不要机械判为部分正确' in context['prompt_question']
+    assert '概念问题' not in context['prompt_question']
+    assert '请评析关于校园声音' in context['retrieval_query']

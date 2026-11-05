@@ -218,13 +218,23 @@ def _short_followup_context(
     topic_line = f"上一轮学习主题：{_clip_followup_context(topic, 140)}\n" if topic else ""
     clipped_prompt = _clip_followup_context(previous_prompt, 360)
     clipped_answer = _clip_followup_context(answer, 80)
+    writing_followup = subject == "语文" and any(
+        word in topic for word in ("作文", "写作", "议论文", "记叙文")
+    )
+    task_label = f"学生正在继续上一轮{subject}作文评析与修改任务。" if writing_followup else f"学生正在回答上一轮{subject}概念问题。"
+    next_step = (
+        "先回应学生表达与作文原文、整体修改目标的联系。开放表达不要机械判为部分正确，"
+        "不要把局部句子润色改成仿写题；局部已完成时回到整篇评析。"
+        "必要时只提出 1 个关键问题，不代写正文。"
+        if writing_followup else
+        "请先判断学生回答是否完全或部分正确；如果不完整，用一句话补足关键条件；"
+        "然后继续提出 1 个聚焦的引导问题。"
+    )
     prompt_question = (
-        f"学生正在回答上一轮{subject}概念问题。\n"
-        f"{topic_line}"
+        f"{task_label}\n{topic_line}"
         f"上一轮导师问题：{clipped_prompt}\n"
         f"学生回答：{clipped_answer}\n"
-        "请先判断学生回答是否完全或部分正确；如果不完整，用一句话补足关键条件；"
-        "然后继续提出 1 个聚焦的引导问题。不要把它当成新的题目重新开始，也不要要求学生画无关图景。"
+        f"{next_step}不要把它当成新的题目重新开始，也不要要求学生画无关图景。"
     )
     retrieval_query = " ".join(
         part

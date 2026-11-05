@@ -12,8 +12,8 @@
 
 ## 自动验证
 
-- 定向：`tests/test_filter.py tests/test_socratic.py tests/test_chat_stream.py`，164 passed。
-- 新增：原题超出窗口时仍保留、精确八条历史、任务补充/纠正与长度限制、图片识别置信度与参考答案隔离、图片追问重用识别结果且不重复 OCR、账号指针隔离/主动新建/存储不可用。
+- 定向：`tests/test_filter.py tests/test_socratic.py tests/test_chat_stream.py`，165 passed。
+- 新增：原题超出窗口时仍保留、精确八条历史、任务补充/纠正与长度限制、作文短回答沿用整篇评析目标、图片识别置信度与参考答案隔离、图片追问重用识别结果且不重复 OCR、账号指针隔离/主动新建/存储不可用。
 - 前端：从仓库根目录运行 `node --experimental-strip-types --test frontend/tests/*.test.ts`，18 个文件通过。
 - Vite 生产构建、Python compileall、git diff --check 通过。
 - 全量后端：684 passed / 2 failed。对修改前 f08b59b 的独立 worktree 重跑这两项，同样失败：`test_understand_uses_paddleocr_backend_before_llm`、`test_chat_entrypoints_reject_unsupported_subject_before_side_effects`。未将既有 OCR mock/权限前置校验问题扩展进本次修复。
