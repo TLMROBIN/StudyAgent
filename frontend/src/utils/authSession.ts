@@ -1,3 +1,5 @@
+import { clearFeedbackDrafts } from './feedbackDraft'
+
 export const ACCESS_TOKEN_STORAGE_KEY = 'studyagent-access-token'
 export const REFRESH_TOKEN_STORAGE_KEY = 'studyagent-refresh-token'
 export const ID_TOKEN_HINT_STORAGE_KEY = 'studyagent-id-token-hint'
@@ -55,6 +57,7 @@ export function storeAuthTokens(accessToken: string, refreshToken: string) {
 }
 
 export function clearStoredAuthTokens() {
+  clearFeedbackDrafts()
   if (!storageAvailable()) {
     return
   }

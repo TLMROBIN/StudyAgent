@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { prepareChatImageUpload } from '../utils/chatImageUpload'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
 import {
@@ -15,6 +15,8 @@ import {
   type StudentFeedbackItem,
 } from '../utils/api'
 import FeedbackImages from '../components/FeedbackImages.vue'
+import { useAuthStore } from '../stores/auth'
+import { loadFeedbackDraft, saveFeedbackDraft } from '../utils/feedbackDraft'
 
 type FeedbackSection = 'feedback' | 'release-notes'
 type PendingFeedbackImage = {
@@ -24,16 +26,30 @@ type PendingFeedbackImage = {
 }
 
 const MAX_FEEDBACK_IMAGES = 6
+const authStore = useAuthStore()
+const draftOwnerId = authStore.user?.id
+const draft = draftOwnerId ? loadFeedbackDraft(draftOwnerId) : { text: '', files: [] }
+let mounted = true
 
 const loading = ref(false)
 const releaseNotesLoading = ref(false)
 const saving = ref(false)
-const content = ref('')
+const content = ref(draft.text)
 const cameraInputRef = ref<HTMLInputElement | null>(null)
 const galleryInputRef = ref<HTMLInputElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const preparingImages = ref(false)
-const selectedImages = ref<PendingFeedbackImage[]>([])
+const selectedImages = ref<PendingFeedbackImage[]>(draft.files.map((file, index) => ({
+  id: `restored-${index}`, file, url: URL.createObjectURL(file),
+})))
+
+function persistDraft() {
+  if (draftOwnerId && authStore.user?.id === draftOwnerId && authStore.accessToken) {
+    saveFeedbackDraft(draftOwnerId, content.value, selectedImages.value.map((item) => item.file))
+  }
+}
+
+watch(content, persistDraft)
 const activeSection = ref<FeedbackSection>('feedback')
 const items = ref<StudentFeedbackItem[]>([])
 const releaseNotes = ref<ReleaseNoteItem[]>([])
@@ -153,9 +169,21 @@ async function submitFeedback() {
   }
   saving.value = true
   try {
-    await createFeedback({ content: text, images: selectedImages.value.map((item) => item.file) })
+    const files = selectedImages.value.map((item) => item.file)
+    await createFeedback({ content: text, images: files })
+    if (!mounted) {
+      if (draftOwnerId && authStore.user?.id === draftOwnerId && authStore.accessToken) {
+        const saved = loadFeedbackDraft(draftOwnerId)
+        if (saved.text.trim() === text && saved.files.length === files.length
+          && saved.files.every((file, index) => file === files[index])) {
+          saveFeedbackDraft(draftOwnerId, '', [])
+        }
+      }
+      return
+    }
     content.value = ''
     clearSelectedImages()
+    persistDraft()
     ElMessage.success('反馈已提交')
     await loadFeedback()
   } catch (error) {
@@ -189,11 +217,13 @@ async function addSelectedImages(event: Event) {
       }
       try {
         const { file: normalized } = await prepareChatImageUpload(file)
+        if (!mounted || authStore.user?.id !== draftOwnerId) break
         selectedImages.value.push({
           id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
           file: normalized,
           url: URL.createObjectURL(normalized),
         })
+        persistDraft()
       } catch (error) {
         ElMessage.error(error instanceof Error ? error.message : '图片处理失败，请重试')
       }
@@ -210,6 +240,7 @@ function removeSelectedImage(id: string) {
     URL.revokeObjectURL(target.url)
   }
   selectedImages.value = selectedImages.value.filter((item) => item.id !== id)
+  persistDraft()
 }
 
 function clearSelectedImages() {
@@ -219,6 +250,8 @@ function clearSelectedImages() {
 }
 
 onBeforeUnmount(() => {
+  mounted = false
+  persistDraft()
   clearSelectedImages()
 })
 
@@ -236,6 +269,7 @@ onMounted(() => {
         <div>
           <h2>意见反馈</h2>
           <p class="panel-subcopy">把使用中遇到的问题或建议发给管理员；管理员回复后会显示在这里。</p>
+          <p class="panel-subcopy">文字草稿会在当前标签页保留；图片可在切换页面后恢复，刷新或关闭应用后需重新选择。退出登录会清除草稿。</p>
         </div>
         <div class="row-actions">
           <button

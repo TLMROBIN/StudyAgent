@@ -418,7 +418,7 @@ textarea {
 
 .history-drawer-content {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   gap: 16px;
   height: 100%;
   padding: 20px 16px;
