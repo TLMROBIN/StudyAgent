@@ -12,16 +12,20 @@ import {
   type LLMModelConfig,
   type LLMModelConfigPayload,
   type LLMProviderAccount,
+  type LLMProviderAccountPayload,
   type LLMUsageSummary,
   updateLLMModelConfig,
+  updateLLMProviderAccount,
 } from '../utils/api'
 
 const accounts = ref<LLMProviderAccount[]>([])
 const models = ref<LLMModelConfig[]>([])
 const usage = ref<LLMUsageSummary[]>([])
 const loading = ref(false)
+const editingAccountId = ref<number | null>(null)
 const editingModelId = ref<number | null>(null)
 const modelConfigForm = ref<HTMLElement | null>(null)
+const accountFormRef = ref<HTMLElement | null>(null)
 
 const accountForm = reactive({
   provider_name: 'minimax',
@@ -54,6 +58,7 @@ const modelForm = reactive({
 
 const canCreateModel = computed(() => accounts.value.length > 0 && modelForm.provider_account_id > 0)
 const modelSubmitText = computed(() => (editingModelId.value ? '保存模型' : '创建模型'))
+const accountSubmitText = computed(() => (editingAccountId.value ? '保存账户' : '创建账户'))
 
 async function loadData() {
   loading.value = true
@@ -72,6 +77,29 @@ async function loadData() {
   } finally {
     loading.value = false
   }
+}
+
+function resetAccountForm() {
+  editingAccountId.value = null
+  accountForm.provider_name = 'minimax'
+  accountForm.display_name = 'MiniMax Token Plan'
+  accountForm.base_url = 'https://api.minimax.chat/v1'
+  accountForm.api_key = ''
+  accountForm.account_billing_type = 'token_plan'
+  accountForm.is_enabled = true
+}
+
+async function editAccount(item: LLMProviderAccount) {
+  editingAccountId.value = item.id
+  accountForm.provider_name = item.provider_name
+  accountForm.display_name = item.display_name
+  accountForm.base_url = item.base_url
+  accountForm.api_key = ''
+  accountForm.account_billing_type = item.account_billing_type
+  accountForm.is_enabled = item.is_enabled
+  await nextTick()
+  accountFormRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  ElMessage.info(`正在编辑 ${item.display_name}`)
 }
 
 function resetModelForm() {
@@ -147,14 +175,29 @@ function buildModelPayload(): LLMModelConfigPayload {
 }
 
 async function submitAccount() {
-  if (!accountForm.api_key.trim()) {
+  if (!editingAccountId.value && !accountForm.api_key.trim()) {
     ElMessage.error('请填写 API Key')
     return
   }
-  const createdAccount = await createLLMProviderAccount({ ...accountForm })
-  modelForm.provider_account_id = createdAccount.id
-  ElMessage.success('供应商账户已创建')
-  accountForm.api_key = ''
+  const payload: LLMProviderAccountPayload = {
+    provider_name: accountForm.provider_name,
+    display_name: accountForm.display_name,
+    base_url: accountForm.base_url,
+    account_billing_type: accountForm.account_billing_type,
+    is_enabled: accountForm.is_enabled,
+  }
+  if (accountForm.api_key.trim()) {
+    payload.api_key = accountForm.api_key.trim()
+  }
+  if (editingAccountId.value) {
+    await updateLLMProviderAccount(editingAccountId.value, payload)
+    ElMessage.success('供应商账户已更新')
+  } else {
+    const createdAccount = await createLLMProviderAccount({ ...payload, api_key: payload.api_key ?? '' })
+    modelForm.provider_account_id = createdAccount.id
+    ElMessage.success('供应商账户已创建')
+  }
+  resetAccountForm()
   await loadData()
 }
 
@@ -211,19 +254,27 @@ onMounted(() => {
       </div>
 
       <div class="model-admin-grid">
-        <form class="model-admin-form" @submit.prevent="submitAccount">
-          <h3>供应商账户</h3>
+        <form ref="accountFormRef" class="model-admin-form" @submit.prevent="submitAccount">
+          <div class="model-form-title">
+            <h3>{{ editingAccountId ? '编辑供应商账户' : '供应商账户' }}</h3>
+            <button v-if="editingAccountId" class="ghost-button" type="button" @click="resetAccountForm">取消编辑</button>
+          </div>
           <el-input v-model="accountForm.display_name" placeholder="显示名称" />
           <el-input v-model="accountForm.provider_name" placeholder="供应商标识" />
           <el-input v-model="accountForm.base_url" placeholder="Base URL" />
-          <el-input v-model="accountForm.api_key" type="password" show-password placeholder="API Key" />
+          <el-input
+            v-model="accountForm.api_key"
+            type="password"
+            show-password
+            :placeholder="editingAccountId ? '留空则不修改 API Key' : 'API Key'"
+          />
           <el-select v-model="accountForm.account_billing_type">
             <el-option label="Token Plan" value="token_plan" />
             <el-option label="按量付费" value="pay_as_you_go" />
             <el-option label="本地模型" value="local" />
           </el-select>
           <el-switch v-model="accountForm.is_enabled" active-text="启用" />
-          <button class="primary-button" type="submit">创建账户</button>
+          <button class="primary-button" type="submit">{{ accountSubmitText }}</button>
         </form>
 
         <form ref="modelConfigForm" class="model-admin-form" @submit.prevent="submitModel">
@@ -265,6 +316,37 @@ onMounted(() => {
           <button class="primary-button" type="submit" :disabled="!canCreateModel">{{ modelSubmitText }}</button>
         </form>
       </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2>供应商账户</h2>
+      </div>
+      <el-table :data="accounts" stripe>
+        <el-table-column prop="display_name" label="名称" min-width="160" />
+        <el-table-column prop="provider_name" label="供应商标识" min-width="140" />
+        <el-table-column prop="base_url" label="Base URL" min-width="220" />
+        <el-table-column prop="account_billing_type" label="计费类型" width="120" />
+        <el-table-column label="API Key" width="100">
+          <template #default="{ row }">
+            <span :class="row.has_api_key ? 'detail-chip detail-chip--success' : 'detail-chip'">
+              {{ row.has_api_key ? '已配置' : '未配置' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <span :class="row.is_enabled ? 'detail-chip detail-chip--success' : 'detail-chip'">
+              {{ row.is_enabled ? '启用' : '停用' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" fixed="right" width="100">
+          <template #default="{ row }">
+            <button class="ghost-button" type="button" @click="editAccount(row)">编辑</button>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
 
     <div class="panel">
