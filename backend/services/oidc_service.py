@@ -101,7 +101,8 @@ class OidcService:
             raise OidcAuthError("OIDC id_token validation failed") from exc
 
     def issue_local_tokens_for_claims(self, db: Session, claims: dict) -> dict[str, str | int | bool]:
-        username = claims.get("preferred_username") or claims.get("email", "").split("@", 1)[0]
+        # 不再用邮箱前缀兜底：Keycloak 默认允许用户自行修改邮箱，改成 "admin@x" 即可冒绑他人账号
+        username = claims.get("preferred_username")
         subject = claims.get("sub")
         if not username and not subject:
             raise OidcAuthError("OIDC claims did not include a usable username")

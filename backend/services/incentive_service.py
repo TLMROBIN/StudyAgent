@@ -35,6 +35,10 @@ DEFAULT_INCENTIVE_PARAMS: dict[str, Any] = {
         "followup_answered": 5,
         "conversation_completed": 3,
         "practice_per_conversation": 2,
+        # 结题与反思只要两轮对话即可触发，需按天封顶，避免开大量短会话刷分
+        "early_resolved": 4,
+        "resolved_after_fallback": 2,
+        "reflection_submitted": 3,
     },
     "resolve_min_user_turns": 2,
     "reflection_min_chars": 20,
@@ -361,8 +365,11 @@ def _streak_continues(previous: date, current: date, weekend_grace: bool) -> boo
     return True
 
 
-def _profile_or_create(db: Session, student_id: int) -> StudentIncentiveProfile:
-    profile = db.scalar(select(StudentIncentiveProfile).where(StudentIncentiveProfile.student_id == student_id))
+def _profile_or_create(db: Session, student_id: int, *, for_update: bool = False) -> StudentIncentiveProfile:
+    stmt = select(StudentIncentiveProfile).where(StudentIncentiveProfile.student_id == student_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    profile = db.scalar(stmt)
     if profile is not None:
         return profile
     profile = StudentIncentiveProfile(student_id=student_id, badges=[], counters={})
@@ -372,9 +379,7 @@ def _profile_or_create(db: Session, student_id: int) -> StudentIncentiveProfile:
             db.flush()
         return profile
     except IntegrityError:
-        return db.scalar(
-            select(StudentIncentiveProfile).where(StudentIncentiveProfile.student_id == student_id)
-        )
+        return db.scalar(stmt)
 
 
 def _insert_event(db: Session, student_id: int, draft: IncentiveEventDraft) -> StudentIncentiveEvent | None:
@@ -469,13 +474,14 @@ def record_events(
     inserted: list[tuple[StudentIncentiveEvent, IncentiveEventDraft]] = []
     # The first ledger INSERT obtains SQLite's writer lock. Reading/updating the
     # profile only afterwards prevents two writers from calculating from the
-    # same stale projection snapshot.
+    # same stale projection snapshot. On PostgreSQL the profile row lock below
+    # serializes concurrent grants so daily caps and counters stay consistent.
     for draft in drafts:
         event = _insert_event(db, student_id, draft)
         if event is not None:
             inserted.append((event, draft))
 
-    profile = _profile_or_create(db, student_id)
+    profile = _profile_or_create(db, student_id, for_update=True)
     old_level = profile.level or 1
     old_badges = set(profile.badges or [])
     counters = dict(profile.counters or {})
@@ -680,7 +686,10 @@ def get_report(db: Session, student_id: int, period: str) -> dict[str, Any]:
 def conversation_signal_snapshot(db: Session, conversation_id: int) -> dict[str, Any]:
     messages = db.scalars(select(Message).where(Message.conversation_id == conversation_id)).all()
     return {
-        "user_turn_count": sum(1 for message in messages if message.role == MessageRole.USER),
+        "user_turn_count": sum(
+            1 for message in messages
+            if message.role == MessageRole.USER and message.delivery_status == "completed"
+        ),
         "had_fallback": any(
             message.role == MessageRole.ASSISTANT and message.guidance_stage == GuidanceStage.FALLBACK
             for message in messages

@@ -156,6 +156,8 @@ class MessageRead(BaseModel):
     id: int
     role: MessageRole
     content: str
+    delivery_status: str = "completed"
+    failure_reason: str | None = None
     attachment: ChatAttachmentRead | None = None
     assets: list[KnowledgeAssetRead] = Field(default_factory=list)
     suggested_replies: list[str] = Field(default_factory=list)
@@ -239,11 +241,15 @@ class ConversationArchiveListRead(BaseModel):
     page_size: int
 
 
+CHAT_MESSAGE_MAX_LENGTH = 6000
+
+
 class ChatRequest(BaseModel):
-    subject: str
-    message: str = ""
+    subject: str = Field(max_length=16)
+    message: str = Field(default="", max_length=CHAT_MESSAGE_MAX_LENGTH)
     conversation_id: int | None = None
-    request_id: str | None = None
+    # 额度预留 key 由 user_id + request_id 组成，落库列宽 128，这里限制长度防止溢出
+    request_id: str | None = Field(default=None, max_length=64)
     llm_model: str | None = Field(default=None, max_length=64)
     deep_reasoning: bool = False
     role_id: int | None = Field(default=None, gt=0)

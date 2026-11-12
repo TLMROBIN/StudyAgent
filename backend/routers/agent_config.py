@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from backend.dependencies import CurrentAdmin, CurrentUser, DbSession
+from backend.dependencies import CurrentAdmin, DbSession
 from backend.models.agent_config import AgentConfig
 from backend.models.schemas import AgentConfigCreate, AgentConfigRead
 from backend.services.audit_service import audit_service
@@ -31,13 +31,13 @@ def get_subject_prompt_defaults(current_user: CurrentAdmin) -> dict[str, str]:
 
 
 @router.get("/", response_model=list[AgentConfigRead])
-def list_agent_configs(db: DbSession, current_user: CurrentUser) -> list[AgentConfigRead]:
+def list_agent_configs(db: DbSession, current_user: CurrentAdmin) -> list[AgentConfigRead]:
     items = db.scalars(select(AgentConfig).order_by(AgentConfig.version.desc())).all()
     return [AgentConfigRead.model_validate(item) for item in items]
 
 
 @router.get("/active", response_model=AgentConfigRead)
-def get_active_agent_config(db: DbSession, current_user: CurrentUser) -> AgentConfigRead:
+def get_active_agent_config(db: DbSession, current_user: CurrentAdmin) -> AgentConfigRead:
     item = db.scalar(select(AgentConfig).where(AgentConfig.is_active.is_(True)).order_by(AgentConfig.version.desc()))
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active config not found")

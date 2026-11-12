@@ -190,6 +190,9 @@ class MemoryStore(BaseStore):
         with self._lock:
             self._cleanup_reservation(reservation_key)
             existing = self._quota_reservations.get(reservation_key)
+            if existing and existing.reconciled:
+                snapshots = self._quota_snapshot_unlocked(keys)
+                return QuotaReservationResult(False, reservation_key, amount, exceeded_key=reservation_key, snapshots=snapshots)
             if existing and not existing.released:
                 snapshots = self._quota_snapshot_unlocked(keys)
                 return QuotaReservationResult(True, reservation_key, existing.amount, snapshots=snapshots)
@@ -296,7 +299,13 @@ class RedisStore(BaseStore):
     local ttl = tonumber(ARGV[2])
     local existing = redis.call('GET', reservation_key)
     if existing then
-      return {1, '', existing}
+      local record = cjson.decode(existing)
+      if record.reconciled then
+        return {0, reservation_key, ''}
+      end
+      if not record.released then
+        return {1, '', existing}
+      end
     end
     local key_count = tonumber(ARGV[3])
     for i = 1, key_count do

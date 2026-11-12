@@ -53,6 +53,8 @@ export interface ChatMessageAttachment {
 export interface ChatMessageRead {
   role: 'user' | 'assistant'
   content: string
+  delivery_status?: 'pending' | 'completed' | 'failed' | 'cancelled'
+  failure_reason?: string | null
   attachment?: ChatMessageAttachment | null
   assets?: KnowledgeAsset[]
   suggested_replies?: string[]

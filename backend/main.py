@@ -10,6 +10,7 @@ from backend.config import get_settings
 from backend.database import Base, SessionLocal, apply_runtime_schema_updates, engine
 from backend.middleware.auth import RequestContextMiddleware
 from backend.middleware.rate_limit import SlidingWindowRateLimitMiddleware
+from backend.middleware.real_ip import TrustedRealIPMiddleware
 from backend.models import agent_config, agent_role, audit_log, conversation, feedback, incentive, knowledge, llm_provider, notification, system_config, user  # noqa: F401
 from backend.observability import setup_logging
 from backend.routers import admin, agent_config as agent_config_router, agent_role as agent_role_router, auth, chat, feedback as feedback_router, incentive as incentive_router, knowledge as knowledge_router, llm_provider as llm_provider_router, llm_usage as llm_usage_router, notifications as notifications_router, release_notes as release_notes_router, stats
@@ -110,6 +111,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 最后注册 = 最外层：限流、审计等下游拿到的 request.client 都是真实客户端 IP
+app.add_middleware(TrustedRealIPMiddleware, trusted_cidrs=settings.trusted_proxy_cidr_list)
 
 app.include_router(auth.router)
 app.include_router(chat.router)

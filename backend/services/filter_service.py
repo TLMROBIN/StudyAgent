@@ -8,6 +8,8 @@ backend/data/filter_rules.json 加载，配置缺失/损坏时回退到代码内
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+import unicodedata
 
 from backend.services.filter_rule_engine import (
     LAYER_DIRECT_ANSWER,
@@ -61,30 +63,57 @@ class FilterService:
 
     # ---- 输入过滤（黑名单 + 学科白名单）----
 
-    def check_question(self, question: str, declared_subject: str | None = None) -> FilterDecision:
+    _basic_math_pattern = re.compile(r"^[\d\s+\-×xX*÷/().（）=等于多少几？?]+$")
+    _contextual_followup_pattern = re.compile(
+        r"^(?:不知道|不会|没懂|没看懂|再来一次|继续|然后呢|"
+        r"(?:第?[一二三四五六七八九十\d]+步|这一步|这里|这个|那个|为什么|为何|怎么|咋|哪).{0,36})$"
+    )
+    _academic_intent_pattern = re.compile(r"题|练习|巩固|错因|素材库|词汇|是什么|是否|溶于|定律|公式|概念|计算|证明|答案")
+    _answer_attempt_pattern = re.compile(r"^(?:选|答案是?)?[A-Da-d][。.!！]?$")
+
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or "")).casefold()
+
+    def check_question(
+        self,
+        question: str,
+        declared_subject: str | None = None,
+        *,
+        allow_contextual_short_followup: bool = False,
+    ) -> FilterDecision:
         snapshot = self._engine.snapshot()
-        normalized = question.strip()
+        normalized = self.normalize_text(question)
         if not normalized:
             return FilterDecision(False, "empty_question")
         for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST):
             if rule.pattern.search(normalized):
                 return FilterDecision(False, "blocked_non_subject")
 
-        if declared_subject and declared_subject in snapshot.subjects:
-            return FilterDecision(True, "declared_subject", declared_subject)
+        # 规则只做初筛；*_candidate 必须由调用方再通过实际话题分类。
+        selected_subject = declared_subject if declared_subject in snapshot.subjects else None
+        if allow_contextual_short_followup and (
+            len(normalized) <= 12 or self._contextual_followup_pattern.fullmatch(normalized)
+        ):
+            return FilterDecision(True, "academic_context_followup", selected_subject)
+        if self._basic_math_pattern.fullmatch(normalized) and any(token in normalized for token in "+-×x*/÷/=等于多少几"):
+            return FilterDecision(True, "basic_math_expression", selected_subject or "数学")
+        if selected_subject and self._answer_attempt_pattern.fullmatch(normalized):
+            return FilterDecision(True, "answer_attempt", selected_subject)
 
         for subject, keywords in snapshot.subjects.items():
-            if any(keyword in normalized for keyword in keywords):
-                return FilterDecision(True, "keyword_match", subject)
-
+            if any(self.normalize_text(keyword) in normalized for keyword in keywords):
+                return FilterDecision(True, "keyword_candidate", selected_subject or subject)
         if len(normalized) >= snapshot.generic_min_length and any(token in normalized for token in snapshot.generic_tokens):
-            return FilterDecision(True, "generic_academic_pattern", declared_subject)
+            return FilterDecision(True, "generic_academic_candidate", selected_subject)
+        if selected_subject and self._academic_intent_pattern.search(normalized):
+            return FilterDecision(True, "academic_intent_candidate", selected_subject)
 
         return FilterDecision(False, "subject_not_recognized")
 
     def is_question_blocked(self, text: str) -> bool:
         snapshot = self._engine.snapshot()
-        normalized = text.strip()
+        normalized = self.normalize_text(text)
         return any(rule.pattern.search(normalized) for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST))
 
     # ---- LLM 输出校验 ----
@@ -95,6 +124,7 @@ class FilterService:
         *,
         skip_direct_answer: bool = False,
         subject: str | None = None,
+        question: str | None = None,
     ) -> OutputValidation:
         """输出校验。
 
@@ -104,6 +134,8 @@ class FilterService:
         """
         snapshot = self._engine.snapshot()
         issues: list[str] = []
+        if question and self.is_question_blocked(question):
+            issues.append("blocked_non_subject_request")
         if not skip_direct_answer:
             for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER):
                 if rule.subjects and (subject is None or subject not in rule.subjects):

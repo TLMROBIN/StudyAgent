@@ -26,6 +26,8 @@ def get_current_user(db: DbSession, token: Annotated[str, Depends(oauth2_scheme)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
 
     user = auth_service.get_user_by_subject(db, payload.get("sub", ""))
+    if user and not auth_service.is_current_family(user.id, payload.get("family_id", "")):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session superseded by another login")
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User unavailable")
 

@@ -8,7 +8,7 @@
 3. 管理链路   登录 → 统计概览 → 审计日志（教师链路的 knowledge_upload）
               → 会话归档（学生链路的会话）→ filter-rules/status
 4. 负向链路   学生用 adversarial_cases.json 的越界问题提问 → 三层过滤拦截
-              → 拒答落库 + filter_blocked_total 指标 + 统计可见
+              → 拒答零落库 + filter_blocked_total 指标留痕
 
 约定复用自既有测试：LLM 全程 mock（确定性流式输出）、EMBEDDING_BACKEND=hash、
 内存 SQLite（StaticPool）、TestClient；Redis 相关 store 使用 MemoryStore 回退。
@@ -188,6 +188,11 @@ def env(tmp_path_factory):
     mp.setattr(chat_router, "rag_service", rag)
     mp.setattr(chat_router, "SessionLocal", session_factory)
     mp.setattr(chat_router.llm_service, "stream_response", llm.stream_response)
+
+    async def deterministic_topic_classification(**kwargs):
+        return "academic"
+
+    mp.setattr(chat_router.intent_classify_service, "classify_topic", deterministic_topic_classification)
     mp.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
     mp.setattr(chat_router.question_cache_service, "store_backend", MemoryStore())
     mp.setattr(chat_router.request_replay_service, "store_backend", MemoryStore())
@@ -508,7 +513,7 @@ def test_e2e_admin_chain_stats_audit_and_filter_rules(env):
 
 
 # ---------------------------------------------------------------------------
-# 链路 4（负向）：越界问题被三层过滤拦截，拒答落库且指标/统计留痕
+# 链路 4（负向）：越界问题被三层过滤拦截，拒答零落库且指标留痕
 # ---------------------------------------------------------------------------
 
 
@@ -526,6 +531,8 @@ def test_e2e_adversarial_question_blocked_and_recorded(env):
 
     questions_before = client.get("/api/stats/overview", headers=admin_headers).json()["total_questions"]
     blocked_before = filter_blocked_total._value.get()
+    with env.session_factory() as session:
+        conversation_ids_before = set(session.scalars(select(conversation.Conversation.id)).all())
 
     # -- 越界提问：不允许触发 LLM 调用 --
     env.llm.forbid_calls = True
@@ -543,47 +550,32 @@ def test_e2e_adversarial_question_blocked_and_recorded(env):
     names = [name for name, _ in events]
     _step("负向链路·拦截后仅 meta+done（无 chunk）", names == ["meta", "done"], names)
     _step("负向链路·返回标准拒答文案", events[-1][1]["content"] == filter_service.refusal_text, events[-1][1])
+    _step("负向链路·首次拦截不分配会话", events[0][1]["conversation_id"] is None, events[0][1])
 
     # -- 记录机制 1：Prometheus 拦截计数 --
     blocked_after = filter_blocked_total._value.get()
     _step("负向链路·filter_blocked_total 指标 +1", blocked_after == blocked_before + 1, (blocked_before, blocked_after))
 
-    # -- 记录机制 2：拒答作为 assistant 消息落库，可被管理端回溯 --
-    session = env.session_factory()
-    try:
+    # -- 记录机制 2：首次被拒请求不产生任何会话或消息 --
+    with env.session_factory() as session:
         blocked_user_message = session.scalar(
             select(Message).where(Message.content == blocked_case["text"], Message.role == MessageRole.USER)
         )
-        _step("负向链路·越界提问已落库", blocked_user_message is not None, blocked_case["text"])
-        refusal_message = session.scalar(
-            select(Message).where(
-                Message.conversation_id == blocked_user_message.conversation_id,
-                Message.turn_index == blocked_user_message.turn_index,
-                Message.role == MessageRole.ASSISTANT,
-            )
-        )
-        _step(
-            "负向链路·拒答回复已落库",
-            refusal_message is not None and refusal_message.content == filter_service.refusal_text,
-            getattr(refusal_message, "content", None),
-        )
-        blocked_conversation_id = blocked_user_message.conversation_id
-    finally:
-        session.close()
+        _step("负向链路·越界提问未落库", blocked_user_message is None, blocked_case["text"])
+        conversation_ids_after = set(session.scalars(select(conversation.Conversation.id)).all())
+        _step("负向链路·未新增会话", conversation_ids_after == conversation_ids_before, conversation_ids_after - conversation_ids_before)
 
-    # -- 记录机制 3：管理端统计与会话归档可见该次拦截 --
+    # -- 记录机制 3：拦截不计入提问统计，也不会进入管理端会话归档 --
     questions_after = client.get("/api/stats/overview", headers=admin_headers).json()["total_questions"]
-    _step("负向链路·统计新增一次提问", questions_after == questions_before + 1, (questions_before, questions_after))
+    _step("负向链路·统计未新增提问", questions_after == questions_before, (questions_before, questions_after))
 
     archive = client.get(
         "/api/admin/conversation-archive", params={"subject": "数学"}, headers=admin_headers
     )
     _step("负向链路·归档 HTTP", archive.status_code == 200, archive.text[:300])
-    archived = {item["id"]: item for item in archive.json()["items"]}
-    _step("负向链路·归档可见被拦截会话", blocked_conversation_id in archived, list(archived))
-    archived_contents = [message["content"] for message in archived[blocked_conversation_id]["messages"]]
-    _step(
-        "负向链路·归档保留提问与拒答原文",
-        blocked_case["text"] in archived_contents and filter_service.refusal_text in archived_contents,
-        archived_contents,
-    )
+    archived_contents = [
+        message["content"]
+        for item in archive.json()["items"]
+        for message in item["messages"]
+    ]
+    _step("负向链路·归档不含被拦截提问", blocked_case["text"] not in archived_contents, archived_contents)

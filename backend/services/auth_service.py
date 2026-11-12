@@ -83,10 +83,12 @@ class AuthService:
 
     def issue_token_pair(self, user: User) -> dict[str, str | int | bool]:
         family_id = str(uuid4())
-        access_token, access_jti = create_access_token(user.username, user.role.value)
+        self.revoke_all_families(user.id)
+        access_token, access_jti = create_access_token(user.username, user.role.value, family_id)
         refresh_token, refresh_jti = create_refresh_token(user.username, user.role.value, family_id)
 
         refresh_ttl = self.settings.refresh_token_expire_days * 24 * 60 * 60
+        store.set(self._current_family_key(user.id), family_id, ttl_seconds=refresh_ttl)
         store.set(self._refresh_key(user.id, family_id), refresh_jti, ttl_seconds=refresh_ttl)
         store.sadd(self._user_families_key(user.id), family_id)
         store.set(self._access_subject_key(access_jti), user.username, ttl_seconds=self.settings.access_token_expire_minutes * 60)
@@ -109,14 +111,16 @@ class AuthService:
 
         family_id = refresh_payload.get("family_id", "")
         presented_jti = refresh_payload.get("jti", "")
+        if not self.is_current_family(user.id, family_id):
+            return None, None
         current_jti = store.get(self._refresh_key(user.id, family_id))
         if not current_jti:
             return None, None
         if current_jti != presented_jti:
-            self.revoke_all_families(user.id)
+            self.revoke_family(user.id, family_id)
             return None, None
 
-        next_access_token, next_access_jti = create_access_token(user.username, user.role.value)
+        next_access_token, next_access_jti = create_access_token(user.username, user.role.value, family_id)
         next_refresh_token, next_refresh_jti = create_refresh_token(user.username, user.role.value, family_id)
         refresh_ttl = self.settings.refresh_token_expire_days * 24 * 60 * 60
         store.set(self._refresh_key(user.id, family_id), next_refresh_jti, ttl_seconds=refresh_ttl)
@@ -131,11 +135,17 @@ class AuthService:
     def revoke_family(self, user_id: int, family_id: str) -> None:
         store.delete(self._refresh_key(user_id, family_id))
         store.srem(self._user_families_key(user_id), family_id)
+        if store.get(self._current_family_key(user_id)) == family_id:
+            store.delete(self._current_family_key(user_id))
 
     def revoke_all_families(self, user_id: int) -> None:
         for family_id in store.smembers(self._user_families_key(user_id)):
             store.delete(self._refresh_key(user_id, family_id))
         store.delete_set(self._user_families_key(user_id))
+        store.delete(self._current_family_key(user_id))
+
+    def is_current_family(self, user_id: int, family_id: str) -> bool:
+        return bool(family_id) and store.get(self._current_family_key(user_id)) == family_id
 
     def revoke_access_token(self, access_jti: str, ttl_seconds: int) -> None:
         store.set(self._blacklist_key(access_jti), "1", ttl_seconds=ttl_seconds)
@@ -160,6 +170,10 @@ class AuthService:
         db.refresh(user)
         self.revoke_all_families(user.id)
         return user
+
+    @staticmethod
+    def _current_family_key(user_id: int) -> str:
+        return f"current_family:{user_id}"
 
     @staticmethod
     def _refresh_key(user_id: int, family_id: str) -> str:

@@ -313,6 +313,10 @@ def apply_runtime_schema_updates() -> None:
             statements.append("ALTER TABLE messages ADD COLUMN llm_model_key VARCHAR(64)")
         if "suggested_replies" not in message_columns:
             statements.append("ALTER TABLE messages ADD COLUMN suggested_replies JSON")
+        if "delivery_status" not in message_columns:
+            statements.append("ALTER TABLE messages ADD COLUMN delivery_status VARCHAR(16) DEFAULT 'completed' NOT NULL")
+        if "failure_reason" not in message_columns:
+            statements.append("ALTER TABLE messages ADD COLUMN failure_reason VARCHAR(500)")
         if "agent_role_revision_id" not in message_columns:
             statements.append("ALTER TABLE messages ADD COLUMN agent_role_revision_id INTEGER")
         if "agent_role_snapshot" not in message_columns:

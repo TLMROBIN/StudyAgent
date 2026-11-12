@@ -206,7 +206,25 @@ const localAttachmentUrls = new Set<string>()
 const { assetUrl, assetFailed, markAssetFailed, openAsset, preloadAssets, ensureAssetUrl } = useAuthorizedAssets()
 const authStore = useAuthStore()
 
+const MAX_ACTIVE_CONVERSATIONS = 10
 const sessionTitle = computed(() => conversations.value.find((item) => item.id === currentConversationId.value)?.topic || '把问题一步步想清楚')
+const currentConversation = computed(() => (
+  conversations.value.find((item) => item.id === currentConversationId.value) || null
+))
+const currentConversationArchived = computed(() => Boolean(currentConversation.value?.is_archived))
+const activeConversationCount = computed(() => conversations.value.filter((item) => !item.is_archived).length)
+const activeConversationLimitReached = computed(() => activeConversationCount.value >= MAX_ACTIVE_CONVERSATIONS)
+const composerLocked = computed(() => (
+  currentConversationArchived.value
+  || currentConversationResolved.value
+  || (!currentConversationId.value && activeConversationLimitReached.value)
+))
+const composerLockMessage = computed(() => {
+  if (currentConversationArchived.value) return '归档对话仅可查看，请先恢复为未归档对话。'
+  if (currentConversationResolved.value) return '已解决对话仅可查看，请先从“更多”中恢复为继续思考。'
+  if (!currentConversationId.value && activeConversationLimitReached.value) return '最多保留 10 个未归档对话，请先归档后再新建。'
+  return ''
+})
 
 function rememberCurrentConversation(id: number | null) {
   const student = authStore.user?.id
@@ -259,7 +277,9 @@ const selectedSubject = computed(() => (
   || null
 ))
 const selectedSubjectCapabilityLabel = computed(() => subjectCapabilityLabel(selectedSubject.value))
-const studentMessageCount = computed(() => messages.value.filter((item) => item.role === 'user').length)
+const studentMessageCount = computed(() => messages.value.filter((item) => (
+  item.role === 'user' && (item.delivery_status || 'completed') === 'completed'
+)).length)
 const showCompletionAction = computed(() => Boolean(
   currentConversationId.value
   && (currentConversationResolved.value || studentMessageCount.value >= 2),
@@ -292,6 +312,7 @@ const resolveReflectionHint = computed(() => {
 })
 const canSend = computed(() => (
   Boolean(form.message.trim() || pendingImageFile.value)
+  && !composerLocked.value
   && selectedModelStatus.value !== 'unavailable'
   && !selectedModelQuotaExhausted.value
 ))
@@ -658,6 +679,8 @@ async function openConversation(id: number): Promise<boolean> {
     messages.value = data.messages.map((item) => ({
       role: item.role,
       content: item.content,
+      delivery_status: item.delivery_status || 'completed',
+      failure_reason: item.failure_reason || null,
       attachment: item.attachment || null,
       assets: item.assets || [],
       suggested_replies: normalizeSuggestedReplies(item.suggested_replies),
@@ -764,7 +787,13 @@ async function loadIncentiveSummary() {
   }
 }
 
-function startNewConversation(options: { subject?: string } = {}) {
+function startNewConversation(options: { subject?: string } = {}): boolean {
+  if (activeConversationLimitReached.value) {
+    ElMessage.warning('最多保留 10 个未归档对话，请先归档后再新建。')
+    historyOpen.value = true
+    showArchived.value = false
+    return false
+  }
   followLatest.value = true
   currentConversationId.value = null
   rememberCurrentConversation(null)
@@ -781,6 +810,7 @@ function startNewConversation(options: { subject?: string } = {}) {
   historyOpen.value = false
   loadDraftForCurrentContext()
   queueScrollToBottom()
+  return true
 }
 
 function applyStarterPrompt(prompt: string) {
@@ -828,8 +858,9 @@ async function toggleConversationArchive(item: ConversationSummary) {
     item.is_archived = data.is_archived
     if (item.id === currentConversationId.value) rememberCurrentConversation(data.is_archived ? null : item.id)
     ElMessage.success(data.is_archived ? '对话已归档，可在“已归档”中查看和恢复' : '对话已恢复到历史记录')
-  } catch {
-    ElMessage.error('归档设置未保存，请稍后重试')
+  } catch (error) {
+    const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : '归档设置未保存，请稍后重试')
   } finally {
     const pending = new Set(archivingConversationIds.value)
     pending.delete(item.id)
@@ -859,6 +890,7 @@ async function deleteConversation(item: ConversationSummary) {
   try {
     await api.delete(`/chat/${item.id}`)
     removeDraft(buildDraftStorageKey(item.subject, item.id))
+    conversations.value = conversations.value.filter((conversation) => conversation.id !== item.id)
     if (currentConversationId.value === item.id) {
       startNewConversation({ subject: form.subject })
     }
@@ -893,7 +925,12 @@ async function handleSubjectChange(nextSubject: string) {
         type: 'warning',
       },
     )
-    startNewConversation({ subject: nextSubject })
+    if (!startNewConversation({ subject: nextSubject })) {
+      form.subject = oldSubject
+      await loadAgentRoles(oldSubject)
+      loadDraftForCurrentContext()
+      return
+    }
     form.roleId = null
     await loadAgentRoles(nextSubject)
   } catch {
@@ -945,6 +982,7 @@ async function restorePendingChat(): Promise<boolean> {
 
 function stopStreaming(showNotice = true) {
   stopRequested = true
+  const pendingIndex = activePendingChat?.historyLength
   if (activePendingChat) {
     void api.delete(`/chat/requests/${encodeURIComponent(activePendingChat.requestId)}`)
       .catch(() => ElMessage.warning('停止请求暂未确认，回答可能仍在后台生成。'))
@@ -955,17 +993,33 @@ function stopStreaming(showNotice = true) {
   sending.value = false
   const last = messages.value[messages.value.length - 1]
   if (last?.role === 'assistant' && !last.content.trim()) messages.value.pop()
+  const pendingUser = typeof pendingIndex === 'number'
+    ? messages.value[pendingIndex]
+    : [...messages.value].reverse().find((item) => item.role === 'user' && item.delivery_status === 'pending')
+  if (pendingUser?.role === 'user') {
+    pendingUser.delivery_status = 'cancelled'
+    pendingUser.failure_reason = '本次生成已停止'
+  }
   screenReaderAnnouncement.value = '已停止本次生成，可以继续修改问题。'
   if (showNotice) {
     ElMessage.info('已停止本次生成')
   }
 }
 
+function messageDeliveryLabel(item: ChatMessageRead): string {
+  if (item.role !== 'user') return ''
+  if (item.delivery_status === 'failed') return '发送失败，可重试'
+  if (item.delivery_status === 'cancelled') return '已停止'
+  if (item.delivery_status === 'pending') return '发送中…'
+  return ''
+}
+
 function getLastUserMessage(): string {
   for (let index = messages.value.length - 1; index >= 0; index -= 1) {
     const item = messages.value[index]
     const content = item.content.trim()
-    if (item.role === 'user' && content && content !== IMAGE_ONLY_PLACEHOLDER) {
+    if (item.role === 'user' && (item.delivery_status || 'completed') === 'completed'
+      && content && content !== IMAGE_ONLY_PLACEHOLDER) {
       return item.content.trim()
     }
   }
@@ -1661,6 +1715,8 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
   messages.value.push({
     role: 'user',
     content,
+    delivery_status: 'pending',
+    failure_reason: null,
     attachment,
   })
   messages.value.push({ role: 'assistant', content: '', assets: [], suggested_replies: [], deep_reasoning: pending.deepReasoning })
@@ -1759,6 +1815,10 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
             clearSubmittedDraft(submissionDraftKey)
             savePendingChat(null)
             const userMessage = messages.value[pending.historyLength]
+            if (userMessage?.role === 'user') {
+              userMessage.delivery_status = 'completed'
+              userMessage.failure_reason = null
+            }
             if (currentConversationId.value && userMessage?.attachment && isLocalPreviewUrl(userMessage.attachment.url)) {
               void syncSentAttachment(currentConversationId.value, pending.historyLength, userMessage)
             }
@@ -1842,6 +1902,11 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
       showChatBanNotice(banMessage)
       void authStore.fetchProfile().catch((profileError) => console.error(profileError))
       return
+    }
+    const failedUser = messages.value[pending.historyLength]
+    if (failedUser?.role === 'user') {
+      failedUser.delivery_status = 'failed'
+      failedUser.failure_reason = failureMessage
     }
     if (last && last.role === 'assistant') {
       last.error = failureMessage
@@ -2042,6 +2107,11 @@ onMounted(async () => {
             :aria-label="item.role === 'user' ? '你的消息' : '学习助手回复'"
           >
             <span class="bubble-role">{{ item.role === 'user' ? '学生' : '导师' }}</span>
+            <p
+              v-if="messageDeliveryLabel(item)"
+              :class="item.delivery_status === 'failed' ? 'chat-error' : 'composer-helper'"
+              :role="item.delivery_status === 'failed' ? 'alert' : 'status'"
+            >{{ messageDeliveryLabel(item) }}</p>
             <details v-if="item.role === 'assistant' && item.deep_reasoning" class="reasoning-progress">
               <summary>{{ item.reasoning_finished ? '深度推理已完成' : '深度推理进行中' }} · {{ item.reasoning_elapsed || 0 }} 秒</summary>
               <div class="reasoning-progress__body">
@@ -2118,17 +2188,18 @@ onMounted(async () => {
           ref="messageInputRef"
           v-model="form.message"
           class="chat-message-input"
-          :disabled="sending"
+          :disabled="sending || composerLocked"
           type="textarea"
           :rows="3"
+          maxlength="6000"
           resize="none"
-          placeholder="把题目发给我，也可以先说说你试过什么、卡在哪里"
+          :placeholder="composerLockMessage || '把题目发给我，也可以先说说你试过什么、卡在哪里'"
           aria-label="输入你的问题或当前思路"
           @focus="handleMessageInputFocus"
         />
         <FormulaEditor
           v-model="form.message"
-          :disabled="sending"
+          :disabled="sending || composerLocked"
           @finished="messageInputRef?.$el?.querySelector('textarea')?.focus()"
         />
         <div v-if="pendingImagePreviewUrl" class="composer-attachment-preview">
@@ -2155,10 +2226,11 @@ onMounted(async () => {
           </div>
         </div>
         <p v-if="sending" class="stream-hint">正在陪你梳理思路，可随时停止。</p>
+        <p v-else-if="composerLockMessage" class="stream-hint" role="status">{{ composerLockMessage }}</p>
         <div class="chat-composer-footer">
           <div class="chat-secondary-actions">
-            <el-dropdown :disabled="sending" trigger="click" placement="top-start">
-              <button type="button" class="ghost-button attachment-trigger" :disabled="sending">
+            <el-dropdown :disabled="sending || composerLocked" trigger="click" placement="top-start">
+              <button type="button" class="ghost-button attachment-trigger" :disabled="sending || composerLocked">
                 {{ pendingImageFile ? '更换题图' : '添加题图' }}
               </button>
               <template #dropdown>
@@ -2172,7 +2244,7 @@ onMounted(async () => {
             <span class="composer-helper">先检查题图完整，再发送（一次 1 张）</span>
           </div>
           <label class="deep-reasoning-control">
-            <input v-model="form.deepReasoning" type="checkbox" :disabled="sending || !canUseDeepReasoning" />
+            <input v-model="form.deepReasoning" type="checkbox" :disabled="sending || composerLocked || !canUseDeepReasoning" />
             <span>深度推理</span>
             <span class="composer-helper">{{ canUseDeepReasoning ? '复杂题可开启，等待更久' : '当前模型不支持' }}</span>
           </label>
@@ -2340,9 +2412,16 @@ onMounted(async () => {
           <button type="button" class="study-tool-button" aria-label="关闭对话历史" @click="historyOpen = false">关闭</button>
         </header>
         <div class="history-drawer-actions">
-          <button type="button" class="primary-button" :disabled="sending" @click="startNewConversation()">新建对话</button>
+          <button
+            type="button"
+            class="primary-button"
+            :disabled="sending || activeConversationLimitReached"
+            :title="activeConversationLimitReached ? '请先归档一个对话，再新建' : '新建对话'"
+            @click="startNewConversation()"
+          >新建对话</button>
           <button type="button" class="ghost-button" @click="loadConversations">刷新</button>
         </div>
+        <p class="composer-helper">未归档对话 {{ activeConversationCount }} / {{ MAX_ACTIVE_CONVERSATIONS }}；归档后仍可查看。</p>
         <div class="history-drawer-actions" role="group" aria-label="筛选学习记录">
           <button type="button" class="ghost-button" :class="{ 'history-filter-active': !showArchived }" :aria-pressed="!showArchived" @click="showArchived = false">历史对话</button>
           <button type="button" class="ghost-button" :class="{ 'history-filter-active': showArchived }" :aria-pressed="showArchived" @click="showArchived = true">已归档</button>

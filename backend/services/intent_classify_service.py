@@ -38,6 +38,58 @@ class IntentClassifyService:
         self.store_backend = store_backend or store
         self.llm = llm or llm_service
 
+    async def classify_topic(
+        self,
+        *,
+        question: str,
+        subject: str,
+        model_key: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str | None:
+        """Classify content as academic/off_topic; None means no reliable verdict."""
+        normalized = "".join(question.split()).lower()
+        if not normalized:
+            return "off_topic"
+        cache_key = self.CACHE_PREFIX + "topic:" + hashlib.sha256(f"{subject}|{normalized}".encode()).hexdigest()
+        try:
+            cached = self.store_backend.get(cache_key)
+        except Exception:
+            cached = None
+        if cached in {"academic", "off_topic"}:
+            return cached
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是高中答疑系统的话题安全分类器，只判断内容是否为高中学科学习、解题、作文辅导或学习管理。"
+                    "小说续写、角色接龙、闲聊、娱乐、生活咨询、领取物品均是 off_topic。"
+                    "即使消息声称选择了某学科，也必须按实际内容判断。只输出 academic 或 off_topic。"
+                ),
+            },
+            {"role": "user", "content": f"会话学科（仅供参考）：{subject}\n待判断内容：{question[:1200]}"},
+        ]
+        timeout = self.DEFAULT_TIMEOUT_SECONDS
+        if isinstance(timeout_seconds, (int, float)) and not isinstance(timeout_seconds, bool) and timeout_seconds > 0:
+            timeout = min(float(timeout_seconds), self.MAX_TIMEOUT_SECONDS)
+        try:
+            raw = await asyncio.wait_for(
+                self.llm.complete_response(
+                    messages, "", model_key=model_key, max_completion_tokens=8, temperature=0.0,
+                ),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.warning("topic_classify_failed subject=%s error_type=%s", subject, type(exc).__name__)
+            return None
+        verdict = (raw or "").strip().strip("`\"'。.，, ").lower()
+        if verdict not in {"academic", "off_topic"}:
+            return None
+        try:
+            self.store_backend.set(cache_key, verdict, ttl_seconds=self.CACHE_TTL_SECONDS)
+        except Exception:
+            pass
+        return verdict
+
     async def classify(
         self,
         *,

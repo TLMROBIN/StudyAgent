@@ -64,7 +64,7 @@ class LLMQuotaService:
     ) -> QuotaReservation | QuotaDenied:
         policy = model_config.quota_policy or self._free_policy(model_config)
         billing_mode = policy.billing_mode
-        reservation_key = f"quota:reservation:{request_id or uuid4().hex}"
+        reservation_key = f"quota:reservation:user:{user.id}:{request_id or uuid4().hex}"
 
         if billing_mode == QuotaBillingMode.FREE_LOCAL:
             return QuotaReservation(
@@ -119,6 +119,35 @@ class LLMQuotaService:
             request_id=request_id,
         )
 
+    def preflight(
+        self,
+        *,
+        user: User,
+        model_config: LLMModelConfig,
+        prompt_text: str,
+    ) -> QuotaDenied | None:
+        """Reject known quota exhaustion before a user turn is persisted."""
+        policy = model_config.quota_policy or self._free_policy(model_config)
+        if policy.billing_mode == QuotaBillingMode.FREE_LOCAL:
+            return None
+        keys, amount, _ = self._reservation_keys_and_amount(
+            user,
+            model_config,
+            policy,
+            [{"role": "user", "content": prompt_text}],
+        )
+        try:
+            snapshots = self.store.quota_snapshot(keys)
+        except Exception:
+            if policy.fail_closed_on_store_error:
+                return self._deny(model_config, policy, "store_unavailable", "额度服务暂时不可用，请稍后再试。")
+            return None
+        exceeded = next((item for item in snapshots if item.remaining < amount), None)
+        if exceeded is None:
+            return None
+        reason = self._denial_reason(exceeded.key)
+        return self._deny(model_config, policy, reason, self._denial_message(reason))
+
     def release(self, reservation: QuotaReservation) -> None:
         self.store.release_quota(reservation.reservation_key)
 
@@ -150,6 +179,9 @@ class LLMQuotaService:
         if reservation.billing_mode == QuotaBillingMode.TOKEN_USAGE:
             actual_total = max(0, total_tokens or prompt_tokens + completion_tokens or reservation.reserved_amount)
             self.store.reconcile_quota(reservation.reservation_key, actual_total)
+        else:
+            # 按次计费不调整计数，但必须把预留标记为已结算，阻止同一 request_id 被免费复用
+            self.store.reconcile_quota(reservation.reservation_key, reservation.reserved_amount)
         event = LLMUsageEvent(
             user_id=user_id or reservation.user_id,
             conversation_id=conversation_id,
@@ -323,6 +355,9 @@ class LLMQuotaService:
 
     @staticmethod
     def _denial_reason(exceeded_key: str) -> str:
+        # 预留 key 本身被判超限 = 该 request_id 已结算过，不能再免费复用
+        if ":reservation:" in exceeded_key:
+            return "request_id_reused"
         if ":user:" in exceeded_key:
             return "user_daily_limit"
         if ":school:" in exceeded_key:
@@ -335,6 +370,8 @@ class LLMQuotaService:
 
     @staticmethod
     def _denial_message(reason: str) -> str:
+        if reason == "request_id_reused":
+            return "该请求已处理完成，请重新发送问题。"
         if reason == "user_daily_limit":
             return "你今天使用该模型的次数已用完，请明天再试或切换其他模型。"
         if reason == "school_daily_limit":

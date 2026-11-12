@@ -57,7 +57,7 @@ from backend.services.agent_role_service import (
 )
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
-from backend.services.filter_service import FilterDecision, filter_service
+from backend.services.filter_service import FilterDecision, OutputValidation, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
 from backend.services.llm_service import LLMCallError, MODEL_CALL_FAILED_MESSAGE, LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
 from backend.services.metrics_service import (
@@ -105,6 +105,25 @@ from backend.services.conversation_context import image_context_record, stored_i
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
+MAX_ACTIVE_CONVERSATIONS = 10
+
+
+def _active_conversation_count(db: DbSession, student_id: int) -> int:
+    return db.scalar(
+        select(func.count(Conversation.id)).where(
+            Conversation.student_id == student_id,
+            Conversation.deleted_by_student_at.is_(None),
+            Conversation.is_archived.is_(False),
+        )
+    ) or 0
+
+
+def _ensure_active_conversation_capacity(db: DbSession, student_id: int) -> None:
+    # PostgreSQL 串行化同一学生的新建/恢复；SQLite 由单写事务提供等价约束。
+    db.scalar(select(User.id).where(User.id == student_id).with_for_update())
+    if _active_conversation_count(db, student_id) >= MAX_ACTIVE_CONVERSATIONS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="最多保留10个未归档对话，请先归档后再新建或恢复")
+
 STREAM_HEARTBEAT_SECONDS = 15
 STREAM_FORCE_FLUSH_CHARS = 96
 STREAM_GUARD_TAIL_CHARS = 24
@@ -147,7 +166,8 @@ async def _historical_image_context(
     *, recover_missing: bool = True,
 ) -> str:
     previous = [message for message in conversation.messages
-                if message.role == MessageRole.USER and message.turn_index < before_turn and message.attachment]
+                if message.role == MessageRole.USER and message.delivery_status == "completed"
+                and message.turn_index < before_turn and message.attachment]
     if not previous:
         return ""
     selected = [previous[0]]
@@ -456,19 +476,64 @@ def _message_load_option():
     return selectinload(Conversation.messages).selectinload(Message.attachment)
 
 
-def _validate_stream_answer(text: str, *, skip_direct_answer: bool, subject: str):
+async def _validate_stream_answer(
+    text: str,
+    *,
+    skip_direct_answer: bool,
+    subject: str,
+    question: str,
+    model_key: str,
+    check_topic: bool = False,
+):
     started = perf_counter()
     try:
-        return filter_service.validate_answer(text, skip_direct_answer=skip_direct_answer, subject=subject)
+        validation = filter_service.validate_answer(text, skip_direct_answer=skip_direct_answer, subject=subject, question=question)
+        if validation.allowed and check_topic:
+            verdict = await intent_classify_service.classify_topic(
+                question=f"学生请求：{question}\n待输出回复：{text}",
+                subject=subject,
+                model_key=model_key,
+            )
+            if verdict != "academic":
+                return OutputValidation(False, ["off_topic_output" if verdict == "off_topic" else "topic_validation_unavailable"])
+        return validation
     finally:
         chat_output_validation_seconds.observe(perf_counter() - started)
+
+
+def _has_academic_history(history_pairs: list[tuple[str, str]], subject: str) -> bool:
+    return any(
+        role == MessageRole.USER.value
+        and filter_service.check_question(content, subject).allowed
+        for role, content in history_pairs
+    )
+
+
+async def _check_chat_question(
+    question: str,
+    subject: str,
+    *,
+    history_pairs: list[tuple[str, str]],
+    has_image_turn: bool = False,
+    model_key: str | None = None,
+) -> FilterDecision:
+    decision = filter_service.check_question(
+        question,
+        subject,
+        allow_contextual_short_followup=not has_image_turn and _has_academic_history(history_pairs, subject),
+    )
+    if decision.allowed and decision.reason.endswith("_candidate"):
+        topic = await intent_classify_service.classify_topic(question=question, subject=subject, model_key=model_key)
+        if topic != "academic":
+            return FilterDecision(False, "topic_classifier_rejected" if topic == "off_topic" else "topic_classifier_unavailable")
+    return decision
 
 
 def _history_pairs_before_turn(conversation: Conversation, turn_index: int) -> list[tuple[str, str]]:
     return [
         (message.role.value, message.content)
         for message in conversation.messages
-        if message.turn_index < turn_index
+        if message.turn_index < turn_index and message.delivery_status == "completed"
     ]
 
 
@@ -654,7 +719,7 @@ def _conversation_recommendation_seed(conversation: Conversation) -> str:
     topic = conversation.topic.strip()
     recent_prompts: list[str] = []
     for message in reversed(conversation.messages):
-        if message.role != MessageRole.USER:
+        if message.role != MessageRole.USER or message.delivery_status != "completed":
             continue
         seed = normalize_conversation_seed(message.content)
         if not seed:
@@ -705,7 +770,7 @@ def _resolve_recommendation_query(
 
 def _instant_stream(
     *,
-    conversation_id: int,
+    conversation_id: int | None,
     guidance_stage: str,
     content: str,
     request: Request,
@@ -1335,13 +1400,62 @@ def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -
         chat_history_load_seconds.observe(perf_counter() - history_started)
         if not conversation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+        if conversation.is_archived:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="归档对话仅可查看，请先恢复为未归档对话")
+        if conversation.resolved:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已解决对话仅可查看，请先恢复为继续思考")
         return conversation
 
+    _ensure_active_conversation_capacity(db, student_id)
     conversation = Conversation(student_id=student_id, subject=payload.subject)
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
     return conversation
+
+
+def _persist_user_turn(
+    db: DbSession,
+    *,
+    conversation: Conversation,
+    student_id: int,
+    content: str,
+    turn_index: int,
+    stored_attachment: StoredChatAttachment | None,
+) -> tuple[Message, ChatMessageAttachment | None]:
+    user_message = Message(
+        conversation_id=conversation.id,
+        role=MessageRole.USER,
+        content=content,
+        delivery_status="pending",
+        turn_index=turn_index,
+        guidance_stage=conversation.guidance_stage,
+    )
+    attachment_record: ChatMessageAttachment | None = None
+    try:
+        db.add(user_message)
+        db.flush()
+        if stored_attachment:
+            attachment_record = ChatMessageAttachment(
+                message_id=user_message.id,
+                owner_student_id=student_id,
+                storage_key=stored_attachment.storage_key,
+                original_filename=stored_attachment.original_filename,
+                mime_type=stored_attachment.mime_type,
+                file_size=stored_attachment.file_size,
+                sha256=stored_attachment.sha256,
+            )
+            db.add(attachment_record)
+        db.commit()
+    except Exception:
+        db.rollback()
+        if stored_attachment:
+            chat_attachment_service.delete(stored_attachment.storage_key)
+        raise
+    db.refresh(user_message)
+    if attachment_record:
+        db.refresh(attachment_record)
+    return user_message, attachment_record
 
 
 def _normalize_chat_message_content(message: str, *, has_attachment: bool) -> str:
@@ -1531,6 +1645,8 @@ def archive_conversation(conversation_id: int, payload: ArchiveConversationReque
     ))
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.is_archived and not payload.is_archived:
+        _ensure_active_conversation_capacity(db, current_user.id)
     conversation.is_archived = payload.is_archived
     db.commit()
     db.refresh(conversation)
@@ -1687,11 +1803,16 @@ def recommend_questions(
     db: DbSession,
     current_user: CurrentUser,
 ) -> list[QuestionRecommendationRead]:
-    ensure_chat_allowed(current_user)
     if not is_valid_subject(payload.subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
+    ensure_chat_allowed(current_user)
     recommendation_query = _resolve_recommendation_query(db, current_user, payload)
-    decision = filter_service.check_question(recommendation_query, payload.subject)
+    decision = asyncio.run(_check_chat_question(
+        recommendation_query,
+        payload.subject,
+        history_pairs=[],
+        model_key=None,
+    ))
     if not decision.allowed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is not a supported academic prompt")
 
@@ -1815,7 +1936,7 @@ async def _await_image_understanding(request: Request, **kwargs) -> ImageUnderst
                 await task
 
 
-async def stream_chat(
+async def _stream_chat(
     payload: ChatRequest,
     db: DbSession,
     current_user: CurrentUser,
@@ -1823,15 +1944,43 @@ async def stream_chat(
     *,
     image_upload: UploadFile | None = None,
 ):
-    ensure_chat_allowed(current_user)
     if not is_valid_subject(payload.subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
+    ensure_chat_allowed(current_user)
     started = perf_counter()
     chat_request_total.inc()
     has_image_turn = image_upload is not None
     selected_model_key = _chat_model_key_or_422(payload.llm_model)
     if payload.deep_reasoning and not llm_service.supports_deep_reasoning(selected_model_key):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="当前模型不支持手动深度推理，请切换模型或关闭深度推理")
+    selected_model_config = db.scalar(
+        select(LLMModelConfig)
+        .options(selectinload(LLMModelConfig.quota_policy), selectinload(LLMModelConfig.provider_account))
+        .where(LLMModelConfig.model_key == selected_model_key, LLMModelConfig.is_enabled.is_(True))
+    )
+    if selected_model_config is not None:
+        quota_preflight = llm_quota_service.preflight(
+            user=current_user,
+            model_config=selected_model_config,
+            prompt_text=payload.message,
+        )
+        if quota_preflight is not None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+                if quota_preflight.code == "llm_quota_unavailable" else status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": quota_preflight.code,
+                    "message": quota_preflight.message,
+                    "model_key": quota_preflight.model_key,
+                    "billing_mode": quota_preflight.billing_mode,
+                    "reset_hint": quota_preflight.reset_hint,
+                },
+            )
+    try:
+        queue_service.ensure_available()
+    except QueueFullError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前排队人数较多，请稍后重试") from exc
+
     image_content: bytes | None = None
     stored_attachment: StoredChatAttachment | None = None
     attachment_record: ChatMessageAttachment | None = None
@@ -1886,6 +2035,10 @@ async def stream_chat(
                 media_type="text/event-stream",
             )
 
+    if conversation is None and payload.conversation_id:
+        conversation = _ensure_conversation(db, current_user.id, payload)
+        payload.subject = conversation.subject
+
     role_snapshot = snapshot_from_replay(replay_state.role_snapshot, payload.role_id) if replay_state else None
     if role_snapshot is None:
         role_started = perf_counter()
@@ -1895,8 +2048,10 @@ async def stream_chat(
             chat_role_resolution_seconds.observe(perf_counter() - role_started)
         chat_role_request_total.labels(status=role_snapshot.status).inc()
 
-    if not conversation:
-        conversation = _ensure_conversation(db, current_user.id, payload)
+    # 会话学科以服务端记录为准，客户端不能逐轮切换以绕过学科规则。
+    if conversation is not None:
+        payload.subject = conversation.subject
+        request.state.chat_conversation_id = conversation.id
 
     if replay_state:
         user_turn_index = replay_state.turn_index
@@ -1935,9 +2090,194 @@ async def stream_chat(
                 media_type="text/event-stream",
             )
     else:
-        history_pairs = [(message.role.value, message.content) for message in conversation.messages]
-        user_turn_index = len([message for message in conversation.messages if message.role == MessageRole.USER]) + 1
+        history_pairs = [
+            (message.role.value, message.content)
+            for message in conversation.messages
+            if message.delivery_status == "completed"
+        ] if conversation is not None else []
+        user_turn_index = len([
+            message for message in conversation.messages
+            if message.role == MessageRole.USER and message.delivery_status == "completed"
+        ]) + 1 if conversation is not None else 1
         if has_image_turn:
+            stored_attachment = chat_attachment_service.save_bytes(
+                content=image_content or b"",
+                filename=image_upload.filename or "chat-image.png",
+                content_type=image_upload.content_type,
+                student_id=current_user.id,
+                # 新会话先使用临时目录，校验通过后再归入正式会话目录。
+                conversation_id=conversation.id if conversation is not None else 0,
+            )
+            if conversation is None:
+                request.state.chat_pending_attachment_key = stored_attachment.storage_key
+        if conversation is not None:
+            _, attachment_record = _persist_user_turn(
+                db,
+                conversation=conversation,
+                student_id=current_user.id,
+                content=user_message_content,
+                turn_index=user_turn_index,
+                stored_attachment=stored_attachment,
+            )
+            if payload.request_id:
+                request_replay_service.remember_request(
+                    user_id=current_user.id,
+                    request_id=payload.request_id,
+                    question_hash=request_fingerprint,
+                    conversation_id=conversation.id,
+                    turn_index=user_turn_index,
+                    subject=payload.subject,
+                    role_snapshot=role_snapshot.replay_snapshot(),
+                )
+
+    request.state.chat_user_turn_index = user_turn_index
+    if has_image_turn and image_content and (stored_attachment or attachment_record):
+        image_storage_key = stored_attachment.storage_key if stored_attachment else attachment_record.storage_key
+        image_mime_type = stored_attachment.mime_type if stored_attachment else attachment_record.mime_type
+        image_understanding_started = perf_counter()
+        try:
+            image_understanding = await _await_image_understanding(
+                request,
+                image_bytes=image_content,
+                mime_type=image_mime_type,
+                subject=payload.subject,
+                user_text=payload.message,
+                model_key=selected_model_key,
+                image_path=str(chat_attachment_service.resolve_path(image_storage_key)),
+                attachment_id=attachment_record.id if attachment_record else None,
+            )
+        finally:
+            chat_image_understanding_seconds.observe(perf_counter() - image_understanding_started)
+        if image_understanding.source == "failed":
+            if attachment_record:
+                attachment_record.ocr_status = "failed"
+                db.add(attachment_record)
+                db.commit()
+            raise HTTPException(status_code=502, detail="图片识别失败，请联系管理员老师或稍后再试。")
+        if attachment_record:
+            attachment_record.ocr_status = {
+                "paddleocr": "paddleocr",
+                "ocr": "llm_ocr",
+                "multimodal": "multimodal_fallback",
+                "off_topic": "off_topic",
+                "failed": "failed",
+            }.get(image_understanding.source, "pending")
+            attachment_record.ocr_confidence = image_understanding.ocr_confidence_value
+            attachment_record.understanding_json = image_context_record(image_understanding)
+            db.add(attachment_record)
+            db.commit()
+
+    filter_question = _build_filter_question(payload_message=payload.message, understanding=image_understanding)
+    if has_image_turn and _should_short_circuit_image_turn(
+        payload_message=payload.message,
+        understanding=image_understanding,
+    ):
+        bypassed_role = role_snapshot.bypassed()
+        short_circuit_text = _build_short_circuit_reply(payload.subject, image_understanding)
+        turn_guidance_stage = conversation.guidance_stage if conversation is not None else GuidanceStage.INITIAL
+        if conversation is not None:
+            existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+            if not existing_assistant:
+                assistant_message = Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.ASSISTANT,
+                    content=short_circuit_text,
+                    turn_index=user_turn_index,
+                    guidance_stage=turn_guidance_stage,
+                    llm_model_key=selected_model_key,
+                )
+                db.add(assistant_message)
+                db.commit()
+                guidance_stage_total.labels(stage=turn_guidance_stage.value).inc()
+            if payload.request_id:
+                request_replay_service.mark_completed(
+                    user_id=current_user.id,
+                    request_id=payload.request_id,
+                    question_hash=request_fingerprint,
+                    conversation_id=conversation.id,
+                    turn_index=user_turn_index,
+                    subject=payload.subject,
+                    guidance_stage=turn_guidance_stage,
+                    final_content=short_circuit_text,
+                    role_snapshot=bypassed_role.replay_snapshot(),
+                )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id if conversation is not None else None,
+                guidance_stage=turn_guidance_stage.value,
+                content=short_circuit_text,
+                request=request,
+                role_snapshot=bypassed_role,
+            ),
+            media_type="text/event-stream",
+        )
+
+    practice_review_turn = bool(
+        conversation is not None
+        and conversation.active_practice
+        and _looks_like_answer_submission(payload.message)
+    )
+    decision = await _check_chat_question(
+        filter_question,
+        payload.subject,
+        history_pairs=history_pairs,
+        has_image_turn=has_image_turn,
+        model_key=selected_model_key,
+    )
+    if (
+        not decision.allowed
+        and decision.reason == "subject_not_recognized"
+        and practice_review_turn
+    ):
+        decision = FilterDecision(True, "practice_answer_submission", payload.subject)
+    if not decision.allowed:
+        bypassed_role = role_snapshot.bypassed()
+        filter_blocked_total.inc()
+        refusal = filter_service.refusal_text
+        turn_guidance_stage = conversation.guidance_stage if conversation is not None else GuidanceStage.INITIAL
+        if conversation is not None:
+            existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
+            if not existing_assistant:
+                assistant_message = Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.ASSISTANT,
+                    content=refusal,
+                    turn_index=user_turn_index,
+                    guidance_stage=turn_guidance_stage,
+                    llm_model_key=selected_model_key,
+                )
+                db.add(assistant_message)
+                db.commit()
+                guidance_stage_total.labels(stage=turn_guidance_stage.value).inc()
+            if payload.request_id:
+                request_replay_service.mark_completed(
+                    user_id=current_user.id,
+                    request_id=payload.request_id,
+                    question_hash=request_fingerprint,
+                    conversation_id=conversation.id,
+                    turn_index=user_turn_index,
+                    subject=payload.subject,
+                    guidance_stage=turn_guidance_stage,
+                    final_content=refusal,
+                    role_snapshot=bypassed_role.replay_snapshot(),
+                )
+        return StreamingResponse(
+            _instant_stream(
+                conversation_id=conversation.id if conversation is not None else None,
+                guidance_stage=turn_guidance_stage.value,
+                content=refusal,
+                request=request,
+                role_snapshot=bypassed_role,
+            ),
+            media_type="text/event-stream",
+        )
+
+    # 首次提问只有在图片识别和话题校验全部通过后才创建会话并占用名额。
+    if conversation is None:
+        conversation = _ensure_conversation(db, current_user.id, payload)
+        request.state.chat_conversation_id = conversation.id
+        if stored_attachment:
+            pending_storage_key = stored_attachment.storage_key
             stored_attachment = chat_attachment_service.save_bytes(
                 content=image_content or b"",
                 filename=image_upload.filename or "chat-image.png",
@@ -1945,36 +2285,28 @@ async def stream_chat(
                 student_id=current_user.id,
                 conversation_id=conversation.id,
             )
-        user_message = Message(
-            conversation_id=conversation.id,
-            role=MessageRole.USER,
+            chat_attachment_service.delete(pending_storage_key)
+            request.state.chat_pending_attachment_key = None
+        _, attachment_record = _persist_user_turn(
+            db,
+            conversation=conversation,
+            student_id=current_user.id,
             content=user_message_content,
             turn_index=user_turn_index,
-            guidance_stage=conversation.guidance_stage,
+            stored_attachment=stored_attachment,
         )
-        try:
-            db.add(user_message)
-            db.flush()
-            if stored_attachment:
-                attachment_record = ChatMessageAttachment(
-                    message_id=user_message.id,
-                    owner_student_id=current_user.id,
-                    storage_key=stored_attachment.storage_key,
-                    original_filename=stored_attachment.original_filename,
-                    mime_type=stored_attachment.mime_type,
-                    file_size=stored_attachment.file_size,
-                    sha256=stored_attachment.sha256,
-                )
-                db.add(attachment_record)
+        if attachment_record and image_understanding:
+            attachment_record.ocr_status = {
+                "paddleocr": "paddleocr",
+                "ocr": "llm_ocr",
+                "multimodal": "multimodal_fallback",
+                "off_topic": "off_topic",
+                "failed": "failed",
+            }.get(image_understanding.source, "pending")
+            attachment_record.ocr_confidence = image_understanding.ocr_confidence_value
+            attachment_record.understanding_json = image_context_record(image_understanding)
+            db.add(attachment_record)
             db.commit()
-        except Exception:
-            db.rollback()
-            if stored_attachment:
-                chat_attachment_service.delete(stored_attachment.storage_key)
-            raise
-        db.refresh(user_message)
-        if attachment_record:
-            db.refresh(attachment_record)
         if payload.request_id:
             request_replay_service.remember_request(
                 user_id=current_user.id,
@@ -1985,129 +2317,6 @@ async def stream_chat(
                 subject=payload.subject,
                 role_snapshot=role_snapshot.replay_snapshot(),
             )
-
-    if has_image_turn and image_content and attachment_record:
-        image_understanding_started = perf_counter()
-        try:
-            image_understanding = await _await_image_understanding(
-                request,
-                image_bytes=image_content,
-                mime_type=attachment_record.mime_type,
-                subject=payload.subject,
-                user_text=payload.message,
-                model_key=selected_model_key,
-                image_path=str(chat_attachment_service.resolve_path(attachment_record.storage_key)),
-                attachment_id=attachment_record.id,
-            )
-        finally:
-            chat_image_understanding_seconds.observe(perf_counter() - image_understanding_started)
-        if image_understanding.source == "failed":
-            attachment_record.ocr_status = "failed"
-            db.add(attachment_record)
-            db.commit()
-            raise HTTPException(status_code=502, detail="图片识别失败，请联系管理员老师或稍后再试。")
-        attachment_record.ocr_status = {
-            "paddleocr": "paddleocr",
-            "ocr": "llm_ocr",
-            "multimodal": "multimodal_fallback",
-            "off_topic": "off_topic",
-            "failed": "failed",
-        }.get(image_understanding.source, "pending")
-        attachment_record.ocr_confidence = image_understanding.ocr_confidence_value
-        attachment_record.understanding_json = image_context_record(image_understanding)
-        db.add(attachment_record)
-        db.commit()
-
-    filter_question = _build_filter_question(payload_message=payload.message, understanding=image_understanding)
-    if has_image_turn and _should_short_circuit_image_turn(
-        payload_message=payload.message,
-        understanding=image_understanding,
-    ):
-        bypassed_role = role_snapshot.bypassed()
-        short_circuit_text = _build_short_circuit_reply(payload.subject, image_understanding)
-        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
-        if not existing_assistant:
-            assistant_message = Message(
-                conversation_id=conversation.id,
-                role=MessageRole.ASSISTANT,
-                content=short_circuit_text,
-                turn_index=user_turn_index,
-                guidance_stage=conversation.guidance_stage,
-                llm_model_key=selected_model_key,
-            )
-            db.add(assistant_message)
-            db.commit()
-            guidance_stage_total.labels(stage=conversation.guidance_stage.value).inc()
-        if payload.request_id:
-            request_replay_service.mark_completed(
-                user_id=current_user.id,
-                request_id=payload.request_id,
-                question_hash=request_fingerprint,
-                conversation_id=conversation.id,
-                turn_index=user_turn_index,
-                subject=payload.subject,
-                guidance_stage=conversation.guidance_stage,
-                final_content=short_circuit_text,
-                role_snapshot=bypassed_role.replay_snapshot(),
-            )
-        return StreamingResponse(
-            _instant_stream(
-                conversation_id=conversation.id,
-                guidance_stage=conversation.guidance_stage.value,
-                content=short_circuit_text,
-                request=request,
-                role_snapshot=bypassed_role,
-            ),
-            media_type="text/event-stream",
-        )
-
-    practice_review_turn = bool(conversation.active_practice and _looks_like_answer_submission(payload.message))
-    decision = filter_service.check_question(filter_question, payload.subject)
-    if (
-        not decision.allowed
-        and decision.reason == "subject_not_recognized"
-        and practice_review_turn
-    ):
-        decision = FilterDecision(True, "practice_answer_submission", payload.subject or conversation.subject)
-    if not decision.allowed:
-        bypassed_role = role_snapshot.bypassed()
-        filter_blocked_total.inc()
-        refusal = filter_service.refusal_text
-        existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
-        if not existing_assistant:
-            assistant_message = Message(
-                conversation_id=conversation.id,
-                role=MessageRole.ASSISTANT,
-                content=refusal,
-                turn_index=user_turn_index,
-                guidance_stage=conversation.guidance_stage,
-                llm_model_key=selected_model_key,
-            )
-            db.add(assistant_message)
-            db.commit()
-            guidance_stage_total.labels(stage=conversation.guidance_stage.value).inc()
-        if payload.request_id:
-            request_replay_service.mark_completed(
-                user_id=current_user.id,
-                request_id=payload.request_id,
-                question_hash=request_fingerprint,
-                conversation_id=conversation.id,
-                turn_index=user_turn_index,
-                subject=payload.subject,
-                guidance_stage=conversation.guidance_stage,
-                final_content=refusal,
-                role_snapshot=bypassed_role.replay_snapshot(),
-            )
-        return StreamingResponse(
-            _instant_stream(
-                conversation_id=conversation.id,
-                guidance_stage=conversation.guidance_stage.value,
-                content=refusal,
-                request=request,
-                role_snapshot=bypassed_role,
-            ),
-            media_type="text/event-stream",
-        )
 
     subject = decision.subject or payload.subject
     prompt_question = _build_prompt_question(payload_message=payload.message, subject=subject, understanding=image_understanding)
@@ -2653,11 +2862,6 @@ async def stream_chat(
         understanding=image_understanding if has_image_turn else None,
     )
     cache_lookup = QuestionCacheLookup(cache_key=None, answer=None)
-    selected_model_config = db.scalar(
-        select(LLMModelConfig)
-        .options(selectinload(LLMModelConfig.quota_policy), selectinload(LLMModelConfig.provider_account))
-        .where(LLMModelConfig.model_key == selected_model_key, LLMModelConfig.is_enabled.is_(True))
-    )
     if not payload.deep_reasoning and not practice_review_turn and question_cache_service.is_cacheable(
         history_pairs=history_pairs,
         question=retrieval_query,
@@ -2813,6 +3017,7 @@ async def stream_chat(
         ticket_released = False
         suggested_replies: list[str] = []
         turn_persisted = False
+        next_topic_check_at = 180
         assistant_message_id: int | None = None
         practice_review_persisted = False
         incentive_grant: dict[str, Any] | None = None
@@ -2910,15 +3115,38 @@ async def stream_chat(
                         learning_summary = summary
                         yield _sse_event("learning_summary", {"content": summary})
                 pending_buffer += provider_chunk
-                segments, pending_buffer = _split_stream_buffer(pending_buffer)
-                for segment in segments:
-                    if not emitted_visible:
+                segments: list[str] = []
+                immediate_safety_failure = not filter_service.validate_answer(
+                    pending_buffer,
+                    skip_direct_answer=practice_review_turn,
+                    subject=subject,
+                    question=prompt_question,
+                ).allowed
+                if emitted_visible or len(pending_buffer) >= 180 or immediate_safety_failure:
+                    segments, pending_buffer = _split_stream_buffer(pending_buffer, force=immediate_safety_failure)
+                for segment_index, segment in enumerate(segments):
+                    initial_topic_check = not emitted_visible
+                    if initial_topic_check:
                         segment = segment.lstrip()
                         if not segment:
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = _validate_stream_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
+                    check_topic = initial_topic_check or len(candidate_text) >= next_topic_check_at
+                    validation_text = (
+                        candidate_text + "".join(segments[segment_index + 1:]) + pending_buffer
+                        if initial_topic_check else candidate_text
+                    )
+                    validation = await _validate_stream_answer(
+                        validation_text,
+                        skip_direct_answer=practice_review_turn,
+                        subject=subject,
+                        question=prompt_question,
+                        model_key=selected_model_key,
+                        check_topic=check_topic,
+                    )
+                    if check_topic:
+                        next_topic_check_at = max(len(candidate_text), 180) + 240
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -2961,14 +3189,29 @@ async def stream_chat(
 
             if not disconnected and pending_buffer:
                 segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
-                for segment in segments:
-                    if not emitted_visible:
+                for segment_index, segment in enumerate(segments):
+                    initial_topic_check = not emitted_visible
+                    if initial_topic_check:
                         segment = segment.lstrip()
                         if not segment:
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    validation = _validate_stream_answer(candidate_text, skip_direct_answer=practice_review_turn, subject=subject)
+                    check_topic = initial_topic_check or len(candidate_text) >= next_topic_check_at
+                    validation_text = (
+                        candidate_text + "".join(segments[segment_index + 1:]) + pending_buffer
+                        if initial_topic_check else candidate_text
+                    )
+                    validation = await _validate_stream_answer(
+                        validation_text,
+                        skip_direct_answer=practice_review_turn,
+                        subject=subject,
+                        question=prompt_question,
+                        model_key=selected_model_key,
+                        check_topic=check_topic,
+                    )
+                    if check_topic:
+                        next_topic_check_at = max(len(candidate_text), 180) + 240
                     if not validation.allowed:
                         chat_stream_safety_rewrite_total.inc()
                         rewritten_text = _compose_safe_rewrite(
@@ -3202,3 +3445,148 @@ async def stream_chat(
                     sse_active_connections.dec()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _set_user_turn_delivery_status(
+    db: DbSession,
+    *,
+    conversation_id: int | None,
+    turn_index: int | None,
+    delivery_status: str,
+    failure_reason: str | None = None,
+) -> None:
+    if conversation_id is None or turn_index is None:
+        return
+    try:
+        user_message = _user_message_for_turn(db, conversation_id, turn_index)
+        if user_message is None or user_message.delivery_status == "completed":
+            return
+        user_message.delivery_status = delivery_status
+        user_message.failure_reason = None if delivery_status == "completed" else (failure_reason or delivery_status)[:500]
+        db.add(user_message)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to update message delivery status: conversation_id=%s turn_index=%s status=%s",
+            conversation_id,
+            turn_index,
+            delivery_status,
+        )
+
+
+def _cleanup_empty_new_conversation(db: DbSession, payload: ChatRequest, request: Request) -> None:
+    if payload.conversation_id is not None:
+        return
+    conversation_id = getattr(request.state, "chat_conversation_id", None)
+    if conversation_id is None:
+        return
+    try:
+        message_count = db.scalar(select(func.count(Message.id)).where(Message.conversation_id == conversation_id)) or 0
+        conversation = db.get(Conversation, conversation_id)
+        if message_count == 0 and conversation is not None:
+            db.delete(conversation)
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to clean empty conversation_id=%s", conversation_id)
+
+
+def _exception_reason(exc: BaseException) -> str:
+    detail = getattr(exc, "detail", None)
+    if detail is not None:
+        return json.dumps(detail, ensure_ascii=False) if isinstance(detail, (dict, list)) else str(detail)
+    return str(exc) or type(exc).__name__
+
+
+def _discard_pending_attachment(request: Request) -> None:
+    storage_key = getattr(request.state, "chat_pending_attachment_key", None)
+    if storage_key:
+        chat_attachment_service.delete(storage_key)
+        request.state.chat_pending_attachment_key = None
+
+
+_user_generation_locks: dict[int, asyncio.Lock] = {}
+
+
+async def _acquire_generation_lock(user_id: int) -> asyncio.Lock:
+    lock = _user_generation_locks.setdefault(user_id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="已有一个回答正在生成，请等待完成或停止后重试")
+    await lock.acquire()
+    return lock
+
+
+async def stream_chat(
+    payload: ChatRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+    request: Request,
+    *,
+    image_upload: UploadFile | None = None,
+):
+    """Serialize generation and keep the persisted user turn aligned with SSE."""
+    if not is_valid_subject(payload.subject):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
+    ensure_chat_allowed(current_user)
+    generation_lock = await _acquire_generation_lock(current_user.id)
+    try:
+        response = await _stream_chat(payload, db, current_user, request, image_upload=image_upload)
+    except BaseException as exc:
+        _set_user_turn_delivery_status(
+            db,
+            conversation_id=getattr(request.state, "chat_conversation_id", None),
+            turn_index=getattr(request.state, "chat_user_turn_index", None),
+            delivery_status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+            failure_reason=_exception_reason(exc),
+        )
+        _cleanup_empty_new_conversation(db, payload, request)
+        generation_lock.release()
+        raise
+    finally:
+        _discard_pending_attachment(request)
+
+    original_iterator = response.body_iterator
+
+    async def consume():
+        delivery_status: str | None = None
+        failure_reason: str | None = None
+        try:
+            async for frame in original_iterator:
+                frame_text = frame.decode("utf-8") if isinstance(frame, bytes) else frame
+                if "event: done" in frame_text and delivery_status is None:
+                    delivery_status = "completed"
+                elif "event: error" in frame_text and delivery_status is None:
+                    delivery_status = "failed"
+                    try:
+                        failure_reason = json.loads(frame_text.split("data: ", 1)[1].splitlines()[0]).get("message")
+                    except (ValueError, IndexError, AttributeError):
+                        failure_reason = "generation_failed"
+                yield frame
+        except asyncio.CancelledError:
+            delivery_status = "cancelled"
+            failure_reason = "本次生成已停止"
+            raise
+        except GeneratorExit:
+            delivery_status = "cancelled"
+            failure_reason = "连接已关闭"
+            raise
+        except BaseException as exc:
+            delivery_status = "failed"
+            failure_reason = _exception_reason(exc)
+            raise
+        finally:
+            _set_user_turn_delivery_status(
+                db,
+                conversation_id=getattr(request.state, "chat_conversation_id", None),
+                turn_index=getattr(request.state, "chat_user_turn_index", None),
+                delivery_status=delivery_status or "cancelled",
+                failure_reason=failure_reason or "连接已关闭",
+            )
+            try:
+                await original_iterator.aclose()
+            finally:
+                generation_lock.release()
+
+    response.body_iterator = consume()
+    return response

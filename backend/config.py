@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     api_prefix: str = Field(default="/api", alias="API_PREFIX")
     web_base_path: str = Field(default="/", alias="WEB_BASE_PATH")
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")
+    # 只有直连对端落在这些网段（本机 / Docker 内网的 nginx）时才信任 X-Real-IP
+    trusted_proxy_cidrs: str = Field(default="127.0.0.0/8,::1/128,172.16.0.0/12", alias="TRUSTED_PROXY_CIDRS")
 
     jwt_secret_key: str = Field(default="studyagent-dev-secret", alias="JWT_SECRET_KEY", repr=False)
     data_encryption_key: str | None = Field(default=None, alias="DATA_ENCRYPTION_KEY", repr=False)
@@ -189,6 +191,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def trusted_proxy_cidr_list(self) -> list[str]:
+        return [item.strip() for item in self.trusted_proxy_cidrs.split(",") if item.strip()]
 
     @property
     def upload_extension_list(self) -> list[str]:

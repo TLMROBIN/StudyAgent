@@ -22,7 +22,7 @@ from backend.models.feedback import (
     StudentFeedbackReadState,
 )
 from backend.models.schemas import FeedbackCreate, FeedbackUnreadSummaryRead, StudentFeedbackListRead, StudentFeedbackRead
-from backend.models.user import UserRole
+from backend.models.user import User, UserRole
 from backend.services.audit_service import audit_service
 from backend.services.feedback_attachment_service import StoredFeedbackAttachment, feedback_attachment_service
 
@@ -235,6 +235,8 @@ async def create_feedback(
     payload, files = await _parse_feedback_submission(request)
     if feedback_is_banned(db, current_user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="反馈权限已被管理员暂停")
+    # 锁住本人用户行再计数，避免并发提交同时通过每日上限检查（PostgreSQL 生效）
+    db.execute(select(User.id).where(User.id == current_user.id).with_for_update())
     if today_feedback_count(db, current_user.id) >= DAILY_FEEDBACK_LIMIT:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="每天最多提交 2 次反馈，请明天再试")
 

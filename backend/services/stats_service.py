@@ -22,7 +22,11 @@ class StatsService:
         turns = db.scalar(
             select(func.count(Message.id))
             .join(Conversation, Conversation.id == Message.conversation_id)
-            .where(Conversation.student_id.in_(scope), Message.role == MessageRole.USER)
+            .where(
+                Conversation.student_id.in_(scope),
+                Message.role == MessageRole.USER,
+                Message.delivery_status == "completed",
+            )
         ) or 0
         subject_rows = db.execute(
             select(Conversation.subject, func.count(Conversation.id))
@@ -153,7 +157,11 @@ class StatsService:
         turns = dict(db.execute(
             select(Conversation.student_id, func.count(Message.id))
             .join(Message, Message.conversation_id == Conversation.id)
-            .where(Conversation.student_id.in_(self._student_scope(viewer)), Message.role == MessageRole.USER)
+            .where(
+                Conversation.student_id.in_(self._student_scope(viewer)),
+                Message.role == MessageRole.USER,
+                Message.delivery_status == "completed",
+            )
             .group_by(Conversation.student_id)
         ).all())
         buckets: dict[str, dict] = defaultdict(

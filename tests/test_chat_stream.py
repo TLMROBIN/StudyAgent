@@ -275,7 +275,11 @@ def _isolate_chat_stream_optional_services(monkeypatch):
     async def no_suggested_replies(**kwargs):
         return []
 
+    async def academic_topic(**kwargs):
+        return "academic"
+
     monkeypatch.setattr(chat_router.suggested_reply_service, "generate", no_suggested_replies)
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic", academic_topic)
     monkeypatch.setattr(chat_router, "rag_session_store", MemoryStore())
 
 
@@ -399,7 +403,7 @@ def test_chat_stream_applies_fixed_role_revision_and_persists_snapshot(monkeypat
         session.close()
 
 
-def test_filter_refusal_marks_requested_role_as_bypassed(monkeypatch):
+def test_first_filter_refusal_bypasses_role_without_creating_conversation(monkeypatch):
     session_factory = _build_session_factory()
     current_user = _create_student(session_factory)
     session = session_factory()
@@ -427,8 +431,9 @@ def test_filter_refusal_marks_requested_role_as_bypassed(monkeypatch):
 
         assert meta["role_status"] == "bypassed"
         assert meta["role_applied"] is False
-        assert stored.agent_role_revision_id is None
-        assert stored.agent_role_snapshot is None
+        assert meta["conversation_id"] is None
+        assert stored is None
+        assert session.scalar(select(Conversation)) is None
     finally:
         session.close()
 
@@ -813,6 +818,9 @@ def test_chat_stream_releases_quota_when_queue_is_full(monkeypatch):
 
     class RejectingQueue:
         waiting = 0
+
+        def ensure_available(self):
+            raise chat_router.QueueFullError("queue_full")
 
         def reserve(self):
             raise chat_router.QueueFullError("queue_full")
@@ -1553,10 +1561,11 @@ def test_chat_stream_replays_disconnected_request_without_second_llm_call(monkey
     current_user = _create_student(session_factory)
     _create_request_count_model(session_factory, limit=2, model_key="deepseek-v4-flash")
     llm_call_count = {"value": 0}
+    response_text = "先看定义域。" * 30
 
     async def fake_stream_response(messages, fallback_text, *, model_key=None) -> AsyncIterator[str]:
         llm_call_count["value"] += 1
-        yield "先看定义域。"
+        yield response_text
 
     monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
     monkeypatch.setattr(
@@ -1594,11 +1603,13 @@ def test_chat_stream_replays_disconnected_request_without_second_llm_call(monkey
         usage_events = session.scalars(select(LLMUsageEvent)).all()
 
         assert llm_call_count["value"] == 1
-        assert [event for event, _ in first_events] == ["meta", "chunk"]
+        assert first_events[0][0] == "meta"
+        assert any(event == "chunk" for event, _ in first_events)
+        assert not any(event == "done" for event, _ in first_events)
         assert [event for event, _ in second_events] == ["meta", "done"]
-        assert second_events[-1][1]["content"] == "先看定义域。"
+        assert second_events[-1][1]["content"] == response_text
         assert len(stored_messages) == 2
-        assert stored_messages[1].content == "先看定义域。"
+        assert stored_messages[1].content == response_text
         assert len(usage_events) == 1
     finally:
         session.close()
@@ -1704,7 +1715,8 @@ def test_chat_stream_records_multimodal_status_for_image_turn(monkeypatch):
 
     async def fake_understand(**kwargs):
         assert kwargs["image_path"]
-        assert kwargs["attachment_id"]
+        # 新会话校验前尚无附件数据库记录；通过后才持久化识别结果。
+        assert kwargs["attachment_id"] is None
         return ImageUnderstandingResult(
             filter_text="已知函数 f(x)=x^2，求单调区间",
             prompt_summary="已知函数 f(x)=x^2，求单调区间",
@@ -1849,9 +1861,10 @@ def test_chat_stream_routes_image_only_off_topic_without_llm(monkeypatch):
 
     session = session_factory()
     try:
-        attachment = session.scalar(select(ChatMessageAttachment))
-        assert attachment is not None
-        assert attachment.ocr_status == "off_topic"
+        assert events[0][1]["conversation_id"] is None
+        assert session.scalar(select(ChatMessageAttachment)) is None
+        assert session.scalar(select(Message)) is None
+        assert session.scalar(select(Conversation)) is None
     finally:
         session.close()
 
@@ -2206,7 +2219,7 @@ def test_chat_attachment_route_is_private_to_owner(monkeypatch):
     owner_client = _build_chat_test_client(session_factory, owner)
     response = owner_client.post(
         "/api/chat/stream",
-        data={"subject": "数学", "message": ""},
+        data={"subject": "数学", "message": "请分析这个函数图像的单调性"},
         files={"image": ("graph.png", _make_test_image_bytes("green"), "image/png")},
     )
     assert response.status_code == 200
@@ -2270,7 +2283,7 @@ def test_chat_attachment_file_is_removed_when_conversation_is_deleted(monkeypatc
     client = _build_chat_test_client(session_factory, current_user)
     response = client.post(
         "/api/chat/stream",
-        data={"subject": "数学", "message": ""},
+        data={"subject": "数学", "message": "请根据函数图示分析已知条件"},
         files={"image": ("cleanup.png", _make_test_image_bytes("purple"), "image/png")},
     )
     assert response.status_code == 200
@@ -2448,14 +2461,14 @@ def test_chat_stream_replay_request_id_distinguishes_different_images(monkeypatc
     client = _build_chat_test_client(session_factory, current_user)
     first = client.post(
         "/api/chat/stream",
-        data={"subject": "数学", "message": "", "request_id": "same-image-request"},
+        data={"subject": "数学", "message": "请分析函数图像的已知条件", "request_id": "same-image-request"},
         files={"image": ("first.png", _make_test_image_bytes("red"), "image/png")},
     )
     assert first.status_code == 200
 
     second = client.post(
         "/api/chat/stream",
-        data={"subject": "数学", "message": "", "request_id": "same-image-request"},
+        data={"subject": "数学", "message": "请分析函数图像的已知条件", "request_id": "same-image-request"},
         files={"image": ("second.png", _make_test_image_bytes("yellow"), "image/png")},
     )
     assert second.status_code == 409
@@ -3389,6 +3402,32 @@ def test_student_archive_preserves_history_and_can_be_restored():
     assert client.get('/api/chat/history').json()[0]['is_archived'] is False
 
 
+def test_active_conversation_limit_and_archived_read_only():
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    with factory() as db:
+        active = [Conversation(student_id=student.id, subject="数学") for _ in range(10)]
+        archived = Conversation(student_id=student.id, subject="数学", is_archived=True)
+        db.add_all([*active, archived])
+        db.commit()
+        active_id = active[0].id
+        archived_id = archived.id
+
+    response = client.post("/api/chat/stream", json={"subject": "数学", "message": "函数单调性怎么判断"})
+    assert response.status_code == 409
+    assert client.get(f"/api/chat/history/{archived_id}").status_code == 200
+    response = client.post(
+        "/api/chat/stream",
+        json={"subject": "数学", "message": "函数单调性怎么判断", "conversation_id": archived_id},
+    )
+    assert response.status_code == 409
+    assert client.patch(f"/api/chat/{archived_id}/archive", json={"is_archived": False}).status_code == 409
+
+    assert client.patch(f"/api/chat/{active_id}/archive", json={"is_archived": True}).status_code == 200
+    assert client.patch(f"/api/chat/{archived_id}/archive", json={"is_archived": False}).status_code == 200
+
+
 def test_archive_rejects_foreign_missing_and_deleted_conversations():
     factory = _build_session_factory()
     owner = _create_student(factory)
@@ -3479,3 +3518,230 @@ def test_short_writing_reply_keeps_whole_essay_task_instead_of_concept_grading()
     assert '开放表达不要机械判为部分正确' in context['prompt_question']
     assert '概念问题' not in context['prompt_question']
     assert '请评析关于校园声音' in context['retrieval_query']
+
+
+def test_off_topic_novel_output_is_rewritten_before_first_chunk(monkeypatch):
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    novel = "夜色里，少年与恋人约定私奔，从此远离故乡。" * 8
+
+    async def fake_stream(messages, fallback_text, **kwargs):
+        yield novel
+
+    async def classify(**kwargs):
+        return "off_topic" if "待输出回复" in kwargs["question"] else "academic"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream)
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic", classify)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    with factory() as db:
+        response = asyncio.run(chat_router.stream_chat(
+            ChatRequest(subject="语文", message="请分析这篇课文的叙事结构"),
+            db, student, FakeRequest(),
+        ))
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        assert events[-1][0] == "done"
+        assert all("夜色里" not in str(data) for _, data in events)
+        assistant = db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+        assert assistant is not None
+        assert "夜色里" not in assistant.content
+
+
+def test_failed_turn_is_excluded_from_retry_history_and_guidance(monkeypatch):
+    from backend.services.llm_service import LLMCallError
+
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    captured_messages: list[list[dict[str, str]]] = []
+
+    async def failing_stream(messages, fallback_text, **kwargs):
+        if False:
+            yield ""
+        raise LLMCallError("provider unavailable")
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", failing_stream)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    with factory() as db:
+        first = asyncio.run(chat_router.stream_chat(
+            ChatRequest(subject="数学", message="函数单调性怎么判断"),
+            db, student, FakeRequest(),
+        ))
+        first_events = _parse_sse(asyncio.run(_read_streaming_response(first)))
+        assert first_events[-1][0] == "error"
+        conversation_id = first_events[0][1]["conversation_id"]
+        failed = db.scalar(select(Message).where(Message.role == MessageRole.USER))
+        assert failed.delivery_status == "failed"
+        assert failed.failure_reason == chat_router.MODEL_CALL_FAILED_MESSAGE
+
+        async def successful_stream(messages, fallback_text, **kwargs):
+            captured_messages.append(messages)
+            yield "先比较两个自变量的大小，再判断对应函数值如何变化。"
+
+        monkeypatch.setattr(chat_router.llm_service, "stream_response", successful_stream)
+        db.expire_all()
+        retry = asyncio.run(chat_router.stream_chat(
+            ChatRequest(subject="数学", message="函数奇偶性怎么判断", conversation_id=conversation_id),
+            db, student, FakeRequest(),
+        ))
+        retry_events = _parse_sse(asyncio.run(_read_streaming_response(retry)))
+        assert retry_events[-1][0] == "done"
+        assert "函数单调性怎么判断" not in str(captured_messages[0])
+
+        users = db.scalars(select(Message).where(Message.role == MessageRole.USER).order_by(Message.id)).all()
+        assert [item.delivery_status for item in users] == ["failed", "completed"]
+        assert [item.turn_index for item in users] == [1, 1]
+        assistant = db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+        assert assistant.turn_index == 1
+        assert assistant.guidance_stage == GuidanceStage.INITIAL
+
+
+def test_closing_stream_marks_user_turn_cancelled(monkeypatch):
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    async def run():
+        with factory() as db:
+            response = await chat_router.stream_chat(
+                ChatRequest(subject="物理", message="牛顿第二定律怎么理解"),
+                db, student, FakeRequest(),
+            )
+            iterator = response.body_iterator
+            first = await anext(iterator)
+            assert "event: meta" in first
+            await iterator.aclose()
+
+    asyncio.run(run())
+    with factory() as db:
+        saved = db.scalar(select(Message).where(Message.role == MessageRole.USER))
+        assert saved.delivery_status == "cancelled"
+        assert saved.failure_reason == "连接已关闭"
+
+
+def test_quota_preflight_rejection_creates_no_turn_or_conversation(monkeypatch):
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    model_key = chat_router.llm_service.normalize_chat_model_key(None)
+    _create_request_count_model(factory, model_key=model_key, limit=1)
+    quota_store = MemoryStore()
+    monkeypatch.setattr(chat_router.llm_quota_service, "store", quota_store)
+
+    with factory() as db:
+        model = db.scalar(select(LLMModelConfig).where(LLMModelConfig.model_key == model_key))
+        reservation = chat_router.llm_quota_service.check_and_reserve(
+            db=db, user=student, model_config=model, request_id="consume-only",
+            prompt_messages=[{"role": "user", "content": "函数题"}],
+        )
+        assert reservation.allowed is True
+        snapshot = chat_router.llm_quota_service.quota_snapshot_for_user(db=db, user=student, model_config=model)
+        assert snapshot.remaining_requests == 0
+
+    response = _build_chat_test_client(factory, student).post(
+        "/api/chat/stream", json={"subject": "数学", "message": "函数奇偶性怎么判断", "llm_model": model_key},
+    )
+    assert response.status_code == 429, response.text
+    with factory() as db:
+        assert db.scalars(select(Message)).all() == []
+        assert db.scalars(select(Conversation)).all() == []
+
+
+def test_second_generation_without_request_id_is_rejected(monkeypatch):
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_stream(messages, fallback_text, **kwargs):
+        started.set()
+        await release.wait()
+        yield "先确定研究对象，再分析受力。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", slow_stream)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    async def run():
+        with factory() as db:
+            first = await chat_router.stream_chat(
+                ChatRequest(subject="物理", message="牛顿第二定律怎么理解"),
+                db, student, FakeRequest(),
+            )
+            iterator = first.body_iterator
+            try:
+                assert "event: meta" in await anext(iterator)
+                pending_chunk = asyncio.create_task(anext(iterator))
+                await asyncio.wait_for(started.wait(), timeout=1)
+                with pytest.raises(chat_router.HTTPException) as exc:
+                    await chat_router.stream_chat(
+                        ChatRequest(subject="物理", message="圆周运动合力怎么判断"),
+                        db, student, FakeRequest(),
+                    )
+                assert exc.value.status_code == 429
+                release.set()
+                frames = [await pending_chunk]
+                while True:
+                    try:
+                        frames.append(await anext(iterator))
+                    except StopAsyncIteration:
+                        break
+                assert any("event: done" in frame for frame in frames)
+            finally:
+                release.set()
+                await iterator.aclose()
+
+    asyncio.run(run())
+
+
+def test_resolved_conversation_is_read_only_until_restored():
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    with factory() as db:
+        conversation = Conversation(student_id=student.id, subject="数学", resolved=True)
+        db.add(conversation)
+        db.commit()
+        conversation_id = conversation.id
+
+    rejected = client.post("/api/chat/stream", json={
+        "subject": "数学", "message": "函数单调性怎么判断", "conversation_id": conversation_id,
+    })
+    assert rejected.status_code == 409
+    assert "已解决" in rejected.text
+    restored = client.post(f"/api/chat/{conversation_id}/resolve", json={"resolved": False, "reflection": None})
+    assert restored.status_code == 200
+    with factory() as db:
+        assert db.scalars(select(Message)).all() == []
+
+
+def test_message_delivery_runtime_upgrade_is_idempotent(monkeypatch):
+    from sqlalchemy import inspect, text
+    from backend import database
+
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    with factory() as db:
+        conversation = Conversation(student_id=student.id, subject="数学")
+        db.add(conversation)
+        db.flush()
+        db.add(Message(conversation_id=conversation.id, role=MessageRole.USER, content="函数", turn_index=1))
+        db.commit()
+
+    engine = factory.kw["bind"]
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE messages DROP COLUMN failure_reason"))
+        connection.execute(text("ALTER TABLE messages DROP COLUMN delivery_status"))
+    monkeypatch.setattr(database, "engine", engine)
+    database.apply_runtime_schema_updates()
+    database.apply_runtime_schema_updates()
+
+    columns = {column["name"] for column in inspect(engine).get_columns("messages")}
+    assert {"delivery_status", "failure_reason"} <= columns
+    with factory() as db:
+        saved = db.scalar(select(Message).where(Message.role == MessageRole.USER))
+        assert saved.delivery_status == "completed"
+        assert saved.failure_reason is None

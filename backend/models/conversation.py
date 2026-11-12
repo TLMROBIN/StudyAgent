@@ -91,7 +91,7 @@ class Conversation(TimestampMixin, Base):
     @property
     def topic(self) -> str:
         for message in self.messages:
-            if message.role == MessageRole.USER and message.content.strip():
+            if message.role == MessageRole.USER and message.delivery_status == "completed" and message.content.strip():
                 return summarize_conversation_topic(self.subject, message.content)
         return f"{self.subject}答疑"
 
@@ -103,6 +103,8 @@ class Message(TimestampMixin, Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
     role: Mapped[MessageRole] = mapped_column(SqlEnum(MessageRole), index=True)
     content: Mapped[str] = mapped_column(Text)
+    delivery_status: Mapped[str] = mapped_column(String(16), default="completed", server_default="completed")
+    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     assets: Mapped[list[dict]] = mapped_column(JSON, default=list)
     suggested_replies: Mapped[list[str]] = mapped_column(JSON, default=list)
     turn_index: Mapped[int] = mapped_column(Integer, default=0)

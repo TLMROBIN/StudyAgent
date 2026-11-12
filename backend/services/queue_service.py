@@ -28,6 +28,11 @@ class QueueService:
     def waiting(self) -> int:
         return self._waiting
 
+    def ensure_available(self) -> None:
+        current_active = self._semaphore._value  # noqa: SLF001
+        if self._waiting + (0 if current_active > 0 else 1) >= self._max_waiting:
+            raise QueueFullError("queue_full")
+
     @asynccontextmanager
     async def reserve(self) -> QueueTicket:
         async with self._lock:
@@ -39,8 +44,10 @@ class QueueService:
 
         try:
             await self._semaphore.acquire()
-            async with self._lock:
-                self._waiting -= 1
+        finally:
+            # 排队中被取消（客户端断开）时也要退出等待计数；此时未拿到槽位，不能 release
+            self._waiting -= 1
+        try:
             yield ticket
         finally:
             self._semaphore.release()

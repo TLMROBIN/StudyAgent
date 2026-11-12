@@ -75,7 +75,7 @@ DEFAULT_CONFIG: dict = {
             "id": "input.offtopic.daily_life",
             "layer": LAYER_QUESTION_BLOCKLIST,
             "type": "regex",
-            "pattern": r"天气|股价|彩票|恋爱|表白|游戏攻略|写代码",
+            "pattern": r"天气|股价|彩票|恋爱|三角恋|表白|游戏攻略|写代码|免费领取|内裤|笑死|(?:小说|故事).{0,16}(?:主角|后续|后来|续写)",
             "enabled": True,
             "description": "非学科日常话题（迁移自硬编码规则）",
         },
@@ -159,6 +159,14 @@ DEFAULT_CONFIG: dict = {
             "pattern": r"不[用要需]引导|跳过引导|直接(告诉我|给我?|说)(标准|最终|正确)?答案|答题机器",
             "enabled": True,
             "description": "绕过苏格拉底式引导、索要直接答案",
+        },
+        {
+            "id": "input.offtopic.creative_roleplay",
+            "layer": LAYER_QUESTION_BLOCKLIST,
+            "type": "regex",
+            "pattern": r"(?:写|续写|创作|编写|接龙|编).{0,20}(?:小说|修仙|玄幻|武侠|故事|段子)|(?:小说|修仙|玄幻|武侠|故事|段子).{0,20}(?:续写|接龙)|你的身份是.{0,20}(?:写作|作者|编剧)|和我一起写作",
+            "enabled": True,
+            "description": "非学科小说创作、角色接龙及写作人格设定；不影响语文作文构思、阅读与文学鉴赏",
         },
         # ---- LLM 输出校验：直接给答案（迁移自原 DIRECT_ANSWER_PATTERNS）----
         {

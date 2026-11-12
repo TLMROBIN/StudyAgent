@@ -48,7 +48,7 @@ class BackgroundChat:
 class BackgroundChatService:
     retention_seconds = 1800
     max_jobs = 1000
-    max_active_per_user = 3
+    max_active_per_user = 1
     timeout_seconds = 900
 
     def __init__(self) -> None:
@@ -88,7 +88,7 @@ class BackgroundChatService:
                 raise HTTPException(409, "Request id already used with different payload")
             return existing
         if sum(uid == user_id and job.finished_at is None for (uid, _), job in self.jobs.items()) >= self.max_active_per_user:
-            raise HTTPException(429, "已有多个问题正在后台生成，请等待完成或停止后重试。")
+            raise HTTPException(429, "已有一个回答正在生成，请等待完成或停止后重试。")
         if len(self.jobs) >= self.max_jobs:
             completed = [key for key, job in self.jobs.items() if job.finished_at is not None]
             if not completed:

@@ -36,7 +36,7 @@ def get_password_hash(password: str) -> str:
     return f"{prefix}{hashed}"
 
 
-def create_access_token(subject: str, role: str) -> tuple[str, str]:
+def create_access_token(subject: str, role: str, family_id: str | None = None) -> tuple[str, str]:
     settings = get_settings()
     issued_at = datetime.now(UTC)
     expires_at = issued_at + timedelta(minutes=settings.access_token_expire_minutes)
@@ -45,6 +45,7 @@ def create_access_token(subject: str, role: str) -> tuple[str, str]:
         "sub": subject,
         "role": role,
         "type": "access",
+        "family_id": family_id,
         "jti": jti,
         "iat": int(issued_at.timestamp()),
         "exp": expires_at,

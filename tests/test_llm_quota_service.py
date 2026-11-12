@@ -249,3 +249,85 @@ def test_llm_quota_service_reconcile_is_idempotent_for_same_reservation_key():
         assert len(events) == 1
     finally:
         session.close()
+
+
+def test_llm_quota_service_rejects_reuse_of_reconciled_request_id():
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        student = _create_student(session)
+        model, _policy = _create_model(session, billing_mode=QuotaBillingMode.REQUEST_COUNT)
+        service = LLMQuotaService(store=MemoryStore())
+
+        reservation = service.check_and_reserve(
+            db=session, user=student, model_config=model, request_id="done-request", prompt_messages=[]
+        )
+        assert reservation.allowed is True
+        service.reconcile(db=session, reservation=reservation, source="request_count", estimated=False)
+
+        reused = service.check_and_reserve(
+            db=session, user=student, model_config=model, request_id="done-request", prompt_messages=[]
+        )
+
+        assert isinstance(reused, QuotaDenied)
+        assert reused.reason == "request_id_reused"
+        snapshot = service.quota_snapshot_for_user(db=session, user=student, model_config=model)
+        assert snapshot.remaining_requests == 1
+    finally:
+        session.close()
+
+
+def test_llm_quota_service_released_request_id_is_charged_again_on_retry():
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        student = _create_student(session)
+        model, _policy = _create_model(session, billing_mode=QuotaBillingMode.REQUEST_COUNT)
+        service = LLMQuotaService(store=MemoryStore())
+
+        first = service.check_and_reserve(
+            db=session, user=student, model_config=model, request_id="retry-request", prompt_messages=[]
+        )
+        service.release(first)
+        retry = service.check_and_reserve(
+            db=session, user=student, model_config=model, request_id="retry-request", prompt_messages=[]
+        )
+
+        assert retry.allowed is True
+        snapshot = service.quota_snapshot_for_user(db=session, user=student, model_config=model)
+        assert snapshot.remaining_requests == 1
+    finally:
+        session.close()
+
+
+def test_llm_quota_service_request_id_reservation_is_scoped_per_user():
+    session_factory = _build_session_factory()
+    session = session_factory()
+    try:
+        student = _create_student(session)
+        other = User(
+            username="student2",
+            student_no="20260002",
+            full_name="学生2",
+            role=UserRole.STUDENT,
+            password_hash="fake-hash",
+            must_change_password=False,
+            is_active=True,
+        )
+        session.add(other)
+        session.commit()
+        model, _policy = _create_model(session, billing_mode=QuotaBillingMode.REQUEST_COUNT)
+        service = LLMQuotaService(store=MemoryStore())
+
+        first = service.check_and_reserve(
+            db=session, user=student, model_config=model, request_id="shared-id", prompt_messages=[]
+        )
+        second = service.check_and_reserve(
+            db=session, user=other, model_config=model, request_id="shared-id", prompt_messages=[]
+        )
+
+        assert first.reservation_key != second.reservation_key
+        other_snapshot = service.quota_snapshot_for_user(db=session, user=other, model_config=model)
+        assert other_snapshot.remaining_requests == 1
+    finally:
+        session.close()

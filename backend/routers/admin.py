@@ -39,6 +39,7 @@ from backend.models.schemas import (
 from backend.models.user import Classroom, User, UserRole
 from backend.services.account_service import build_generated_username
 from backend.services.audit_service import audit_service
+from backend.services.auth_service import auth_service
 from backend.services.filter_service import filter_service
 from backend.services.student_grade_service import student_grade_service
 from backend.services.system_config_service import system_config_service
@@ -704,6 +705,9 @@ def update_user(
     db.add(user)
     db.commit()
     db.refresh(user)
+    if not user.is_active:
+        # 停用即吊销全部 refresh family，避免重新启用后旧设备会话自动复活
+        auth_service.revoke_all_families(user.id)
     audit_service.log(
         db,
         actor=current_user,

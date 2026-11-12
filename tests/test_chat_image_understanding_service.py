@@ -78,7 +78,7 @@ def test_understand_records_result_metric(monkeypatch):
 
 
 def test_understand_uses_paddleocr_backend_before_llm(monkeypatch, tmp_path):
-    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr")
+    settings = Settings(CHAT_IMAGE_OCR_BACKEND="paddleocr", CHAT_IMAGE_OCR_TIMEOUT_SECONDS=45)
     service = ChatImageUnderstandingService(settings=settings)
     image_path = tmp_path / "question.png"
     image_path.write_bytes(_make_png_bytes())

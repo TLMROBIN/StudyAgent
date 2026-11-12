@@ -110,7 +110,8 @@ def resolve_path_label(request: Request) -> str:
         value = getattr(route, attr, None)
         if value:
             return str(value)
-    return request.url.path or "unknown"
+    # 未匹配路由时不能用原始 URL 做标签，否则随机路径可无限制造时间序列
+    return "unmatched"
 
 
 def observe_http_request(method: str, path: str, status_code: int, duration_seconds: float) -> None:
