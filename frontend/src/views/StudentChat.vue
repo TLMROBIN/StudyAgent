@@ -76,12 +76,6 @@ const STARTER_PROMPTS = [
   '我试过一种方法，卡在这里了：',
   '请先帮我检查已知条件，不要直接给答案。',
 ]
-const DEFAULT_SUBJECT_NAMES = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
-const DEFAULT_CHAT_SUBJECTS: ChatSubjectOption[] = DEFAULT_SUBJECT_NAMES.map((name) => ({
-  name,
-  knowledge_base_available: false,
-  question_bank_available: false,
-}))
 const DEFAULT_CHAT_MODELS: ChatModelOption[] = [
   { key: 'glm-5.3-flash-chat', name: 'GLM-5.3-Flash', description: '高中答疑' },
 ]
@@ -184,7 +178,9 @@ const cropSelection = reactive<CropRect>({ x: 0, y: 0, width: 1, height: 1 })
 const cropDragging = ref(false)
 const cropApplying = ref(false)
 const previousSubject = ref(form.subject)
-const chatSubjects = ref<ChatSubjectOption[]>(DEFAULT_CHAT_SUBJECTS)
+const chatSubjects = ref<ChatSubjectOption[]>([])
+const chatSubjectsLoading = ref(false)
+const chatSubjectsError = ref(false)
 const chatModels = ref<ChatModelOption[]>(DEFAULT_CHAT_MODELS)
 const agentRoles = ref<AgentRolePublic[]>([])
 const chatModelStatuses = ref<Record<string, ChatModelStatus>>({})
@@ -217,11 +213,13 @@ const activeConversationCount = computed(() => conversations.value.filter((item)
 const activeConversationLimitReached = computed(() => activeConversationCount.value >= MAX_ACTIVE_CONVERSATIONS)
 // 名额满时不替学生自动归档，直接提示由学生自己挑一个旧对话归档或删除；服务端同样校验并返回 409。
 const composerLocked = computed(() => (
-  currentConversationArchived.value
+  !selectedSubject.value
+  || currentConversationArchived.value
   || currentConversationResolved.value
   || (!currentConversationId.value && activeConversationLimitReached.value)
 ))
 const composerLockMessage = computed(() => {
+  if (subjectUnavailableMessage.value) return subjectUnavailableMessage.value
   if (currentConversationArchived.value) return '归档对话仅可查看，请先恢复为未归档对话。'
   if (currentConversationResolved.value) return '已解决对话仅可查看，请先从“更多”中恢复为继续思考。'
   if (!currentConversationId.value && activeConversationLimitReached.value) return `${CONVERSATION_LIMIT_MESSAGE}，再新建。`
@@ -273,12 +271,18 @@ const selectedModelStatus = computed(() => chatModelStatuses.value[form.llmModel
 const selectedModel = computed(() => chatModels.value.find((item) => item.key === form.llmModel) || null)
 const canUseDeepReasoning = computed(() => Boolean(selectedModel.value?.supports_deep_reasoning))
 const selectedModelQuotaExhausted = computed(() => Boolean(selectedModel.value?.quota?.quota_exhausted))
-const selectedSubject = computed(() => (
-  chatSubjects.value.find((item) => item.name === form.subject)
-  || DEFAULT_CHAT_SUBJECTS.find((item) => item.name === form.subject)
-  || null
-))
-const selectedSubjectCapabilityLabel = computed(() => subjectCapabilityLabel(selectedSubject.value))
+const selectedSubject = computed(() => chatSubjects.value.find((item) => item.name === form.subject))
+const subjectUnavailableMessage = computed(() => {
+  if (chatSubjectsError.value) return '学科列表暂时无法加载，请重试。'
+  if (chatSubjectsLoading.value && !chatSubjects.value.length) return '正在加载学科…'
+  if (!chatSubjects.value.length) return '管理员暂未启用答疑学科。'
+  if (!selectedSubject.value) {
+    return currentConversationId.value
+      ? `${form.subject}已停用，可以回看记录。选择已启用学科可新建对话。`
+      : '请选择已启用的学科。'
+  }
+  return ''
+})
 const studentMessageCount = computed(() => messages.value.filter((item) => (
   item.role === 'user' && (item.delivery_status || 'completed') === 'completed'
 )).length)
@@ -320,6 +324,7 @@ const canSend = computed(() => (
 ))
 const hasRecommendations = computed(() => visibleRecommendations.value.length > 0)
 const canRequestRecommendations = computed(() => {
+  if (!selectedSubject.value) return false
   if (recommendationMode.value === 'keyword') {
     return recommendationKeyword.value.trim().length >= 2
   }
@@ -590,14 +595,27 @@ async function loadNotifications() {
   }
 }
 
-async function loadChatSubjects() {
+async function loadChatSubjects({ initial = false } = {}) {
+  if (chatSubjectsLoading.value) return
+  chatSubjectsLoading.value = true
   try {
-    const subjects = await fetchChatSubjects()
-    chatSubjects.value = subjects.length ? subjects : DEFAULT_CHAT_SUBJECTS
+    chatSubjects.value = await fetchChatSubjects()
+    chatSubjectsError.value = false
+    if ((initial || !form.subject) && !selectedSubject.value) {
+      form.subject = chatSubjects.value[0]?.name ?? ''
+      previousSubject.value = form.subject
+    }
   } catch (error) {
     console.error(error)
-    chatSubjects.value = DEFAULT_CHAT_SUBJECTS
+    chatSubjects.value = []
+    chatSubjectsError.value = true
+  } finally {
+    chatSubjectsLoading.value = false
   }
+}
+
+function refreshSubjectsOnFocus() {
+  if (document.visibilityState === 'visible') void loadChatSubjects()
 }
 
 async function loadChatModels() {
@@ -615,6 +633,10 @@ async function loadChatModels() {
 }
 
 async function loadAgentRoles(subject = form.subject) {
+  if (!subject) {
+    agentRoles.value = []
+    return
+  }
   try {
     const { data } = await api.get<AgentRolePublic[]>('/agent-roles/enabled', { params: { subject } })
     agentRoles.value = data
@@ -802,10 +824,8 @@ function startNewConversation(options: { subject?: string } = {}): boolean {
   currentConversationResolved.value = false
   messages.value = []
   guidanceStage.value = 'initial_guidance'
-  if (options.subject) {
-    form.subject = options.subject
-    previousSubject.value = options.subject
-  }
+  form.subject = options.subject ?? (selectedSubject.value?.name || chatSubjects.value[0]?.name || '')
+  previousSubject.value = form.subject
   resetPendingImage()
   clearLocalAttachmentUrls()
   resetRecommendations()
@@ -917,7 +937,9 @@ async function deleteConversation(item: ConversationSummary) {
 }
 
 async function handleSubjectChange(nextSubject: string) {
+  if (nextSubject === form.subject) return
   const oldSubject = previousSubject.value
+  form.subject = nextSubject
   if (!currentConversationId.value || messages.value.length === 0) {
     previousSubject.value = nextSubject
     form.roleId = null
@@ -1542,6 +1564,7 @@ function chatFailureMessage(error: unknown): string {
 }
 
 async function requestRecommendations(options: { silent?: boolean } = {}) {
+  if (!selectedSubject.value) return
   recommendationLoading.value = true
   recommendationError.value = ''
   recommendationOffset.value = 0
@@ -1680,6 +1703,7 @@ function canShowSuggestedReplies(index: number, item: ChatMessageRead): boolean 
   return item.role === 'assistant'
     && index === messages.value.length - 1
     && !sending.value
+    && Boolean(selectedSubject.value)
     && normalizeSuggestedReplies(item.suggested_replies).length > 0
 }
 
@@ -1905,6 +1929,9 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
       }
     }
     const failureMessage = chatFailureMessage(error)
+    if (requestErrorMessage(error) === '该学科已停用，请选择其他已启用学科。') {
+      void loadChatSubjects()
+    }
     restoreSubmittedDraft(submissionDraftKey, recovery?.message ?? draftText)
     if (image && !pendingImageFile.value) {
       updatePendingImage(image)
@@ -1943,6 +1970,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
 }
 
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', refreshSubjectsOnFocus)
   if (modelStatusTimer) {
     window.clearInterval(modelStatusTimer)
     modelStatusTimer = null
@@ -1959,7 +1987,8 @@ onBeforeUnmount(() => {
 onMounted(async () => {
   void refreshChatPermissionNotice()
   void loadNotifications()
-  await Promise.all([loadChatSubjects(), loadChatModels()])
+  document.addEventListener('visibilitychange', refreshSubjectsOnFocus)
+  await Promise.all([loadChatSubjects({ initial: true }), loadChatModels()])
   try {
     await loadConversations()
   } catch (error) {
@@ -1994,12 +2023,14 @@ onMounted(async () => {
         <div class="study-session-tools">
           <div class="session-subject-control">
             <el-select
-              v-model="form.subject"
+              :model-value="selectedSubject?.name ?? ''"
               class="session-subject-select"
-              :disabled="sending || resolveSubmitting"
+              :disabled="sending || resolveSubmitting || !chatSubjects.length"
+              :loading="chatSubjectsLoading"
               placeholder="选择学科"
-              :aria-label="`当前答疑学科：${form.subject}`"
+              aria-label="当前答疑学科"
               aria-describedby="session-subject-capability"
+              @visible-change="(visible: boolean) => { if (visible) loadChatSubjects() }"
               @change="handleSubjectChange"
             >
               <el-option
@@ -2015,8 +2046,11 @@ onMounted(async () => {
               </el-option>
             </el-select>
             <span id="session-subject-capability" class="session-subject-capability">
-              {{ selectedSubjectCapabilityLabel }}
+              {{ selectedSubject ? subjectCapabilityLabel(selectedSubject) : subjectUnavailableMessage }}
             </span>
+            <button v-if="!chatSubjects.length && !chatSubjectsLoading" class="ghost-button" type="button" @click="loadChatSubjects()">
+              刷新学科
+            </button>
           </div>
           <el-dropdown
             :disabled="sending || resolveSubmitting"

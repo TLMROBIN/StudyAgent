@@ -279,6 +279,21 @@ class ChatModelStatusRead(BaseModel):
     message: str = ""
 
 
+class EnabledSubjectsWrite(BaseModel):
+    enabled_subjects: list[str] = Field(max_length=len(SUBJECT_SET))
+
+    @field_validator("enabled_subjects")
+    @classmethod
+    def validate_subjects(cls, subjects: list[str]) -> list[str]:
+        if len(set(subjects)) != len(subjects) or not set(subjects) <= SUBJECT_SET:
+            raise ValueError("学科必须来自支持列表，且不能重复")
+        return subjects
+
+
+class EnabledSubjectsRead(EnabledSubjectsWrite):
+    available_subjects: list[str]
+
+
 class ChatSubjectOptionRead(BaseModel):
     name: str
     knowledge_base_available: bool = False

@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { renderRichText } from '../utils/richText'
+import { useAuthStore } from '../stores/auth'
+import SubjectAvailabilityPanel from '../components/SubjectAvailabilityPanel.vue'
 import MetricTile from '../components/MetricTile.vue'
 import { buildSubjectPieModel } from '../utils/subjectPieChart'
 import {
@@ -60,6 +62,7 @@ interface StudentPortrait {
   last_active_at?: string | null
 }
 
+const authStore = useAuthStore()
 const overview = ref<OverviewData>({
   total_questions: 0,
   resolved_rate: 0,
@@ -437,6 +440,7 @@ onMounted(() => {
         <button class="primary-button" @click="exportStats">导出统计</button>
       </div>
     </div>
+    <SubjectAvailabilityPanel v-if="authStore.user?.role === 'admin'" />
     <section class="panel notification-admin-panel">
       <div class="panel-header panel-header--wrap">
         <div>

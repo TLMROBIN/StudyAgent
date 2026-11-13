@@ -24,10 +24,11 @@ try {
     stdin: { contents: script + '\nexport { loadDashboard, loadOverview, loadTrend, overview, portraits, sectionStates, trend, trendDateRange, trendLoading, trendError };', resolveDir: resolve('frontend/src/views'), loader: 'ts' },
     outfile: join(dir, 'dashboard.mjs'), bundle: true, format: 'esm', platform: 'node',
     plugins: [{ name: 'dashboard-test-dependencies', setup(builder) {
-      builder.onResolve({ filter: /^(vue|element-plus)$|\.\.\/utils\/|\.vue$/ }, (args) => ({ path: args.path, namespace: 'mock' }))
+      builder.onResolve({ filter: /^(vue|element-plus)$|\.\.\/(?:utils|stores)\/|\.vue$/ }, (args) => ({ path: args.path, namespace: 'mock' }))
       builder.onLoad({ filter: /.*/, namespace: 'mock' }, (args) => {
         if (args.path === 'vue') return { contents: `export { ref, reactive, computed, watch } from ${JSON.stringify(resolve('frontend/node_modules/vue/dist/vue.runtime.esm-bundler.js'))}; export const onMounted = () => {}; export const onBeforeUnmount = globalThis.__dashboardTest.onBeforeUnmount;`, resolveDir: resolve('frontend') }
         if (args.path === 'element-plus') return { contents: 'export const ElMessage = {}; export const ElMessageBox = {};' }
+        if (args.path.endsWith('/auth')) return { contents: 'export const useAuthStore = () => ({ user: { role: "admin" } });' }
         if (args.path.endsWith('/api')) return { contents: 'export const { api, fetchTeacherIncentivePortraits } = globalThis.__dashboardTest; export const archiveAdminNotification = () => {}; export const createAdminNotification = () => {}; export const fetchAdminNotifications = () => {}; export const fetchStudentReflections = () => {}; export const praiseStudent = () => {}; export const updateAdminNotification = () => {};' }
         if (args.path.endsWith('/richText')) return { contents: 'export const renderRichText = (s) => s;' }
         if (args.path.endsWith('/subjectPieChart')) return { contents: 'export const buildSubjectPieModel = () => ({});' }

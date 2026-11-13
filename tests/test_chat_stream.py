@@ -31,6 +31,7 @@ from backend.models.llm_model import LLMModelConfig, LLMQuotaPolicy, QuotaBillin
 from backend.models.llm_usage import LLMUsageEvent
 from backend.models.schemas import AgentRoleCreate, ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
+from backend.routers import admin as admin_router
 from backend.routers import chat as chat_router
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult
 from backend.services.agent_role_service import agent_role_service
@@ -140,6 +141,7 @@ def _create_student(session_factory) -> User:
 def _build_chat_test_client(session_factory, current_user: User):
     app = FastAPI()
     app.include_router(chat_router.router)
+    app.include_router(admin_router.router)
 
     def override_db():
         session = session_factory()
@@ -269,6 +271,61 @@ def test_chat_subjects_report_available_school_materials():
         "knowledge_base_available": False,
         "question_bank_available": False,
     }
+
+
+def test_admin_subject_settings_control_student_menu_and_new_requests():
+    session_factory = _build_session_factory()
+    admin = _build_chat_test_client(session_factory, _create_user(session_factory, role=UserRole.ADMIN))
+    teacher = _build_chat_test_client(session_factory, _create_user(session_factory, role=UserRole.TEACHER))
+    student_user = _create_student(session_factory)
+    student = _build_chat_test_client(session_factory, student_user)
+    path = "/api/admin/subjects"
+    with session_factory() as session:
+        conversation = Conversation(student_id=student_user.id, subject="物理")
+        session.add(conversation)
+        session.commit()
+        conversation_id = conversation.id
+
+    defaults = {"available_subjects": list(SUBJECTS), "enabled_subjects": list(SUBJECTS)}
+    assert admin.get(path).json() == defaults
+    assert teacher.get(path).status_code == 403
+    assert teacher.put(path, json={"enabled_subjects": ["数学"]}).status_code == 403
+    assert student.put(path, json={"enabled_subjects": []}).status_code == 403
+    assert admin.put(path, json={"enabled_subjects": ["未知学科"]}).status_code == 422
+    assert admin.put(path, json={"enabled_subjects": ["数学", "数学"]}).status_code == 422
+    assert admin.get(path).json() == defaults
+
+    response = admin.put(path, json={"enabled_subjects": ["英语", "数学"]})
+    assert response.status_code == 200
+    assert response.json() == {**defaults, "enabled_subjects": ["数学", "英语"]}
+    assert admin.get(path).json() == response.json()
+    assert [item["name"] for item in student.get("/api/chat/subjects").json()] == ["数学", "英语"]
+
+    assert student.get(f"/api/chat/history/{conversation_id}").status_code == 200
+    # The saved subject still controls an existing conversation.
+    for payload in [
+        {"subject": "物理"},
+        {"subject": "物理", "request_id": "disabled-subject"},
+        {"subject": "数学", "conversation_id": conversation_id},
+    ]:
+        response = student.post("/api/chat/stream", json={"message": "第一步怎么做？", **payload})
+        assert response.status_code == 409
+        assert "该学科已停用" in response.json()["detail"]
+    response = student.post("/api/chat/recommendations", json={"subject": "物理", "question": "动量守恒"})
+    assert response.status_code == 409
+    response = student.post("/api/chat/recommendations", json={
+        "subject": "数学", "recommendation_mode": "context", "conversation_id": conversation_id,
+    })
+    assert response.status_code == 409
+    with session_factory() as session:
+        assert not session.scalars(select(Message)).all()
+        entry = session.scalar(select(AuditLog).where(AuditLog.action == "update_enabled_subjects"))
+        assert entry.detail["enabled_subjects"] == ["数学", "英语"]
+
+    assert admin.put(path, json={"enabled_subjects": []}).status_code == 200
+    assert student.get("/api/chat/subjects").json() == []
+    assert admin.put(path, json={"enabled_subjects": ["物理"]}).status_code == 200
+    assert [item["name"] for item in student.get("/api/chat/subjects").json()] == ["物理"]
 
 
 @pytest.fixture(autouse=True)

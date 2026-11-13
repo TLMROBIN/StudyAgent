@@ -100,7 +100,8 @@ from backend.services.incentive_service import QualitySignalFilter, incentive_se
 from backend.services.subject_profile_service import subject_profile_service
 from backend.services.suggested_reply_service import suggested_reply_service
 from backend.services.store_service import BaseStore, store
-from backend.subjects import SUBJECTS, is_valid_subject
+from backend.services.subject_availability_service import SUBJECT_DISABLED_MESSAGE, get_enabled_subjects
+from backend.subjects import is_valid_subject
 from backend.time_utils import now_utc
 
 from backend.services.conversation_context import image_context_record, stored_image_context
@@ -933,6 +934,7 @@ def _resolve_recommendation_query(
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
 
+    _ensure_subject_enabled(db, conversation.subject)
     seed = _conversation_recommendation_seed(conversation)
     if not seed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Conversation has no usable context")
@@ -1782,10 +1784,14 @@ async def list_chat_model_statuses(current_user: CurrentUser) -> list[ChatModelS
 
 @router.get("/subjects", response_model=list[ChatSubjectOptionRead])
 def list_chat_subjects(db: DbSession, current_user: CurrentUser) -> list[ChatSubjectOptionRead]:
+    enabled = get_enabled_subjects(db)
+    if not enabled:
+        return []
     rows = db.execute(
         select(KnowledgeDocument.subject, KnowledgeDocument.resource_type)
         .join(KnowledgeChunk, KnowledgeChunk.document_id == KnowledgeDocument.id)
         .where(
+            KnowledgeDocument.subject.in_(enabled),
             KnowledgeDocument.status == DocumentStatus.COMPLETED,
             KnowledgeChunk.is_disabled.is_(False),
         )
@@ -1801,7 +1807,7 @@ def list_chat_subjects(db: DbSession, current_user: CurrentUser) -> list[ChatSub
             knowledge_base_available=bool(resource_types_by_subject.get(subject)),
             question_bank_available=bool(resource_types_by_subject.get(subject, set()) & QUESTION_RESOURCE_TYPES),
         )
-        for subject in SUBJECTS
+        for subject in enabled
     ]
 
 
@@ -1980,6 +1986,11 @@ def delete_conversation(conversation_id: int, db: DbSession, current_user: Curre
     return {"status": "deleted"}
 
 
+def _ensure_subject_enabled(db: Session, subject: str) -> None:
+    if subject not in get_enabled_subjects(db):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SUBJECT_DISABLED_MESSAGE)
+
+
 @router.post("/recommendations", response_model=list[QuestionRecommendationRead])
 async def recommend_questions(
     payload: QuestionRecommendationRequest,
@@ -1989,6 +2000,7 @@ async def recommend_questions(
     if not is_valid_subject(payload.subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     ensure_chat_allowed(current_user)
+    _ensure_subject_enabled(db, payload.subject)
     # 话题分类要在事件循环上 await；DB 查询与向量检索是同步阻塞的，放进线程池，避免卡住其他请求。
     recommendation_query = await asyncio.to_thread(_resolve_recommendation_query, db, current_user, payload)
     decision = await _check_chat_question(
@@ -2226,6 +2238,7 @@ async def _stream_chat(
         conversation = _ensure_conversation(db, current_user.id, payload)
         payload.subject = conversation.subject
 
+    _ensure_subject_enabled(db, conversation.subject if conversation is not None else payload.subject)
     role_snapshot = snapshot_from_replay(replay_state.role_snapshot, payload.role_id) if replay_state else None
     if role_snapshot is None:
         role_started = perf_counter()

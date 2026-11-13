@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Body, File, HTTPException, Request, Response, UploadFile, status
@@ -14,6 +15,7 @@ from backend.models.audit_log import AuditLog
 from backend.models.conversation import Conversation, Message
 from backend.models.feedback import ReleaseNote, StudentFeedback, StudentFeedbackBan
 from backend.models.notification import Notification
+from backend.models.system_config import SystemConfig
 from backend.models.schemas import (
     AdminFeedbackRead,
     AuditLogRead,
@@ -21,6 +23,8 @@ from backend.models.schemas import (
     ConversationArchiveListRead,
     ConversationArchiveMessageRead,
     ConversationArchiveRead,
+    EnabledSubjectsRead,
+    EnabledSubjectsWrite,
     FeedbackBanRead,
     FeedbackBanWrite,
     FeedbackReplyUpdate,
@@ -45,6 +49,9 @@ from backend.services.student_grade_service import student_grade_service
 from backend.services.system_config_service import system_config_service
 from backend.services.chat_permission_service import set_student_chat_restriction
 from backend.routers.feedback import _feedback_attachment_read, feedback_reply_is_unread
+
+from backend.services.subject_availability_service import ENABLED_SUBJECTS_KEY, get_enabled_subjects
+from backend.subjects import SUBJECTS
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 MANAGED_USER_ROLES = {UserRole.STUDENT, UserRole.TEACHER}
@@ -164,6 +171,39 @@ def _feedback_ban_read(student_id: int, ban: StudentFeedbackBan | None) -> Feedb
         reason=ban.reason if ban else None,
         banned_at=ban.banned_at if ban else None,
     )
+
+
+@router.get("/subjects", response_model=EnabledSubjectsRead)
+def read_enabled_subjects(db: DbSession, current_user: CurrentAdmin) -> EnabledSubjectsRead:
+    return EnabledSubjectsRead(available_subjects=list(SUBJECTS), enabled_subjects=get_enabled_subjects(db))
+
+
+@router.put("/subjects", response_model=EnabledSubjectsRead)
+def update_enabled_subjects(
+    payload: EnabledSubjectsWrite,
+    db: DbSession,
+    current_user: CurrentAdmin,
+    request: Request,
+) -> EnabledSubjectsRead:
+    enabled = [subject for subject in SUBJECTS if subject in payload.enabled_subjects]
+    previous = get_enabled_subjects(db)
+    config = db.get(SystemConfig, ENABLED_SUBJECTS_KEY)
+    if config is None:
+        config = SystemConfig(key=ENABLED_SUBJECTS_KEY)
+        db.add(config)
+    config.value = json.dumps(enabled, ensure_ascii=False)
+    config.updated_by = current_user.id
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="update_enabled_subjects",
+        target_type="system_config",
+        target_id=ENABLED_SUBJECTS_KEY,
+        result="success",
+        ip_address=request.client.host if request.client else None,
+        detail={"previous": previous, "enabled_subjects": enabled},
+    )
+    return EnabledSubjectsRead(available_subjects=list(SUBJECTS), enabled_subjects=enabled)
 
 
 @router.get("/notifications", response_model=list[NotificationRead])
