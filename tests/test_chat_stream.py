@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 from PIL import Image
+from prometheus_client import REGISTRY
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -2532,7 +2533,7 @@ def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monk
         session.refresh(row)
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [row])
 
-        result = chat_router.recommend_questions(
+        result = asyncio.run(chat_router.recommend_questions(
             QuestionRecommendationRequest(
                 subject="物理",
                 question="如图所示这类受力分析题再给我一题",
@@ -2540,7 +2541,7 @@ def test_recommend_questions_returns_assets_and_hides_solutions_for_student(monk
             ),
             session,
             current_user,
-        )
+        ))
 
         assert len(result) == 1
         assert result[0].question_text == "如图所示，分析受力。"
@@ -2975,14 +2976,14 @@ def test_recommend_questions_allows_students_marked_for_password_change(monkeypa
         session.refresh(row)
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [row])
 
-        result = chat_router.recommend_questions(
+        result = asyncio.run(chat_router.recommend_questions(
             QuestionRecommendationRequest(
                 subject="物理",
                 question="回旋加速器相关题还有吗",
             ),
             session,
             current_user,
-        )
+        ))
 
         assert len(result) == 1
         assert result[0].question_text == "回旋加速器中的粒子运动。"
@@ -3029,7 +3030,7 @@ def test_recommend_questions_can_include_solutions_for_teacher(monkeypatch):
         session.refresh(row)
         monkeypatch.setattr(chat_router.rag_service, "recommend_questions", lambda *args, **kwargs: [row])
 
-        result = chat_router.recommend_questions(
+        result = asyncio.run(chat_router.recommend_questions(
             QuestionRecommendationRequest(
                 subject="数学",
                 question="给我推荐一道函数最值题",
@@ -3038,7 +3039,7 @@ def test_recommend_questions_can_include_solutions_for_teacher(monkeypatch):
             ),
             session,
             current_user,
-        )
+        ))
 
         assert len(result) == 1
         assert result[0].answer_text == "先配方"
@@ -3102,7 +3103,7 @@ def test_recommend_questions_endpoint_excludes_disabled_rows(tmp_path, monkeypat
         test_rag_service = _build_rag_service(tmp_path)
         monkeypatch.setattr(chat_router, "rag_service", test_rag_service)
 
-        result = chat_router.recommend_questions(
+        result = asyncio.run(chat_router.recommend_questions(
             QuestionRecommendationRequest(
                 subject="物理",
                 question="再来一道运动题",
@@ -3110,7 +3111,7 @@ def test_recommend_questions_endpoint_excludes_disabled_rows(tmp_path, monkeypat
             ),
             session,
             current_user,
-        )
+        ))
 
         assert [item.chunk_id for item in result] == [enabled_row.id]
         assert [item.question_number for item in result] == ["2"]
@@ -3132,7 +3133,7 @@ def test_recommend_questions_passes_difficulty_preference_to_rag(monkeypatch):
             ) or [],
         )
 
-        result = chat_router.recommend_questions(
+        result = asyncio.run(chat_router.recommend_questions(
             QuestionRecommendationRequest(
                 subject="物理",
                 question="牛顿第二定律练习题",
@@ -3140,7 +3141,7 @@ def test_recommend_questions_passes_difficulty_preference_to_rag(monkeypatch):
             ),
             session,
             current_user,
-        )
+        ))
 
         assert result == []
         assert captured["difficulty_preference"] == "advanced"
@@ -3195,7 +3196,7 @@ def test_recommend_questions_can_use_conversation_context_seed(monkeypatch):
             ) or [],
         )
 
-        result = chat_router.recommend_questions(
+        result = asyncio.run(chat_router.recommend_questions(
             QuestionRecommendationRequest(
                 subject="物理",
                 recommendation_mode="context",
@@ -3204,7 +3205,7 @@ def test_recommend_questions_can_use_conversation_context_seed(monkeypatch):
             ),
             session,
             current_user,
-        )
+        ))
 
         assert result == []
         assert captured["subject"] == "物理"
@@ -3547,6 +3548,64 @@ def test_off_topic_novel_output_is_rewritten_before_first_chunk(monkeypatch):
         assistant = db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
         assert assistant is not None
         assert "夜色里" not in assistant.content
+    assert REGISTRY.get_sample_value(
+        "chat_stream_safety_rewrite_total", {"reason": "off_topic_output"},
+    ) >= 1
+
+
+def test_output_topic_check_fails_open_when_classifier_unavailable(monkeypatch):
+    """分类器挂了不能把正常的学科回答改写掉；改写计数也不能被记成跑题。"""
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    answer = "先回忆单调性的定义：在区间上任取两点，比较函数值的大小关系。" * 6
+
+    async def fake_stream(messages, fallback_text, **kwargs):
+        yield answer
+
+    async def classify(**kwargs):
+        return None if "待输出回复" in kwargs["question"] else "academic"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream)
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic", classify)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+    rewrites_before = sum(
+        sample.value
+        for metric in REGISTRY.collect() if metric.name == "chat_stream_safety_rewrite"
+        for sample in metric.samples if sample.name == "chat_stream_safety_rewrite_total"
+    )
+
+    with factory() as db:
+        response = asyncio.run(chat_router.stream_chat(
+            ChatRequest(subject="数学", message="函数单调性怎么判断"),
+            db, student, FakeRequest(),
+        ))
+        events = _parse_sse(asyncio.run(_read_streaming_response(response)))
+        assert events[-1][0] == "done"
+        streamed = "".join(data["content"] for name, data in events if name == "chunk")
+        assert streamed == answer
+        assistant = db.scalar(select(Message).where(Message.role == MessageRole.ASSISTANT))
+        assert assistant.content == answer
+
+    rewrites_after = sum(
+        sample.value
+        for metric in REGISTRY.collect() if metric.name == "chat_stream_safety_rewrite"
+        for sample in metric.samples if sample.name == "chat_stream_safety_rewrite_total"
+    )
+    assert rewrites_after == rewrites_before
+
+
+def test_topic_classifier_outcomes_are_counted(monkeypatch):
+    from backend.services.intent_classify_service import IntentClassifyService
+
+    class BrokenLLM:
+        async def complete_response(self, *args, **kwargs):
+            raise RuntimeError("provider down")
+
+    service = IntentClassifyService(llm=BrokenLLM(), store_backend=MemoryStore())
+    before = REGISTRY.get_sample_value("chat_topic_classify_total", {"result": "llm_fallback"}) or 0
+    assert asyncio.run(service.classify_topic(question="函数单调性怎么判断", subject="数学")) is None
+    assert REGISTRY.get_sample_value("chat_topic_classify_total", {"result": "llm_fallback"}) == before + 1
 
 
 def test_failed_turn_is_excluded_from_retry_history_and_guidance(monkeypatch):
@@ -3745,3 +3804,176 @@ def test_message_delivery_runtime_upgrade_is_idempotent(monkeypatch):
         saved = db.scalar(select(Message).where(Message.role == MessageRole.USER))
         assert saved.delivery_status == "completed"
         assert saved.failure_reason is None
+
+
+def test_topic_blocked_turn_is_hidden_from_student_history(monkeypatch):
+    """被话题过滤拦下的回合：库里留痕，学生历史里整轮不可见。"""
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+
+    async def fail_stream(messages, fallback_text, **kwargs):
+        raise AssertionError("blocked requests should not reach the LLM")
+        yield ""
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream)
+    monkeypatch.setattr(
+        chat_router, "_retrieve_context_for_chat", _fail_normal_chat_retrieval,
+    )
+
+    with factory() as db:
+        conversation = Conversation(student_id=student.id, subject="语文")
+        db.add(conversation)
+        db.flush()
+        conversation_id = conversation.id
+        db.add_all([
+            Message(conversation_id=conversation_id, role=MessageRole.USER, content="请分析这篇课文的修辞手法", turn_index=1),
+            Message(conversation_id=conversation_id, role=MessageRole.ASSISTANT, content="先找反复出现的句子。", turn_index=1),
+        ])
+        db.commit()
+
+    response = client.post("/api/chat/stream", json={
+        "subject": "语文",
+        "message": "你能给我讲一个关于星星的睡前故事吗",
+        "conversation_id": conversation_id,
+    })
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert events[-1][1]["content"] == chat_router.filter_service.refusal_text
+
+    # 数据库与审计能看到：学生那一问 + 拒绝话术都标记为 blocked 并留下原因。
+    with factory() as db:
+        blocked = db.scalars(
+            select(Message).where(Message.delivery_status == "blocked").order_by(Message.id)
+        ).all()
+        assert [message.role for message in blocked] == [MessageRole.USER, MessageRole.ASSISTANT]
+        assert blocked[0].failure_reason
+        assert blocked[1].content == chat_router.filter_service.refusal_text
+
+    # 学生视角：三个读取入口都不返回被拦下的回合。
+    visible = ["请分析这篇课文的修辞手法", "先找反复出现的句子。"]
+    listed = client.get("/api/chat/history").json()
+    assert len(listed) == 1
+    assert [item["content"] for item in listed[0]["messages"]] == visible
+    detail = client.get(f"/api/chat/history/{conversation_id}").json()
+    assert [item["content"] for item in detail["messages"]] == visible
+    assert all(item["delivery_status"] == "completed" for item in detail["messages"])
+    with_archived = client.get("/api/chat/history?include_archived=true").json()
+    assert [item["content"] for item in with_archived[0]["messages"]] == visible
+
+
+def test_retry_after_block_does_not_consume_turn_index_or_replay_refusal(monkeypatch):
+    """被拦下的一轮不算答疑回合：重试时回合序号不前进，拒绝话术也不被复读。"""
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+
+    async def fail_stream(messages, fallback_text, **kwargs):
+        raise AssertionError("blocked requests should not reach the LLM")
+        yield ""
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fail_stream)
+    monkeypatch.setattr(
+        chat_router, "_retrieve_context_for_chat", _fail_normal_chat_retrieval,
+    )
+
+    with factory() as db:
+        conversation = Conversation(student_id=student.id, subject="语文")
+        db.add(conversation)
+        db.flush()
+        conversation_id = conversation.id
+        db.add_all([
+            Message(conversation_id=conversation_id, role=MessageRole.USER, content="请分析这篇课文的修辞手法", turn_index=1),
+            Message(conversation_id=conversation_id, role=MessageRole.ASSISTANT, content="先找反复出现的句子。", turn_index=1),
+        ])
+        db.commit()
+
+    payload = {
+        "subject": "语文",
+        "message": "你能给我讲一个关于星星的睡前故事吗",
+        "conversation_id": conversation_id,
+    }
+    for _ in range(2):
+        response = client.post("/api/chat/stream", json=payload)
+        assert response.status_code == 200
+        assert _parse_sse(response.text)[-1][1]["content"] == chat_router.filter_service.refusal_text
+
+    with factory() as db:
+        blocked = db.scalars(
+            select(Message).where(Message.delivery_status == "blocked").order_by(Message.id)
+        ).all()
+        # 两次重试各留一问一答，但都停在第 2 回合——被拦下的回合不占序号。
+        assert len(blocked) == 4
+        assert {message.turn_index for message in blocked} == {2}
+        completed = db.scalars(
+            select(Message).where(Message.delivery_status == "completed")
+        ).all()
+        assert [message.turn_index for message in completed] == [1, 1]
+
+    detail = client.get(f"/api/chat/history/{conversation_id}").json()
+    assert [item["content"] for item in detail["messages"]] == [
+        "请分析这篇课文的修辞手法",
+        "先找反复出现的句子。",
+    ]
+
+
+def test_capacity_refusal_never_auto_archives_old_conversations():
+    """名额满了不替学生做主：哪怕旧对话已经很久没动，新建和恢复都直接 409，一个都不自动归档。"""
+    from datetime import UTC, datetime, timedelta
+
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+
+    stale_at = datetime.now(UTC) - timedelta(days=60)
+    with factory() as db:
+        stale_ids = []
+        for _ in range(10):
+            conversation = Conversation(student_id=student.id, subject="数学")
+            db.add(conversation)
+            db.flush()
+            stale_ids.append(conversation.id)
+            # after_insert 监听器会把这条旧时间写进 last_message_at。
+            db.add(Message(
+                conversation_id=conversation.id,
+                role=MessageRole.USER,
+                content="函数题怎么想",
+                turn_index=1,
+                created_at=stale_at,
+            ))
+        archived = Conversation(student_id=student.id, subject="数学", is_archived=True)
+        db.add(archived)
+        db.commit()
+        archived_id = archived.id
+
+    created = client.post("/api/chat/stream", json={"subject": "数学", "message": "函数单调性怎么判断"})
+    assert created.status_code == 409
+    assert created.json()["detail"]["message"].endswith("再新建对话。")
+
+    restored = client.patch(f"/api/chat/{archived_id}/archive", json={"is_archived": False})
+    assert restored.status_code == 409
+    assert restored.json()["detail"]["message"].endswith("再恢复这个对话。")
+
+    with factory() as db:
+        archived_ids = set(db.scalars(select(Conversation.id).where(Conversation.is_archived.is_(True))).all())
+        assert archived_ids == {archived_id}
+        assert len(db.scalars(select(Conversation.id)).all()) == 11
+
+
+def test_capacity_refusal_explains_why_and_what_to_do():
+    """409 要带上可执行的说明与结构化字段，前端据此直接提示学生。"""
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    with factory() as db:
+        db.add_all([Conversation(student_id=student.id, subject="数学") for _ in range(10)])
+        db.commit()
+
+    response = client.post("/api/chat/stream", json={"subject": "数学", "message": "函数单调性怎么判断"})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "conversation_capacity_exhausted"
+    assert detail["count"] == 10
+    assert detail["limit"] == 10
+    assert "auto_archived" not in detail
+    assert "归档或删除" in detail["message"]

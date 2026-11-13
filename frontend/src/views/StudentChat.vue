@@ -207,6 +207,7 @@ const { assetUrl, assetFailed, markAssetFailed, openAsset, preloadAssets, ensure
 const authStore = useAuthStore()
 
 const MAX_ACTIVE_CONVERSATIONS = 10
+const CONVERSATION_LIMIT_MESSAGE = `未归档对话已达上限 ${MAX_ACTIVE_CONVERSATIONS} 个，请先归档或删除一个旧对话`
 const sessionTitle = computed(() => conversations.value.find((item) => item.id === currentConversationId.value)?.topic || '把问题一步步想清楚')
 const currentConversation = computed(() => (
   conversations.value.find((item) => item.id === currentConversationId.value) || null
@@ -214,6 +215,7 @@ const currentConversation = computed(() => (
 const currentConversationArchived = computed(() => Boolean(currentConversation.value?.is_archived))
 const activeConversationCount = computed(() => conversations.value.filter((item) => !item.is_archived).length)
 const activeConversationLimitReached = computed(() => activeConversationCount.value >= MAX_ACTIVE_CONVERSATIONS)
+// 名额满时不替学生自动归档，直接提示由学生自己挑一个旧对话归档或删除；服务端同样校验并返回 409。
 const composerLocked = computed(() => (
   currentConversationArchived.value
   || currentConversationResolved.value
@@ -222,7 +224,7 @@ const composerLocked = computed(() => (
 const composerLockMessage = computed(() => {
   if (currentConversationArchived.value) return '归档对话仅可查看，请先恢复为未归档对话。'
   if (currentConversationResolved.value) return '已解决对话仅可查看，请先从“更多”中恢复为继续思考。'
-  if (!currentConversationId.value && activeConversationLimitReached.value) return '最多保留 10 个未归档对话，请先归档后再新建。'
+  if (!currentConversationId.value && activeConversationLimitReached.value) return `${CONVERSATION_LIMIT_MESSAGE}，再新建。`
   return ''
 })
 
@@ -789,7 +791,7 @@ async function loadIncentiveSummary() {
 
 function startNewConversation(options: { subject?: string } = {}): boolean {
   if (activeConversationLimitReached.value) {
-    ElMessage.warning('最多保留 10 个未归档对话，请先归档后再新建。')
+    ElMessage.warning(`${CONVERSATION_LIMIT_MESSAGE}，再新建。`)
     historyOpen.value = true
     showArchived.value = false
     return false
@@ -852,6 +854,10 @@ async function toggleConversationPin(item: ConversationSummary) {
 
 async function toggleConversationArchive(item: ConversationSummary) {
   if (sending.value || archivingConversationIds.value.has(item.id)) return
+  if (item.is_archived && activeConversationLimitReached.value) {
+    ElMessage.warning(`${CONVERSATION_LIMIT_MESSAGE}，再恢复这个对话。`)
+    return
+  }
   archivingConversationIds.value = new Set(archivingConversationIds.value).add(item.id)
   try {
     const { data } = await api.patch<ChatConversationRead>(`/chat/${item.id}/archive`, { is_archived: !item.is_archived })
@@ -860,7 +866,12 @@ async function toggleConversationArchive(item: ConversationSummary) {
     ElMessage.success(data.is_archived ? '对话已归档，可在“已归档”中查看和恢复' : '对话已恢复到历史记录')
   } catch (error) {
     const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-    ElMessage.error(typeof detail === 'string' ? detail : '归档设置未保存，请稍后重试')
+    const detailMessage = typeof detail === 'string'
+      ? detail
+      : (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string'
+          ? (detail as { message: string }).message
+          : '')
+    ElMessage.error(detailMessage || '归档设置未保存，请稍后重试')
   } finally {
     const pending = new Set(archivingConversationIds.value)
     pending.delete(item.id)
@@ -1505,6 +1516,11 @@ function chatFailureMessage(error: unknown): string {
   const status = requestStatus(error)
   if (status === 429) {
     return '当前提问较多，请稍等片刻再发送。草稿已保留。'
+  }
+  if (status === 409) {
+    // 409 的文案是后端按场景给出的可执行提示（对话数已满 / 已归档 / 已解决），
+    // 直接转给学生，不要替换成笼统的“稍后重试”。
+    return message ? `${message} 草稿已保留。` : '当前对话状态不允许发送，请先归档或恢复对话。草稿已保留。'
   }
   if (status === 403) {
     const banMessage = chatBanFailureMessage(error)
@@ -2416,12 +2432,15 @@ onMounted(async () => {
             type="button"
             class="primary-button"
             :disabled="sending || activeConversationLimitReached"
-            :title="activeConversationLimitReached ? '请先归档一个对话，再新建' : '新建对话'"
+            :title="activeConversationLimitReached ? '请先归档或删除一个旧对话，再新建' : '新建对话'"
             @click="startNewConversation()"
           >新建对话</button>
           <button type="button" class="ghost-button" @click="loadConversations">刷新</button>
         </div>
-        <p class="composer-helper">未归档对话 {{ activeConversationCount }} / {{ MAX_ACTIVE_CONVERSATIONS }}；归档后仍可查看。</p>
+        <p class="composer-helper">
+          未归档对话 {{ activeConversationCount }} / {{ MAX_ACTIVE_CONVERSATIONS }}；归档后仍可查看。
+          <template v-if="activeConversationLimitReached">已达上限，请先归档或删除一个旧对话，再新建或恢复。</template>
+        </p>
         <div class="history-drawer-actions" role="group" aria-label="筛选学习记录">
           <button type="button" class="ghost-button" :class="{ 'history-filter-active': !showArchived }" :aria-pressed="!showArchived" @click="showArchived = false">历史对话</button>
           <button type="button" class="ghost-button" :class="{ 'history-filter-active': showArchived }" :aria-pressed="showArchived" @click="showArchived = true">已归档</button>

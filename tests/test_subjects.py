@@ -53,7 +53,7 @@ def test_chat_entrypoints_reject_unsupported_subject_before_side_effects():
 
     invalid_recommendation = QuestionRecommendationRequest(subject="天文", question="恒星演化")
     with pytest.raises(HTTPException) as recommendation_error:
-        chat_router.recommend_questions(invalid_recommendation, None, None)
+        asyncio.run(chat_router.recommend_questions(invalid_recommendation, None, None))
     assert recommendation_error.value.status_code == 422
 
 

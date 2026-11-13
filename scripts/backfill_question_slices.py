@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 from pathlib import Path
-import shutil
+import sqlite3
 import sys
 from typing import Iterable
 
@@ -34,7 +34,9 @@ def _backup_db() -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     target = backup_dir / f"studyagent-before-question-slice-backfill-{stamp}.db"
-    shutil.copy2(source, target)
+    # 主库启用了 WAL，直接拷文件会漏掉尚未 checkpoint 的写入；用 backup API 拿一致快照。
+    with sqlite3.connect(source) as src, sqlite3.connect(target) as dst:
+        src.backup(dst)
     return target
 
 

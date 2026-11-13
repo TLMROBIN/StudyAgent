@@ -391,14 +391,19 @@
           "refId": "A"
         },
         {
-          "expr": "increase(chat_stream_safety_rewrite_total[1h])",
-          "legendFormat": "Safety rewrites",
+          "expr": "sum by (reason) (increase(chat_stream_safety_rewrite_total[1h]))",
+          "legendFormat": "Safety rewrites: {{reason}}",
           "refId": "B"
         },
         {
           "expr": "increase(rate_limit_rejected_total[1h])",
           "legendFormat": "Rate limit rejected",
           "refId": "C"
+        },
+        {
+          "expr": "sum(increase(chat_topic_classify_total{result=~\"llm_fallback|llm_invalid\"}[1h]))",
+          "legendFormat": "Topic classifier unavailable",
+          "refId": "D"
         }
       ],
       "title": "Safety Events (1h)",

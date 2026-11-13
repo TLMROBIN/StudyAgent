@@ -106,6 +106,7 @@ from backend.services.conversation_context import image_context_record, stored_i
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 MAX_ACTIVE_CONVERSATIONS = 10
+BLOCKED_DELIVERY_STATUS = "blocked"
 
 
 def _active_conversation_count(db: DbSession, student_id: int) -> int:
@@ -118,11 +119,25 @@ def _active_conversation_count(db: DbSession, student_id: int) -> int:
     ) or 0
 
 
-def _ensure_active_conversation_capacity(db: DbSession, student_id: int) -> None:
+def _ensure_active_conversation_capacity(db: DbSession, student_id: int, *, action: str) -> None:
+    """名额满了直接拒绝并说明怎么做；不替学生自动归档任何对话——留哪些由学生自己决定。"""
     # PostgreSQL 串行化同一学生的新建/恢复；SQLite 由单写事务提供等价约束。
     db.scalar(select(User.id).where(User.id == student_id).with_for_update())
-    if _active_conversation_count(db, student_id) >= MAX_ACTIVE_CONVERSATIONS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="最多保留10个未归档对话，请先归档后再新建或恢复")
+    active_count = _active_conversation_count(db, student_id)
+    if active_count < MAX_ACTIVE_CONVERSATIONS:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "conversation_capacity_exhausted",
+            "message": (
+                f"未归档对话已达上限 {MAX_ACTIVE_CONVERSATIONS} 个，"
+                f"请先在学习记录里归档或删除一个旧对话，再{action}。"
+            ),
+            "count": active_count,
+            "limit": MAX_ACTIVE_CONVERSATIONS,
+        },
+    )
 
 STREAM_HEARTBEAT_SECONDS = 15
 STREAM_FORCE_FLUSH_CHARS = 96
@@ -476,6 +491,19 @@ def _message_load_option():
     return selectinload(Conversation.messages).selectinload(Message.attachment)
 
 
+def _student_conversation_read(conversation: Conversation) -> ConversationRead:
+    """学生视角的对话视图：被话题过滤拦下的回合整轮不出现在历史里。
+
+    数据仍留在库里（审计可查），只是不发给学生。拒绝助手回复同样标记为
+    blocked，所以这里按 `delivery_status` 过滤就够，不需要按 turn_index 配对——
+    同一回合重试会留下多行相同 turn_index，配对反而会认错行。
+    """
+    read = ConversationRead.model_validate(conversation)
+    if read.messages:
+        read.messages = [item for item in read.messages if item.delivery_status != BLOCKED_DELIVERY_STATUS]
+    return read
+
+
 async def _validate_stream_answer(
     text: str,
     *,
@@ -494,11 +522,21 @@ async def _validate_stream_answer(
                 subject=subject,
                 model_key=model_key,
             )
-            if verdict != "academic":
-                return OutputValidation(False, ["off_topic_output" if verdict == "off_topic" else "topic_validation_unavailable"])
+            if verdict == "off_topic":
+                return OutputValidation(False, ["off_topic_output"])
+            if verdict is None:
+                # 分类器不可用时放行规则校验结果（fail-open）：宁可漏检一段，也不能在
+                # LLM 抖动时把整批正常答疑中途改写掉。故障见 chat_topic_classify_total。
+                logger.warning("output_topic_check_unavailable subject=%s", subject)
         return validation
     finally:
         chat_output_validation_seconds.observe(perf_counter() - started)
+
+
+def _record_stream_safety_rewrite(validation: OutputValidation, *, subject: str) -> None:
+    reason = validation.issues[0] if validation.issues else "unknown"
+    chat_stream_safety_rewrite_total.labels(reason=reason).inc()
+    logger.warning("stream_safety_rewrite subject=%s issues=%s", subject, ",".join(validation.issues))
 
 
 def _has_academic_history(history_pairs: list[tuple[str, str]], subject: str) -> bool:
@@ -538,12 +576,15 @@ def _history_pairs_before_turn(conversation: Conversation, turn_index: int) -> l
 
 
 def _assistant_message_for_turn(db: DbSession, conversation_id: int, turn_index: int) -> Message | None:
+    # 被话题过滤拦下的回合其回复也标记为 blocked：既不能在历史里露出，
+    # 也不能在重试同一回合时被当成"已回复"而永久复读拒绝话术。
     return db.scalar(
         select(Message)
         .where(
             Message.conversation_id == conversation_id,
             Message.turn_index == turn_index,
             Message.role == MessageRole.ASSISTANT,
+            Message.delivery_status != BLOCKED_DELIVERY_STATUS,
         )
         .order_by(Message.id.desc())
         .limit(1)
@@ -1406,7 +1447,7 @@ def _ensure_conversation(db: DbSession, student_id: int, payload: ChatRequest) -
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已解决对话仅可查看，请先恢复为继续思考")
         return conversation
 
-    _ensure_active_conversation_capacity(db, student_id)
+    _ensure_active_conversation_capacity(db, student_id, action="新建对话")
     conversation = Conversation(student_id=student_id, subject=payload.subject)
     db.add(conversation)
     db.commit()
@@ -1456,6 +1497,18 @@ def _persist_user_turn(
     if attachment_record:
         db.refresh(attachment_record)
     return user_message, attachment_record
+
+
+def _mark_turn_blocked(db: DbSession, user_message: Message, *, block_reason: str) -> None:
+    """把被拦下的学生消息标记为 blocked：数据库与审计可见，学生历史里不可见。
+
+    直接改 `_persist_user_turn` 返回的 ORM 对象，不按 turn_index 重查——
+    同一回合重试会产生多行，重查会命中错误的那一行。
+    """
+    user_message.delivery_status = BLOCKED_DELIVERY_STATUS
+    user_message.failure_reason = block_reason[:500]
+    db.add(user_message)
+    db.commit()
 
 
 def _normalize_chat_message_content(message: str, *, has_attachment: bool) -> str:
@@ -1633,7 +1686,7 @@ def list_conversations(db: DbSession, current_user: CurrentUser, include_archive
     if not include_archived:
         query = query.where(Conversation.is_archived.is_(False))
     conversations = db.scalars(query).all()
-    return [ConversationRead.model_validate(item) for item in conversations]
+    return [_student_conversation_read(item) for item in conversations]
 
 
 @router.patch("/{conversation_id}/archive", response_model=ConversationRead)
@@ -1646,11 +1699,11 @@ def archive_conversation(conversation_id: int, payload: ArchiveConversationReque
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conversation.is_archived and not payload.is_archived:
-        _ensure_active_conversation_capacity(db, current_user.id)
+        _ensure_active_conversation_capacity(db, current_user.id, action="恢复这个对话")
     conversation.is_archived = payload.is_archived
     db.commit()
     db.refresh(conversation)
-    return ConversationRead.model_validate(conversation)
+    return _student_conversation_read(conversation)
 
 
 @router.patch("/{conversation_id}/pin", response_model=ConversationRead)
@@ -1665,7 +1718,7 @@ def pin_conversation(conversation_id: int, payload: PinConversationRequest, db: 
     conversation.is_pinned = payload.is_pinned
     db.commit()
     db.refresh(conversation)
-    return ConversationRead.model_validate(conversation)
+    return _student_conversation_read(conversation)
 
 
 @router.get("/history/{conversation_id}", response_model=ConversationRead)
@@ -1681,7 +1734,7 @@ def get_conversation(conversation_id: int, db: DbSession, current_user: CurrentU
     )
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    return ConversationRead.model_validate(conversation)
+    return _student_conversation_read(conversation)
 
 
 @router.get("/attachments/{attachment_id}")
@@ -1767,7 +1820,7 @@ def resolve_conversation(
                 ).as_dict()
     db.commit()
     db.refresh(conversation)
-    return ConversationRead.model_validate(conversation).model_copy(update={"incentive": grant})
+    return _student_conversation_read(conversation).model_copy(update={"incentive": grant})
 
 
 @router.delete("/{conversation_id}")
@@ -1798,7 +1851,7 @@ def delete_conversation(conversation_id: int, db: DbSession, current_user: Curre
 
 
 @router.post("/recommendations", response_model=list[QuestionRecommendationRead])
-def recommend_questions(
+async def recommend_questions(
     payload: QuestionRecommendationRequest,
     db: DbSession,
     current_user: CurrentUser,
@@ -1806,19 +1859,21 @@ def recommend_questions(
     if not is_valid_subject(payload.subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     ensure_chat_allowed(current_user)
-    recommendation_query = _resolve_recommendation_query(db, current_user, payload)
-    decision = asyncio.run(_check_chat_question(
+    # 话题分类要在事件循环上 await；DB 查询与向量检索是同步阻塞的，放进线程池，避免卡住其他请求。
+    recommendation_query = await asyncio.to_thread(_resolve_recommendation_query, db, current_user, payload)
+    decision = await _check_chat_question(
         recommendation_query,
         payload.subject,
         history_pairs=[],
         model_key=None,
-    ))
+    )
     if not decision.allowed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is not a supported academic prompt")
 
     subject = decision.subject or payload.subject
     include_solutions = bool(payload.include_solutions and current_user.role in {UserRole.TEACHER, UserRole.ADMIN})
-    rows = rag_service.recommend_questions(
+    rows = await asyncio.to_thread(
+        rag_service.recommend_questions,
         db,
         subject,
         recommendation_query,
@@ -1984,6 +2039,7 @@ async def _stream_chat(
     image_content: bytes | None = None
     stored_attachment: StoredChatAttachment | None = None
     attachment_record: ChatMessageAttachment | None = None
+    persisted_user_message: Message | None = None
     image_understanding: ImageUnderstandingResult | None = None
     user_message_content = _normalize_chat_message_content(payload.message, has_attachment=has_image_turn)
     image_sha256: str | None = None
@@ -2111,7 +2167,7 @@ async def _stream_chat(
             if conversation is None:
                 request.state.chat_pending_attachment_key = stored_attachment.storage_key
         if conversation is not None:
-            _, attachment_record = _persist_user_turn(
+            persisted_user_message, attachment_record = _persist_user_turn(
                 db,
                 conversation=conversation,
                 student_id=current_user.id,
@@ -2174,7 +2230,13 @@ async def _stream_chat(
     ):
         bypassed_role = role_snapshot.bypassed()
         short_circuit_text = _build_short_circuit_reply(payload.subject, image_understanding)
+        # 图片与学科无关属于拒绝，不是答疑回合：学生历史里不应留下这一问一答。
+        # 图片看不清（is_academic 为真）是正常的引导提示，仍然保留。
+        blocked_turn = not (image_understanding and image_understanding.is_academic)
+        turn_blocked_status = BLOCKED_DELIVERY_STATUS if blocked_turn else "completed"
         turn_guidance_stage = conversation.guidance_stage if conversation is not None else GuidanceStage.INITIAL
+        if blocked_turn and persisted_user_message is not None:
+            _mark_turn_blocked(db, persisted_user_message, block_reason="image_off_topic")
         if conversation is not None:
             existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
             if not existing_assistant:
@@ -2182,6 +2244,7 @@ async def _stream_chat(
                     conversation_id=conversation.id,
                     role=MessageRole.ASSISTANT,
                     content=short_circuit_text,
+                    delivery_status=turn_blocked_status,
                     turn_index=user_turn_index,
                     guidance_stage=turn_guidance_stage,
                     llm_model_key=selected_model_key,
@@ -2234,6 +2297,9 @@ async def _stream_chat(
         bypassed_role = role_snapshot.bypassed()
         filter_blocked_total.inc()
         refusal = filter_service.refusal_text
+        # 拒绝不是答疑回合：这一问一答对学生历史隐藏（数据库与审计仍保留）。
+        if persisted_user_message is not None:
+            _mark_turn_blocked(db, persisted_user_message, block_reason=decision.reason or "topic_blocked")
         turn_guidance_stage = conversation.guidance_stage if conversation is not None else GuidanceStage.INITIAL
         if conversation is not None:
             existing_assistant = _assistant_message_for_turn(db, conversation.id, user_turn_index)
@@ -2242,6 +2308,7 @@ async def _stream_chat(
                     conversation_id=conversation.id,
                     role=MessageRole.ASSISTANT,
                     content=refusal,
+                    delivery_status=BLOCKED_DELIVERY_STATUS,
                     turn_index=user_turn_index,
                     guidance_stage=turn_guidance_stage,
                     llm_model_key=selected_model_key,
@@ -2287,7 +2354,7 @@ async def _stream_chat(
             )
             chat_attachment_service.delete(pending_storage_key)
             request.state.chat_pending_attachment_key = None
-        _, attachment_record = _persist_user_turn(
+        persisted_user_message, attachment_record = _persist_user_turn(
             db,
             conversation=conversation,
             student_id=current_user.id,
@@ -3148,7 +3215,7 @@ async def _stream_chat(
                     if check_topic:
                         next_topic_check_at = max(len(candidate_text), 180) + 240
                     if not validation.allowed:
-                        chat_stream_safety_rewrite_total.inc()
+                        _record_stream_safety_rewrite(validation, subject=subject)
                         rewritten_text = _compose_safe_rewrite(
                             emitted_text,
                             socratic_service.safe_guided_rewrite(prompt_question, subject, prompt.stage, image_related=has_image_turn),
@@ -3213,7 +3280,7 @@ async def _stream_chat(
                     if check_topic:
                         next_topic_check_at = max(len(candidate_text), 180) + 240
                     if not validation.allowed:
-                        chat_stream_safety_rewrite_total.inc()
+                        _record_stream_safety_rewrite(validation, subject=subject)
                         rewritten_text = _compose_safe_rewrite(
                             emitted_text,
                             socratic_service.safe_guided_rewrite(prompt_question, subject, prompt.stage, image_related=has_image_turn),
@@ -3459,7 +3526,8 @@ def _set_user_turn_delivery_status(
         return
     try:
         user_message = _user_message_for_turn(db, conversation_id, turn_index)
-        if user_message is None or user_message.delivery_status == "completed":
+        # completed / blocked 都是终态：兜底的"流以 done 结束即成功"不能把被拦下的回合复活。
+        if user_message is None or user_message.delivery_status in {"completed", BLOCKED_DELIVERY_STATUS}:
             return
         user_message.delivery_status = delivery_status
         user_message.failure_reason = None if delivery_status == "completed" else (failure_reason or delivery_status)[:500]

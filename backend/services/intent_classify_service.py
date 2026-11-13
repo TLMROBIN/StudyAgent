@@ -17,7 +17,7 @@ import hashlib
 import logging
 
 from backend.services.llm_service import LLMService, llm_service
-from backend.services.metrics_service import chat_intent_classify_total
+from backend.services.metrics_service import chat_intent_classify_total, chat_topic_classify_total
 from backend.services.store_service import BaseStore, store
 from backend.services.subject_guidance_service import (
     SUBJECT_STRATEGY_RULES,
@@ -56,6 +56,7 @@ class IntentClassifyService:
         except Exception:
             cached = None
         if cached in {"academic", "off_topic"}:
+            chat_topic_classify_total.labels(result="hit_cache").inc()
             return cached
         messages = [
             {
@@ -80,14 +81,17 @@ class IntentClassifyService:
             )
         except Exception as exc:
             logger.warning("topic_classify_failed subject=%s error_type=%s", subject, type(exc).__name__)
+            chat_topic_classify_total.labels(result="llm_fallback").inc()
             return None
         verdict = (raw or "").strip().strip("`\"'。.，, ").lower()
         if verdict not in {"academic", "off_topic"}:
+            chat_topic_classify_total.labels(result="llm_invalid").inc()
             return None
         try:
             self.store_backend.set(cache_key, verdict, ttl_seconds=self.CACHE_TTL_SECONDS)
         except Exception:
             pass
+        chat_topic_classify_total.labels(result="llm_ok").inc()
         return verdict
 
     async def classify(

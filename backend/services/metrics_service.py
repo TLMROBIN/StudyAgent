@@ -39,6 +39,7 @@ chat_stream_disconnect_total = Counter("chat_stream_disconnect_total", "Disconne
 chat_stream_safety_rewrite_total = Counter(
     "chat_stream_safety_rewrite_total",
     "Stream responses rewritten due to unsafe output",
+    ["reason"],
 )
 llm_stream_provider_failure_total = Counter(
     "llm_stream_provider_failure_total",
@@ -74,6 +75,13 @@ chat_fact_mode_total = Counter("chat_fact_mode_total", "Fact-mode direct answers
 chat_intent_classify_total = Counter(
     "chat_intent_classify_total",
     "Subject teaching-mode intent classification outcomes",
+    ["result"],
+)
+# 话题安全分类（输入候选 + 输出抽检）。llm_fallback/llm_invalid 升高说明分类器不可用，
+# 而不是学生集体跑题；与 chat_stream_safety_rewrite_total{reason} 配合区分两者。
+chat_topic_classify_total = Counter(
+    "chat_topic_classify_total",
+    "Topic safety classification outcomes",
     ["result"],
 )
 chat_practice_review_total = Counter("chat_practice_review_total", "Practice answer review turns", ["subject"])

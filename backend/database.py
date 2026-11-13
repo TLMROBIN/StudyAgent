@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from backend.config import get_settings
@@ -30,6 +30,25 @@ engine = create_engine(
     pool_recycle=1800,
     hide_parameters=True,
 )
+
+SQLITE_BUSY_TIMEOUT_MS = 5000
+
+
+def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+    # 生产仍跑 SQLite：WAL 让读不再被写阻塞（导入、激励结算等写操作期间历史照常加载）；
+    # busy_timeout 让并发写排队等待，而不是立刻抛 "database is locked"。
+    # WAL 模式下未 checkpoint 的数据在 -wal 文件里：备份请用 sqlite3 backup API，别直接拷 .db。
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    finally:
+        cursor.close()
+
+
+if engine.dialect.name == "sqlite" and engine.url.database not in {None, "", ":memory:"}:
+    event.listen(engine, "connect", _configure_sqlite_connection)
+
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
 
 
