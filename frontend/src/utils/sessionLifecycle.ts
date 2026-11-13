@@ -4,7 +4,7 @@ import type { Router } from 'vue-router'
 
 import { useAuthStore } from '../stores/auth'
 import { SESSION_EXPIRED_EVENT, redirectToSsoLogoutIfNeeded } from './authSession'
-import { forceLoginRedirect } from './navigation'
+import { forceLoginRedirect, isLoginPath } from './navigation'
 
 let installed = false
 
@@ -26,9 +26,9 @@ export function installSessionLifecycle(pinia: Pinia, router: Router) {
       ? detail.message
       : '登录已过期，请重新登录'
 
-    if (router.currentRoute.value.path !== '/login') {
+    if (!isLoginPath(router.currentRoute.value.path)) {
       await router.replace('/login')
-      if (router.currentRoute.value.path !== '/login') {
+      if (!isLoginPath(router.currentRoute.value.path)) {
         forceLoginRedirect()
         return
       }
