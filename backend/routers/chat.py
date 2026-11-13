@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.dependencies import CurrentUser, DbSession
 from backend.services.chat_permission_service import ensure_chat_allowed
@@ -74,6 +75,7 @@ from backend.services.metrics_service import (
     chat_queue_wait_seconds,
     chat_rag_retrieval_seconds,
     chat_role_request_total,
+    chat_topic_classify_total,
     chat_role_resolution_seconds,
     chat_request_total,
     chat_suggested_replies_seconds,
@@ -151,6 +153,13 @@ rag_session_store: BaseStore = store
 ANSWER_SUBMISSION_RE = re.compile(r"[A-Da-d]|\d|[=≈]|^是|^不是|^对|^错|^能|^不能|^正确|^不正确")
 ANSWER_REQUEST_RE = re.compile(r"直接(告诉|给|说)|答案是什么|是多少|不会|不知道|怎么做")
 SHORT_FOLLOWUP_BLOCK_RE = re.compile(r"怎么|为什么|什么是|讲|解释|求|计算|证明|答案|不会|不知道|直接|再来|出一道|推荐")
+CONTEXTUAL_QUICK_REPLY_RE = re.compile(
+    r"(?:对|不对|是|不是|能|不能|可以|不可以|会|不会|没有|不知道|"
+    r"(?:我)?(?:还)?(?:不懂|没懂|没看懂)|(?:选)?[a-d])[。.!！]?"
+)
+ORDINAL_TOPIC_REPLY_RE = re.compile(r"第[一二三四五六七八九十1-9]+(?:个|条|种|项)?(名词|代词|句子|选项|段落|单词|步骤)")
+TOPIC_QUESTION_CHOICE_RE = re.compile(r"(?:哪个|哪条|哪种|哪项|哪一(?:个|条|种|项|段|步)?)(名词|代词|句子|选项|段落|单词|步骤)")
+TOPIC_VERIFIED_TTL_SECONDS = 6 * 3600
 SHORT_FOLLOWUP_PROMPT_MARKERS = ("？", "?", "请你", "你先", "试着", "能不能", "能否", "哪些", "什么条件", "是否", "吗")
 QUESTION_RESOURCE_TYPES = {ResourceType.EXERCISE.value, ResourceType.QUESTION_SET.value}
 
@@ -548,6 +557,35 @@ def _has_academic_history(history_pairs: list[tuple[str, str]], subject: str) ->
     )
 
 
+def _latest_topic_turn(
+    messages: list[Message], *, before_turn: int
+) -> tuple[Message | None, Message | None]:
+    """Use message order because rejected retries can reuse the same turn index."""
+    latest_user = next((
+        message for message in reversed(messages)
+        if message.role == MessageRole.USER
+        and (
+            message.delivery_status == "completed" and message.turn_index < before_turn
+            or message.delivery_status == BLOCKED_DELIVERY_STATUS and message.turn_index <= before_turn
+        )
+    ), None)
+    if latest_user is None or latest_user.delivery_status != "completed":
+        return latest_user, None
+    assistant = next((
+        message for message in reversed(messages)
+        if message.id > latest_user.id
+        and message.turn_index == latest_user.turn_index
+        and message.role == MessageRole.ASSISTANT
+        and message.delivery_status == "completed"
+    ), None)
+    return latest_user, assistant
+
+
+def _topic_verification_key(message: Message) -> str:
+    fingerprint = sha256(message.content.encode()).hexdigest()[:24]
+    return f"chat:topic_verified:{message.conversation_id}:{message.id}:{fingerprint}"
+
+
 async def _check_chat_question(
     question: str,
     subject: str,
@@ -555,17 +593,108 @@ async def _check_chat_question(
     history_pairs: list[tuple[str, str]],
     has_image_turn: bool = False,
     model_key: str | None = None,
+    latest_topic_turn: tuple[Message | None, Message | None] | None = None,
+    allow_fast_accept: bool = True,
 ) -> FilterDecision:
+    if latest_topic_turn is not None and not has_image_turn:
+        return await _check_contextual_topic(
+            question, subject, latest_topic_turn, history_pairs=history_pairs, model_key=model_key,
+        )
+
     decision = filter_service.check_question(
         question,
         subject,
         allow_contextual_short_followup=not has_image_turn and _has_academic_history(history_pairs, subject),
     )
     if decision.allowed and decision.reason.endswith("_candidate"):
-        topic = await intent_classify_service.classify_topic(question=question, subject=subject, model_key=model_key)
+        topic = await intent_classify_service.classify_topic(
+            question=question, subject=subject, model_key=model_key,
+            context=next((text for role, text in reversed(history_pairs) if role == MessageRole.USER.value), None),
+            allow_fast_accept=allow_fast_accept and not has_image_turn,
+        )
         if topic != "academic":
             return FilterDecision(False, "topic_classifier_rejected" if topic == "off_topic" else "topic_classifier_unavailable")
     return decision
+
+
+def _matches_verified_topic_reply(normalized: str, previous_prompt: str) -> bool:
+    # Only use the tutor's final question. A word elsewhere in a long answer is weak evidence.
+    final_question = re.search(r"(?:^|[。！？!?])([^。！？!?]{1,160})[？?]\s*$", previous_prompt)
+    if not final_question:
+        return False
+    if CONTEXTUAL_QUICK_REPLY_RE.fullmatch(normalized):
+        return True
+    reply = normalized.rstrip("。.!！")
+    question = filter_service.normalize_text(final_question.group(1))
+    ordinal = ORDINAL_TOPIC_REPLY_RE.fullmatch(reply)
+    if ordinal and ordinal.group(1) in TOPIC_QUESTION_CHOICE_RE.findall(question):
+        return True
+    return bool(
+        re.fullmatch(r"[\u4e00-\u9fff]{2,12}", reply)
+        and not SHORT_FOLLOWUP_BLOCK_RE.search(reply)
+        and reply in question
+    )
+
+
+async def _check_contextual_topic(
+    question: str,
+    subject: str,
+    latest_turn: tuple[Message | None, Message | None],
+    *,
+    history_pairs: list[tuple[str, str]],
+    model_key: str | None,
+) -> FilterDecision:
+    latest_user, assistant = latest_turn
+    decision = filter_service.check_question(question, subject)
+    if decision.reason in {"empty_question", "blocked_non_subject"}:
+        return decision
+    if decision.allowed and not decision.reason.endswith("_candidate"):
+        return decision
+
+    after_block = latest_user is not None and latest_user.delivery_status == BLOCKED_DELIVERY_STATUS
+    previous_prompt = ""
+    if assistant is not None and filter_service.refusal_text not in assistant.content:
+        previous_prompt = assistant.content
+    # Reuse the existing short-turn detector to choose contextual review only.
+    # A fixed reply can skip review only directly after a verified topic and a tutor question.
+    normalized = filter_service.normalize_text(question)
+    if after_block:
+        # Only a real prior exercise can make a context-dependent turn eligible after a refusal.
+        previous_prompt = _previous_assistant_prompt(history_pairs)
+    contextual = bool(previous_prompt) and filter_service.is_contextual_followup(normalized)
+    if not (decision.allowed or contextual):
+        return decision
+
+    previous_source = None
+    if latest_user is not None and not after_block:
+        try:
+            previous_source = store.get(_topic_verification_key(latest_user))
+        except Exception:
+            logger.warning("topic_followup_verification_cache_unavailable")
+    if (
+        contextual and previous_source in {"llm", "verified_followup"}
+        and _matches_verified_topic_reply(normalized, previous_prompt)
+    ):
+        # Permit one additional grounded reply; the following turn must establish a fresh decision.
+        reason = "verified_context_followup" if previous_source == "llm" else "verified_context_followup_limit"
+        chat_topic_classify_total.labels(result="verified_context_followup").inc()
+        return FilterDecision(True, reason, subject)
+
+    # A Laya-only pass does not renew itself across successive candidate turns.
+    must_review = contextual or after_block or (latest_user is not None and previous_source != "llm")
+    previous_question = latest_user.content if latest_user and not after_block else None
+    if after_block and contextual:
+        # A block disables the shortcut, but the student can return to the prior exercise.
+        previous_question = next((text for role, text in reversed(history_pairs) if role == MessageRole.USER.value), None)
+    topic = await intent_classify_service.classify_topic_with_source(
+        question=question, subject=subject, model_key=model_key,
+        context=previous_question,
+        followup_prompt=previous_prompt if must_review else None,
+        contextual_model_eligible=contextual and not after_block and previous_source == "llm",
+    )
+    if topic.label != "academic":
+        return FilterDecision(False, "topic_classifier_rejected" if topic.label == "off_topic" else "topic_classifier_unavailable")
+    return FilterDecision(True, "topic_verified" if topic.verified_by_llm else "topic_model_academic", decision.subject or subject)
 
 
 def _history_pairs_before_turn(conversation: Conversation, turn_index: int) -> list[tuple[str, str]]:
@@ -1867,6 +1996,7 @@ async def recommend_questions(
         payload.subject,
         history_pairs=[],
         model_key=None,
+        allow_fast_accept=False,
     )
     if not decision.allowed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question is not a supported academic prompt")
@@ -2281,12 +2411,18 @@ async def _stream_chat(
         and conversation.active_practice
         and _looks_like_answer_submission(payload.message)
     )
+    contextual_gate = get_settings().topic_contextual_followup_enabled
+    latest_topic_turn = (
+        _latest_topic_turn(conversation.messages, before_turn=user_turn_index)
+        if contextual_gate and conversation is not None else (None, None)
+    )
     decision = await _check_chat_question(
         filter_question,
         payload.subject,
         history_pairs=history_pairs,
         has_image_turn=has_image_turn,
         model_key=selected_model_key,
+        latest_topic_turn=latest_topic_turn if contextual_gate else None,
     )
     if (
         not decision.allowed
@@ -2393,11 +2529,23 @@ async def _stream_chat(
                 role_snapshot=role_snapshot.replay_snapshot(),
             )
 
+    verified_message = persisted_user_message or (replayed_user_message if replay_state else None)
+    topic_source = {
+        "topic_verified": "llm",
+        "topic_model_academic": "laya",
+        "verified_context_followup": "verified_followup",
+    }.get(decision.reason)
+    if topic_source is not None and verified_message is not None:
+        try:
+            store.set(_topic_verification_key(verified_message), topic_source, ttl_seconds=TOPIC_VERIFIED_TTL_SECONDS)
+        except Exception:
+            logger.warning("topic_followup_verification_cache_unavailable")
+
     subject = decision.subject or payload.subject
     prompt_question = _build_prompt_question(payload_message=payload.message, subject=subject, understanding=image_understanding)
     followup_context = (
         None
-        if has_image_turn or practice_review_turn
+        if has_image_turn or practice_review_turn or (contextual_gate and not latest_topic_turn[1])
         else _short_followup_context(
             subject=subject,
             current_answer=prompt_question,

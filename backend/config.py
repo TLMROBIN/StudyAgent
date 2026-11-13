@@ -163,6 +163,23 @@ class Settings(BaseSettings):
     # 非法 JSON 时告警并回退内置表），如 '{"数学":{"question_bank_bonus":0}}'
     rag_subject_policies_json: str = Field(default="", alias="RAG_SUBJECT_POLICIES")
 
+    # 本地话题决策模型（微调后的 Laya / bge-m3 分类头，scripts/topic_model/serve.py 提供）。
+    # off=不调用；shadow=并行观察；accept_only=只允许模型放行；enforce=高/低置信直接定案，
+    # 中间档与模型故障仍回退 LLM 分类。阈值须用离线评估结果校准，误拒比漏放代价更高。
+    topic_contextual_followup_enabled: bool = Field(default=False, alias="TOPIC_CONTEXTUAL_FOLLOWUP_ENABLED")
+    topic_model_mode: str = Field(default="off", alias="TOPIC_MODEL_MODE")
+    topic_model_url: str = Field(default="", alias="TOPIC_MODEL_URL")
+    topic_model_unix_socket: str = Field(default="", alias="TOPIC_MODEL_UNIX_SOCKET")
+    topic_model_timeout_seconds: float = Field(default=0.3, alias="TOPIC_MODEL_TIMEOUT_SECONDS")
+    topic_model_accept_threshold: float = Field(default=0.9, alias="TOPIC_MODEL_ACCEPT_THRESHOLD")
+    topic_model_reject_threshold: float = Field(default=0.05, alias="TOPIC_MODEL_REJECT_THRESHOLD")
+    topic_model_enforce_output: bool = Field(default=False, alias="TOPIC_MODEL_ENFORCE_OUTPUT")
+    topic_contextual_model_url: str = Field(default="", alias="TOPIC_CONTEXTUAL_MODEL_URL")
+    topic_contextual_model_unix_socket: str = Field(default="", alias="TOPIC_CONTEXTUAL_MODEL_UNIX_SOCKET")
+    topic_contextual_model_accept_threshold: float = Field(
+        default=0.5848, ge=0, le=1, alias="TOPIC_CONTEXTUAL_MODEL_ACCEPT_THRESHOLD"
+    )
+
     default_school_name: str = Field(default="示例高中", alias="DEFAULT_SCHOOL_NAME")
     default_semester: str = Field(default="2025-2026-2", alias="DEFAULT_SEMESTER")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

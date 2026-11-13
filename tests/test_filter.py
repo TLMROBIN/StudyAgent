@@ -102,6 +102,11 @@ def test_filter_normalizes_fullwidth_and_embedded_whitespace():
         assert not filter_service.check_question(prompt, "物理").allowed
 
 
+def test_organic_reaction_question_reaches_topic_classifier():
+    decision = filter_service.check_question("怎样区分加成反应和取代反应？", "化学")
+    assert decision.allowed and decision.reason == "keyword_candidate"
+
+
 def test_contextual_short_followup_requires_real_academic_history():
     assert filter_service.check_question("1+1等于几", "数学").allowed
     assert not filter_service.check_question("第三步咋来的", "数学").allowed

@@ -17,6 +17,7 @@ from backend.routers import admin, agent_config as agent_config_router, agent_ro
 from backend.services.auth_service import auth_service
 from backend.services.chat_image_understanding_service import stop_paddleocr_worker, warmup_paddleocr_worker
 from backend.services.gpu_runtime import log_gpu_runtime_status
+from backend.services.intent_classify_service import intent_classify_service
 from backend.services.llm_service import llm_service
 from backend.services.metrics_service import render_metrics
 from backend.services.rag_service import rag_service
@@ -96,7 +97,10 @@ async def lifespan(_: FastAPI):
         try:
             stop_paddleocr_worker()
         finally:
-            await llm_service.aclose()
+            try:
+                await intent_classify_service.aclose()
+            finally:
+                await llm_service.aclose()
 
 
 settings = get_settings()

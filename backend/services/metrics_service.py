@@ -84,6 +84,22 @@ chat_topic_classify_total = Counter(
     "Topic safety classification outcomes",
     ["result"],
 )
+# 本地话题模型：result=ok/timeout/error；agreement 仅 shadow 模式记录与 LLM 判定是否一致。
+chat_topic_model_total = Counter(
+    "chat_topic_model_total",
+    "Local topic model calls",
+    ["mode", "kind", "result"],
+)
+chat_topic_model_agreement_total = Counter(
+    "chat_topic_model_agreement_total",
+    "Shadow comparison between local topic model band and LLM verdict",
+    ["kind", "model_band", "llm_verdict"],
+)
+chat_topic_model_seconds = Histogram(
+    "chat_topic_model_seconds",
+    "Local topic model latency",
+    buckets=(0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0),
+)
 chat_practice_review_total = Counter("chat_practice_review_total", "Practice answer review turns", ["subject"])
 incentive_events_total = Counter(
     "incentive_events_total",

@@ -4066,3 +4066,167 @@ def test_input_topic_classifier_outage_preserves_retry(monkeypatch, existing_con
         completed = db.scalars(select(Message).where(Message.delivery_status == "completed")).all()
         assert {message.turn_index for message in completed} == {1}
         assert [message.role for message in completed] == [MessageRole.USER, MessageRole.ASSISTANT]
+
+
+def test_contextual_topic_gate_checks_topic_switch_and_recovers_on_new_question(monkeypatch):
+    from backend.services.intent_classify_service import TopicVerdict
+
+    monkeypatch.setattr(chat_router.get_settings(), "topic_contextual_followup_enabled", True)
+    monkeypatch.setattr(chat_router, "store", MemoryStore())
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    calls = []
+
+    async def classify(**kwargs):
+        calls.append(kwargs)
+        label = "off_topic" if kwargs["question"] in {"聊聊游戏", "继续聊游戏"} else "academic"
+        return TopicVerdict(label, verified_by_llm=True)
+
+    async def answer(messages, fallback_text, **kwargs):
+        yield "你能先说说这里有哪些受力条件吗？"
+
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic_with_source", classify)
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", answer)
+    monkeypatch.setattr(chat_router, "_retrieve_context_for_chat", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    conversation_id = None
+
+    def ask(message):
+        nonlocal conversation_id
+        data = {"subject": "物理", "message": message}
+        if conversation_id is not None:
+            data["conversation_id"] = conversation_id
+        response = client.post("/api/chat/stream", json=data)
+        assert response.status_code == 200, response.text
+        events = _parse_sse(response.text)
+        conversation_id = events[0][1]["conversation_id"]
+        return events[-1][1]["content"]
+
+    assert ask("斜面上的摩擦力怎么分析？") != chat_router.filter_service.refusal_text
+    old_decision = asyncio.run(chat_router._check_chat_question(
+        "聊聊游戏", "物理", history_pairs=[("user", "斜面上的摩擦力怎么分析？")],
+    ))
+    assert old_decision.reason == "academic_context_followup"
+    assert ask("聊聊游戏") == chat_router.filter_service.refusal_text
+    assert calls[-1]["context"] == "斜面上的摩擦力怎么分析？"
+    assert "受力条件" in calls[-1]["followup_prompt"]
+    assert calls[-1]["contextual_model_eligible"]
+
+    assert ask("继续聊游戏") == chat_router.filter_service.refusal_text
+    assert calls[-1]["context"] == "斜面上的摩擦力怎么分析？"
+    assert "聊聊游戏" not in calls[-1]["followup_prompt"]
+    assert not calls[-1]["contextual_model_eligible"]
+
+    assert ask("如何用牛顿第二定律求物体的加速度？") != chat_router.filter_service.refusal_text
+    assert ask("对") != chat_router.filter_service.refusal_text
+    assert [call["question"] for call in calls] == [
+        "斜面上的摩擦力怎么分析？", "聊聊游戏", "继续聊游戏", "如何用牛顿第二定律求物体的加速度？",
+    ]
+
+
+def test_contextual_short_reply_after_laya_acceptance_is_reviewed(monkeypatch):
+    from backend.services.intent_classify_service import TopicVerdict
+
+    monkeypatch.setattr(chat_router, "store", MemoryStore())
+    user_message = Message(
+        id=1, conversation_id=1, role=MessageRole.USER, content="为什么会产生感应电流？",
+        turn_index=1, delivery_status="completed",
+    )
+    assistant_message = Message(
+        id=2, conversation_id=1, role=MessageRole.ASSISTANT, content="磁通量会变吗？",
+        turn_index=1, delivery_status="completed",
+    )
+    seen = []
+
+    async def classify(**kwargs):
+        seen.append(kwargs)
+        return TopicVerdict("academic", verified_by_llm=True)
+
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic_with_source", classify)
+    result = asyncio.run(chat_router._check_chat_question(
+        "会", "物理", history_pairs=[], latest_topic_turn=(user_message, assistant_message),
+    ))
+    assert result.allowed
+    assert len(seen) == 1
+    assert seen[0]["context"] == user_message.content
+    assert seen[0]["followup_prompt"] == assistant_message.content
+
+
+def test_laya_only_pass_cannot_carry_a_later_candidate(monkeypatch):
+    from backend.services.intent_classify_service import TopicVerdict
+
+    topic_store = MemoryStore()
+    monkeypatch.setattr(chat_router, "store", topic_store)
+    latest = Message(
+        id=1, conversation_id=1, role=MessageRole.USER, content="借物理题推荐一部电视剧",
+        turn_index=1, delivery_status="completed",
+    )
+    topic_store.set(chat_router._topic_verification_key(latest), "laya")
+    seen = []
+
+    async def classify(**kwargs):
+        seen.append(kwargs)
+        return TopicVerdict("off_topic", verified_by_llm=True)
+
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic_with_source", classify)
+    result = asyncio.run(chat_router._check_chat_question(
+        "请解释这部电视剧的剧情和最后的结局是什么", "物理",
+        history_pairs=[], latest_topic_turn=(latest, None),
+    ))
+    assert result.reason == "topic_classifier_rejected"
+    assert seen[0]["followup_prompt"] is not None
+
+
+def test_verified_short_reply_shortcut_is_bounded_and_requires_matching_tutor_prompt(monkeypatch):
+    from backend.services.intent_classify_service import TopicVerdict
+
+    topic_store = MemoryStore()
+    monkeypatch.setattr(chat_router, "store", topic_store)
+    latest = Message(
+        id=1, conversation_id=1, role=MessageRole.USER, content="议论文如何设置分论点？",
+        turn_index=1, delivery_status="completed",
+    )
+    assistant = Message(
+        id=2, conversation_id=1, role=MessageRole.ASSISTANT,
+        content="先看结构。分论点之间是并列关系还是递进关系？",
+        turn_index=1, delivery_status="completed",
+    )
+    calls = []
+
+    async def classify(**kwargs):
+        calls.append(kwargs)
+        return TopicVerdict("off_topic" if kwargs["question"] == "聊聊游戏" else "academic", verified_by_llm=True)
+
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic_with_source", classify)
+
+    def check(question):
+        return asyncio.run(chat_router._check_chat_question(
+            question, "语文", history_pairs=[], latest_topic_turn=(latest, assistant),
+        ))
+
+    key = chat_router._topic_verification_key(latest)
+    topic_store.set(key, "llm")
+    assert check("并列关系").reason == "verified_context_followup"
+    assert check("我还没懂").reason == "verified_context_followup"
+    assert not calls
+    assert check("聊聊游戏").reason == "topic_classifier_rejected"
+    assert calls[-1]["followup_prompt"] == assistant.content
+
+    topic_store.set(key, "verified_followup")
+    assert check("递进关系").reason == "verified_context_followup_limit"
+    topic_store.delete(key)
+    assert check("递进关系").reason == "topic_verified"
+
+
+
+def test_ordinal_short_reply_matches_requested_item_only():
+    matches = chat_router._matches_verified_topic_reply
+    prompt = "看前一句，代词与哪个名词在数上保持一致？"
+    assert matches("第二个名词", prompt)
+    assert matches("第2个名词", prompt)
+    assert not matches("第二个演员", prompt)
+    assert not matches("第二个选项", prompt)
+    assert not matches("第二个名词，给我推荐网剧", prompt)
+    assert not matches("第二个名词", "上一题问的是哪个名词？接下来你想讨论什么？")

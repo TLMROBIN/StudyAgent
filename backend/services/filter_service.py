@@ -75,6 +75,12 @@ class FilterService:
     def normalize_text(text: str) -> str:
         return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or "")).casefold()
 
+    def is_contextual_followup(self, normalized: str) -> bool:
+        """Match an already normalized short turn or an explicit follow-up phrase."""
+        return bool(normalized) and (
+            len(normalized) <= 12 or bool(self._contextual_followup_pattern.fullmatch(normalized))
+        )
+
     def check_question(
         self,
         question: str,
@@ -92,9 +98,7 @@ class FilterService:
 
         # 规则只做初筛；*_candidate 必须由调用方再通过实际话题分类。
         selected_subject = declared_subject if declared_subject in snapshot.subjects else None
-        if allow_contextual_short_followup and (
-            len(normalized) <= 12 or self._contextual_followup_pattern.fullmatch(normalized)
-        ):
+        if allow_contextual_short_followup and self.is_contextual_followup(normalized):
             return FilterDecision(True, "academic_context_followup", selected_subject)
         if self._basic_math_pattern.fullmatch(normalized) and any(token in normalized for token in "+-×x*/÷/=等于多少几"):
             return FilterDecision(True, "basic_math_expression", selected_subject or "数学")
