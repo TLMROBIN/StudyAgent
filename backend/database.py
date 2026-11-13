@@ -1,3 +1,5 @@
+import logging
+import sqlite3
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, event, inspect, text
@@ -11,6 +13,7 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # Pool sizing rationale (2026-06-11):
 #   * 远端后端曾出现 `QueuePool limit of size 5 overflow 10 reached` 雪崩，
@@ -40,8 +43,13 @@ def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     # WAL 模式下未 checkpoint 的数据在 -wal 文件里：备份请用 sqlite3 backup API，别直接拷 .db。
     cursor = dbapi_connection.cursor()
     try:
-        cursor.execute("PRAGMA journal_mode=WAL")
+        # 先设 busy_timeout，切 WAL 时若别的连接（如 worker）正持锁会等待而不是立即失败。
         cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            # WAL 是持久化到库文件的，切换失败只影响并发性能，不能因此拒绝建立连接。
+            logger.warning("sqlite_wal_switch_failed error=%s", exc)
     finally:
         cursor.close()
 
