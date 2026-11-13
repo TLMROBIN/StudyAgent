@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     llm_fallback_api_key: str | None = Field(default=None, alias="LLM_FALLBACK_API_KEY")
     llm_fallback_model: str = Field(default="qwen-plus", alias="LLM_FALLBACK_MODEL")
 
+    topic_classifier_primary_model_key: str = Field(
+        default="glm-5.3-flash-chat", alias="TOPIC_CLASSIFIER_PRIMARY_MODEL_KEY",
+    )
+    topic_classifier_fallback_model_key: str = Field(
+        default="deepseek-v4-flash", alias="TOPIC_CLASSIFIER_FALLBACK_MODEL_KEY",
+    )
+
     llm_max_qps: int = Field(default=10, alias="LLM_MAX_QPS")
     llm_request_timeout_seconds: int = Field(default=30, alias="LLM_REQUEST_TIMEOUT_SECONDS")
     chat_image_vision_timeout_seconds: int = Field(default=60, alias="CHAT_IMAGE_VISION_TIMEOUT_SECONDS")

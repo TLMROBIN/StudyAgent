@@ -60,6 +60,9 @@ class RequestReplayService:
             return None
         return RequestReplayState(**json.loads(raw))
 
+    def forget(self, *, user_id: int, request_id: str) -> None:
+        self.store_backend.delete(self._key(user_id, request_id))
+
     def remember_request(
         self,
         *,

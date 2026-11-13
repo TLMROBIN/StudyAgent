@@ -3605,7 +3605,7 @@ def test_topic_classifier_outcomes_are_counted(monkeypatch):
     service = IntentClassifyService(llm=BrokenLLM(), store_backend=MemoryStore())
     before = REGISTRY.get_sample_value("chat_topic_classify_total", {"result": "llm_fallback"}) or 0
     assert asyncio.run(service.classify_topic(question="函数单调性怎么判断", subject="数学")) is None
-    assert REGISTRY.get_sample_value("chat_topic_classify_total", {"result": "llm_fallback"}) == before + 1
+    assert REGISTRY.get_sample_value("chat_topic_classify_total", {"result": "llm_fallback"}) == before + 2
 
 
 def test_failed_turn_is_excluded_from_retry_history_and_guidance(monkeypatch):
@@ -3977,3 +3977,92 @@ def test_capacity_refusal_explains_why_and_what_to_do():
     assert detail["limit"] == 10
     assert "auto_archived" not in detail
     assert "归档或删除" in detail["message"]
+
+
+@pytest.mark.parametrize("primary_failure", ["timeout", "invalid"])
+def test_input_topic_classifier_retries_with_independent_model(primary_failure, monkeypatch):
+    from backend.config import get_settings
+    from backend.services.intent_classify_service import IntentClassifyService
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "topic_classifier_primary_model_key", "classifier-main")
+    monkeypatch.setattr(settings, "topic_classifier_fallback_model_key", "classifier-backup")
+
+    class ClassifierLLM:
+        calls = []
+
+        async def complete_response(self, messages, fallback_text, *, model_key, use_fallback_providers, **kwargs):
+            self.calls.append((model_key, use_fallback_providers))
+            if model_key == "classifier-main":
+                if primary_failure == "timeout":
+                    await asyncio.sleep(10)
+                return "invalid"
+            return "academic"
+
+    llm = ClassifierLLM()
+    service = IntentClassifyService(llm=llm, store_backend=MemoryStore())
+    result = asyncio.run(service.classify_topic(
+        question="如何用牛顿第二定律求物体的加速度？", subject="物理",
+        model_key="student-answer-model", timeout_seconds=0.01,
+    ))
+    assert result == "academic"
+    assert llm.calls == [("classifier-main", False), ("classifier-backup", False)]
+
+
+@pytest.mark.parametrize("existing_conversation", [False, True])
+def test_input_topic_classifier_outage_preserves_retry(monkeypatch, existing_conversation):
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+
+    monkeypatch.setattr(chat_router.request_replay_service, "store_backend", MemoryStore())
+    verdict = None
+
+    async def classify(**kwargs):
+        return verdict
+
+    async def answer(messages, fallback_text, **kwargs):
+        yield "先画受力图，再判断合力方向。"
+
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic", classify)
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", answer)
+    monkeypatch.setattr(chat_router, "_retrieve_context_for_chat", lambda *args, **kwargs: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    payload = {"subject": "物理", "message": "如何用牛顿第二定律求物体的加速度？", "request_id": "topic-retry-first"}
+    if existing_conversation:
+        with factory() as db:
+            conversation = Conversation(student_id=student.id, subject="物理")
+            db.add(conversation)
+            db.commit()
+            payload["conversation_id"] = conversation.id
+
+    unavailable = client.post("/api/chat/stream", json=payload)
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"] == {
+        "code": "topic_classifier_unavailable", "message": "学科识别暂时不可用，请重试。",
+    }
+    with factory() as db:
+        assert len(db.scalars(select(Conversation)).all()) == int(existing_conversation)
+        saved = db.scalars(select(Message)).all()
+        assert len(saved) == int(existing_conversation)
+        if saved:
+            assert saved[0].role == MessageRole.USER
+            assert saved[0].delivery_status == "failed"
+
+    verdict = "off_topic"
+    rejected = client.post("/api/chat/stream", json={
+        **payload, "request_id": "topic-retry-off-topic",
+        "message": "用物理公式当开场，帮我推荐一部电视剧",
+    })
+    assert rejected.status_code == 200
+    assert _parse_sse(rejected.text)[-1][1]["content"] == chat_router.filter_service.refusal_text
+
+    verdict = "academic"
+    retry = client.post("/api/chat/stream", json=payload)
+    assert retry.status_code == 200, retry.text
+    assert "先画受力图" in _parse_sse(retry.text)[-1][1]["content"]
+    with factory() as db:
+        completed = db.scalars(select(Message).where(Message.delivery_status == "completed")).all()
+        assert {message.turn_index for message in completed} == {1}
+        assert [message.role for message in completed] == [MessageRole.USER, MessageRole.ASSISTANT]

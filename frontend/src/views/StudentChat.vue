@@ -1504,6 +1504,9 @@ function chatFailureMessage(error: unknown): string {
   const message = requestErrorMessage(error)
   if (message === '模型调用失败，请联系管理员老师或稍后再试。'
     || message === '图片识别失败，请联系管理员老师或稍后再试。') return message
+  if (message === '学科识别暂时不可用，请重试。') {
+    return `${message} 草稿已保留。`
+  }
   if (message === 'Password change required') {
     return '请返回统一目录页处理账号状态，再继续提问。草稿已保留。'
   }

@@ -599,9 +599,13 @@ class LLMService:
         model_key: str | None = None,
         max_completion_tokens: int | None = None,
         temperature: float = 0.2,
+        use_fallback_providers: bool = True,
     ) -> str:
         selected_model_key = self.normalize_chat_model_key(model_key)
-        for provider in self._providers_for_chat_model(selected_model_key):
+        providers = self._providers_for_chat_model(selected_model_key)
+        if not use_fallback_providers:
+            providers = providers[:1]
+        for provider in providers:
             if not provider.available or not provider.base_url or not provider.api_key:
                 continue
             try:

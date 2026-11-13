@@ -111,6 +111,9 @@ def test_background_endpoint_persists_full_answer_after_request_session_closes(m
             yield '你准备选择哪个物理模型？'
         async def suggestions(**kwargs):
             return []
+        async def academic_topic(**kwargs):
+            return 'academic'
+        monkeypatch.setattr(chat.intent_classify_service, 'classify_topic', academic_topic)
         monkeypatch.setattr(chat.llm_service, 'stream_response', provider)
         monkeypatch.setattr(chat.suggested_reply_service, 'generate', suggestions)
         payload = ChatRequest(subject='物理', message='圆周运动如何判断受力', request_id='background-test')

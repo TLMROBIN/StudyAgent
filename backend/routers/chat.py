@@ -521,6 +521,7 @@ async def _validate_stream_answer(
                 question=f"学生请求：{question}\n待输出回复：{text}",
                 subject=subject,
                 model_key=model_key,
+                kind="output",
             )
             if verdict == "off_topic":
                 return OutputValidation(False, ["off_topic_output"])
@@ -2293,6 +2294,13 @@ async def _stream_chat(
         and practice_review_turn
     ):
         decision = FilterDecision(True, "practice_answer_submission", payload.subject)
+    if decision.reason == "topic_classifier_unavailable":
+        if payload.request_id:
+            request_replay_service.forget(user_id=current_user.id, request_id=payload.request_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "topic_classifier_unavailable", "message": "学科识别暂时不可用，请重试。"},
+        )
     if not decision.allowed:
         bypassed_role = role_snapshot.bypassed()
         filter_blocked_total.inc()

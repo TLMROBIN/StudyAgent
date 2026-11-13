@@ -86,7 +86,14 @@ class BackgroundChatService:
         if existing is not None:
             if existing.fingerprint != fingerprint:
                 raise HTTPException(409, "Request id already used with different payload")
-            return existing
+            failure = existing.ready.exception() if existing.finished_at is not None and not existing.ready.cancelled() else None
+            if not (
+                isinstance(failure, HTTPException)
+                and isinstance(failure.detail, dict)
+                and failure.detail.get("code") == "topic_classifier_unavailable"
+            ):
+                return existing
+            del self.jobs[key]
         if sum(uid == user_id and job.finished_at is None for (uid, _), job in self.jobs.items()) >= self.max_active_per_user:
             raise HTTPException(429, "已有一个回答正在生成，请等待完成或停止后重试。")
         if len(self.jobs) >= self.max_jobs:

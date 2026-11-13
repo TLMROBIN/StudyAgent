@@ -1,10 +1,9 @@
 """混合式学科意图分类服务（LLM 辅助，仅在规则低置信时调用）。
 
 设计约束（见 docs/ROADMAP 与实施计划）：
-- fail-open：LLM 超时/异常/非法输出一律返回 None，调用方回退纯规则结果，
-  绝不因分类失败阻断答疑链路。
-- 有界延迟：asyncio.wait_for 限时（默认 3s，上限 5s），结果按
-  sha256(subject + 归一化问题) 缓存（Redis/内存，TTL 6h）。
+- 输入话题分类使用独立主备模型，单路默认 3 秒，两路总计至多 6 秒。
+- 超时、异常和非法结果耗尽可用线路后返回 None，由调用方提示重试或采用规则结果。
+- 有效标签按学科和归一化文本缓存（Redis/内存，TTL 6h）。
 - 白名单校验：LLM 输出必须命中该学科 SUBJECT_STRATEGY_RULES 的模式代码，
   否则视为非法输出丢弃。
 - 熔断继承 llm_service provider 层，本服务不重复实现。
@@ -16,6 +15,7 @@ import asyncio
 import hashlib
 import logging
 
+from backend.config import get_settings
 from backend.services.llm_service import LLMService, llm_service
 from backend.services.metrics_service import chat_intent_classify_total, chat_topic_classify_total
 from backend.services.store_service import BaseStore, store
@@ -32,6 +32,7 @@ class IntentClassifyService:
     CACHE_TTL_SECONDS = 6 * 3600
     DEFAULT_TIMEOUT_SECONDS = 3.0
     MAX_TIMEOUT_SECONDS = 5.0
+    INPUT_TOPIC_TOTAL_TIMEOUT_SECONDS = 6.0
     QUESTION_SNIPPET_CHARS = 300
 
     def __init__(self, store_backend: BaseStore | None = None, llm: LLMService | None = None) -> None:
@@ -45,12 +46,13 @@ class IntentClassifyService:
         subject: str,
         model_key: str | None = None,
         timeout_seconds: float | None = None,
+        kind: str = "input",
     ) -> str | None:
         """Classify content as academic/off_topic; None means no reliable verdict."""
         normalized = "".join(question.split()).lower()
         if not normalized:
             return "off_topic"
-        cache_key = self.CACHE_PREFIX + "topic:" + hashlib.sha256(f"{subject}|{normalized}".encode()).hexdigest()
+        cache_key = self.CACHE_PREFIX + f"topic:{kind}:" + hashlib.sha256(f"{subject}|{normalized}".encode()).hexdigest()
         try:
             cached = self.store_backend.get(cache_key)
         except Exception:
@@ -72,21 +74,42 @@ class IntentClassifyService:
         timeout = self.DEFAULT_TIMEOUT_SECONDS
         if isinstance(timeout_seconds, (int, float)) and not isinstance(timeout_seconds, bool) and timeout_seconds > 0:
             timeout = min(float(timeout_seconds), self.MAX_TIMEOUT_SECONDS)
-        try:
-            raw = await asyncio.wait_for(
-                self.llm.complete_response(
-                    messages, "", model_key=model_key, max_completion_tokens=8, temperature=0.0,
-                ),
-                timeout=timeout,
-            )
-        except Exception as exc:
-            logger.warning("topic_classify_failed subject=%s error_type=%s", subject, type(exc).__name__)
-            chat_topic_classify_total.labels(result="llm_fallback").inc()
-            return None
-        verdict = (raw or "").strip().strip("`\"'。.，, ").lower()
-        if verdict not in {"academic", "off_topic"}:
+        if kind == "input":
+            settings = get_settings()
+            model_keys = tuple(dict.fromkeys(filter(None, (
+                settings.topic_classifier_primary_model_key.strip(),
+                settings.topic_classifier_fallback_model_key.strip(),
+            ))))
+            timeout = min(timeout, self.INPUT_TOPIC_TOTAL_TIMEOUT_SECONDS / 2)
+        else:
+            model_keys = (model_key,)
+
+        for index, key in enumerate(model_keys):
+            try:
+                raw = await asyncio.wait_for(
+                    self.llm.complete_response(
+                        messages, "", model_key=key, max_completion_tokens=8, temperature=0.0,
+                        use_fallback_providers=kind != "input",
+                    ),
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "topic_classify_failed subject=%s kind=%s model_key=%s error_type=%s",
+                    subject, kind, key, type(exc).__name__,
+                )
+                chat_topic_classify_total.labels(result="llm_fallback").inc()
+                continue
+            verdict = (raw or "").strip().strip("`\"'。.，, ").lower()
+            if verdict in {"academic", "off_topic"}:
+                if index:
+                    chat_topic_classify_total.labels(result="llm_backup_ok").inc()
+                break
             chat_topic_classify_total.labels(result="llm_invalid").inc()
+        else:
+            chat_topic_classify_total.labels(result=f"{kind}_unavailable").inc()
             return None
+
         try:
             self.store_backend.set(cache_key, verdict, ttl_seconds=self.CACHE_TTL_SECONDS)
         except Exception:
