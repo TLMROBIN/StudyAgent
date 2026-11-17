@@ -51,6 +51,7 @@ export interface ChatMessageAttachment {
 }
 
 export interface ChatMessageRead {
+  id?: number
   role: 'user' | 'assistant'
   content: string
   delivery_status?: 'pending' | 'completed' | 'failed' | 'cancelled' | 'blocked'
@@ -104,6 +105,7 @@ export interface StreamChatRequest {
   subject: string
   message?: string
   conversation_id?: number | null
+  edit_message_id?: number | null
   request_id?: string | null
   llm_model?: string | null
   deep_reasoning?: boolean
@@ -849,6 +851,9 @@ function buildStreamChatFormData(payload: StreamChatRequest): FormData {
 
   if (typeof payload.conversation_id === 'number') {
     formData.append('conversation_id', String(payload.conversation_id))
+  }
+  if (typeof payload.edit_message_id === 'number') {
+    formData.append('edit_message_id', String(payload.edit_message_id))
   }
 
   if (typeof payload.request_id === 'string' && payload.request_id) {

@@ -248,6 +248,7 @@ class ChatRequest(BaseModel):
     subject: str = Field(max_length=16)
     message: str = Field(default="", max_length=CHAT_MESSAGE_MAX_LENGTH)
     conversation_id: int | None = None
+    edit_message_id: int | None = Field(default=None, gt=0)
     # 额度预留 key 由 user_id + request_id 组成，落库列宽 128，这里限制长度防止溢出
     request_id: str | None = Field(default=None, max_length=64)
     llm_model: str | None = Field(default=None, max_length=64)

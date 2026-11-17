@@ -116,6 +116,7 @@ const showArchived = ref(false)
 const archivingConversationIds = ref<Set<number>>(new Set())
 const visibleConversations = computed(() => conversations.value.filter((item) => item.is_archived === showArchived.value))
 const messages = ref<ChatMessageRead[]>([])
+const latestMessage = computed(() => messages.value[messages.value.length - 1])
 const notifications = ref<NotificationItem[]>([])
 const incentiveSummary = ref<IncentiveSummary>({
   total_points: 0,
@@ -129,6 +130,7 @@ const incentiveSummary = ref<IncentiveSummary>({
 })
 const currentConversationId = ref<number | null>(null)
 const sending = ref(false)
+const stopping = ref(false)
 const historyOpen = ref(false)
 const noticesOpen = ref(false)
 const chatBanDialogVisible = ref(false)
@@ -190,7 +192,6 @@ const activeDraftStorageKey = ref('')
 let hydratingDraft = false
 let streamAbortController: AbortController | null = null
 let modelStatusTimer: ReturnType<typeof window.setInterval> | null = null
-let stopRequested = false
 let cropPointerStart: {
   pointerId: number
   mode: 'draw' | 'move' | 'resize'
@@ -318,7 +319,11 @@ const resolveReflectionHint = computed(() => {
 })
 const canSend = computed(() => (
   Boolean(form.message.trim() || pendingImageFile.value)
-  && !composerLocked.value
+  && !sending.value
+  && canSendToSelectedModel.value
+))
+const canSendToSelectedModel = computed(() => (
+  !composerLocked.value
   && selectedModelStatus.value !== 'unavailable'
   && !selectedModelQuotaExhausted.value
 ))
@@ -691,6 +696,7 @@ async function openConversation(id: number): Promise<boolean> {
   followLatest.value = true
   try {
     const { data } = await api.get<ChatConversationRead>(`/chat/history/${id}`)
+    stoppedQuestion.value = null
     currentConversationId.value = id
     rememberCurrentConversation(id)
     resetPendingImage()
@@ -701,6 +707,7 @@ async function openConversation(id: number): Promise<boolean> {
     guidanceStage.value = data.guidance_stage
     currentConversationResolved.value = data.resolved
     messages.value = data.messages.map((item) => ({
+      id: item.id,
       role: item.role,
       content: item.content,
       delivery_status: item.delivery_status || 'completed',
@@ -823,6 +830,7 @@ function startNewConversation(options: { subject?: string } = {}): boolean {
   rememberCurrentConversation(null)
   currentConversationResolved.value = false
   messages.value = []
+  stoppedQuestion.value = null
   guidanceStage.value = 'initial_guidance'
   form.subject = options.subject ?? (selectedSubject.value?.name || chatSubjects.value[0]?.name || '')
   previousSubject.value = form.subject
@@ -980,8 +988,37 @@ interface PendingChat {
   conversationId: number | null
   historyLength: number
   deepReasoning: boolean
+  editMessageId?: number | null
 }
 let activePendingChat: PendingChat | null = null
+let activeChatImage: File | null = null
+interface StoppedQuestion {
+  bubble: ChatMessageRead
+  messageId: number | null
+  image: File | null
+}
+const stoppedQuestion = ref<StoppedQuestion | null>(null)
+const editQuestionOpen = ref(false)
+const editQuestionInput = ref<{ focus: () => void } | null>(null)
+const editedQuestionText = ref('')
+const canResendEditedQuestion = computed(() => (
+  !sending.value && canSendToSelectedModel.value && stoppedQuestion.value
+  && latestMessage.value === stoppedQuestion.value.bubble
+  && Boolean(editedQuestionText.value.trim() || stoppedQuestion.value.bubble.attachment)
+))
+
+function editStoppedQuestion(item: ChatMessageRead) {
+  if (sending.value || composerLocked.value || stoppedQuestion.value?.bubble !== item) return
+  editedQuestionText.value = item.content === IMAGE_ONLY_PLACEHOLDER ? '' : item.content
+  editQuestionOpen.value = true
+}
+
+function resendEditedQuestion() {
+  const revision = stoppedQuestion.value
+  if (!revision || !canResendEditedQuestion.value) return
+  editQuestionOpen.value = false
+  void runMessage(undefined, null, { ...revision, text: editedQuestionText.value.trim() })
+}
 
 function pendingChatKey(): string {
   return `studyagent:pending-chat:${authStore.user?.id ?? authStore.user?.username ?? 'student'}`
@@ -1013,29 +1050,57 @@ async function restorePendingChat(): Promise<boolean> {
   return true
 }
 
-function stopStreaming(showNotice = true) {
-  stopRequested = true
-  const pendingIndex = activePendingChat?.historyLength
-  if (activePendingChat) {
-    void api.delete(`/chat/requests/${encodeURIComponent(activePendingChat.requestId)}`)
-      .catch(() => ElMessage.warning('停止请求暂未确认，回答可能仍在后台生成。'))
-    savePendingChat(null)
-  }
+async function stopStreaming() {
+  const pending = activePendingChat
+  if (!pending || stopping.value) return
+  stopping.value = true
+  const image = activeChatImage
+  activeChatImage = null
+  savePendingChat(null)
   streamAbortController?.abort()
   streamAbortController = null
-  sending.value = false
-  const last = messages.value[messages.value.length - 1]
-  if (last?.role === 'assistant' && !last.content.trim()) messages.value.pop()
-  const pendingUser = typeof pendingIndex === 'number'
-    ? messages.value[pendingIndex]
-    : [...messages.value].reverse().find((item) => item.role === 'user' && item.delivery_status === 'pending')
+  const last = latestMessage.value
+  const noVisibleReply = last?.role === 'assistant' && !last.content.trim()
+  if (noVisibleReply) messages.value.pop()
+  const pendingUser = messages.value[pending.historyLength]
   if (pendingUser?.role === 'user') {
     pendingUser.delivery_status = 'cancelled'
     pendingUser.failure_reason = '本次生成已停止'
   }
-  screenReaderAnnouncement.value = '已停止本次生成，可以继续修改问题。'
-  if (showNotice) {
+  try {
+    const { data } = await api.delete<{ editable: boolean; message_id: number | null; conversation_id: number | null }>(
+      `/chat/requests/${encodeURIComponent(pending.requestId)}`,
+    )
+    if (messages.value[pending.historyLength] !== pendingUser) return
+    if (data.conversation_id) {
+      currentConversationId.value = data.conversation_id
+      rememberCurrentConversation(data.conversation_id)
+      void loadConversations().catch(console.error)
+    }
+    if (data.editable && noVisibleReply && pendingUser?.role === 'user') {
+      const messageId = data.message_id ?? pending.editMessageId ?? null
+      stoppedQuestion.value = { bubble: pendingUser, messageId, image: messageId ? null : image }
+      screenReaderAnnouncement.value = '已停止本次生成，可以编辑问题后重新发送。'
+    } else {
+      screenReaderAnnouncement.value = '已停止本次生成。'
+      if (noVisibleReply && data.conversation_id && data.message_id) {
+        const { data: history } = await api.get<ChatConversationRead>(`/chat/history/${data.conversation_id}`)
+        const index = history.messages.findIndex((item) => item.id === data.message_id)
+        const reply = index >= 0 ? history.messages[index + 1] : undefined
+        if (pendingUser && latestMessage.value === pendingUser && reply?.role === 'assistant') {
+          pendingUser.delivery_status = history.messages[index].delivery_status
+          pendingUser.failure_reason = history.messages[index].failure_reason
+          messages.value.push(reply)
+          void preloadAssets(reply.assets || [])
+        }
+      }
+    }
     ElMessage.info('已停止本次生成')
+  } catch {
+    ElMessage.warning('停止请求或回复状态暂未确认，请在学习记录中查看。')
+  } finally {
+    stopping.value = false
+    sending.value = false
   }
 }
 
@@ -1722,16 +1787,22 @@ async function sendMessage() {
   await runMessage()
 }
 
-async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessageAttachment | null = null) {
-  if (!recovery && !canSend.value) {
+async function runMessage(
+  recovery?: PendingChat,
+  recoveredAttachment: ChatMessageAttachment | null = null,
+  revision?: StoppedQuestion & { text: string },
+) {
+  if (!recovery && (revision ? !canResendEditedQuestion.value : !canSend.value)) {
     return
   }
+  if (revision) messages.value.pop()
+  stoppedQuestion.value = null
   clearActiveSuggestedReplies()
   const draftText = form.message
-  const message = recovery?.message ?? draftText.trim()
+  const message = revision?.text ?? recovery?.message ?? draftText.trim()
   const submissionDraftKey = activeDraftStorageKey.value || buildDraftStorageKey()
-  const image = pendingImageFile.value
-  const attachment = image ? {
+  const image = revision ? (revision.messageId ? null : revision.image) : pendingImageFile.value
+  const attachment = revision ? revision.bubble.attachment : image ? {
     attachment_id: `local-${Date.now()}`,
     filename: image.name,
     content_type: image.type || 'image/*',
@@ -1745,12 +1816,15 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
     conversationId: currentConversationId.value,
     historyLength: messages.value.length,
     deepReasoning: form.deepReasoning && canUseDeepReasoning.value,
+    editMessageId: revision?.messageId,
   }
   savePendingChat(pending)
-  setDraftInput('')
-  resetPendingImage({ preservePreview: Boolean(attachment) })
+  activeChatImage = image
+  if (!revision) {
+    setDraftInput('')
+    resetPendingImage({ preservePreview: Boolean(attachment) })
+  }
   sending.value = true
-  stopRequested = false
   screenReaderAnnouncement.value = '学习助手正在整理回复。'
   const controller = new AbortController()
   streamAbortController = controller
@@ -1773,6 +1847,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
         subject: form.subject,
         message,
         conversation_id: currentConversationId.value,
+        edit_message_id: revision?.messageId,
         llm_model: form.llmModel,
         deep_reasoning: form.deepReasoning && canUseDeepReasoning.value,
         role_id: form.roleId,
@@ -1855,7 +1930,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
             // The server persists the body before done. A newer request replaces
             // this controller, so late events cannot update its message or draft.
             bodyCompleted = true
-            clearSubmittedDraft(submissionDraftKey)
+            if (!revision) clearSubmittedDraft(submissionDraftKey)
             savePendingChat(null)
             const userMessage = messages.value[pending.historyLength]
             if (userMessage?.role === 'user') {
@@ -1897,7 +1972,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
     if (last && last.role === 'assistant' && !last.content.trim()) {
       throw new Error('模型调用失败，请联系管理员老师或稍后再试。')
     }
-    clearSubmittedDraft(submissionDraftKey)
+    if (!revision) clearSubmittedDraft(submissionDraftKey)
     savePendingChat(null)
     try {
       await loadConversations()
@@ -1913,10 +1988,7 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
     if (bodyCompleted) return
     const last = messages.value[messages.value.length - 1]
     if (error instanceof DOMException && error.name === 'AbortError') {
-      if (stopRequested && last && last.role === 'assistant' && !last.content.trim()) {
-        messages.value.pop()
-      }
-      clearSubmittedDraft(submissionDraftKey)
+      if (!revision) clearSubmittedDraft(submissionDraftKey)
       return
     }
 
@@ -1932,8 +2004,10 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
     if (requestErrorMessage(error) === '该学科已停用，请选择其他已启用学科。') {
       void loadChatSubjects()
     }
-    restoreSubmittedDraft(submissionDraftKey, recovery?.message ?? draftText)
-    if (image && !pendingImageFile.value) {
+    if (!revision || !form.message.trim()) {
+      restoreSubmittedDraft(submissionDraftKey, revision?.text ?? recovery?.message ?? draftText)
+    }
+    if (image && !pendingImageFile.value && (!revision || !draftText.trim())) {
       updatePendingImage(image)
     }
     const banMessage = chatBanFailureMessage(error)
@@ -1963,8 +2037,8 @@ async function runMessage(recovery?: PendingChat, recoveredAttachment: ChatMessa
   } finally {
     if (streamAbortController === controller) {
       streamAbortController = null
+      activeChatImage = null
       sending.value = false
-      stopRequested = false
     }
   }
 }
@@ -2199,6 +2273,14 @@ onMounted(async () => {
             <p v-if="item.error" class="chat-error" role="alert">{{ item.error }}</p>
             <div class="message-body" v-html="renderMessageBody(item.content, item.assets || [])"></div>
           </article>
+          <button
+            v-if="item === stoppedQuestion?.bubble && index === messages.length - 1 && !composerLocked"
+            type="button"
+            class="ghost-button"
+            :disabled="sending"
+            aria-label="编辑已停止的问题"
+            @click="editStoppedQuestion(item)"
+          >编辑</button>
           <div
             v-if="canShowSuggestedReplies(index, item)"
             class="suggested-replies"
@@ -2278,7 +2360,7 @@ onMounted(async () => {
             <button type="button" class="ghost-button ghost-button--danger" :disabled="sending" @click="removePendingImage">移除</button>
           </div>
         </div>
-        <p v-if="sending" class="stream-hint">正在陪你梳理思路，可随时停止。</p>
+        <p v-if="sending" class="stream-hint">{{ stopping ? '正在停止生成…' : '正在陪你梳理思路，可随时停止。' }}</p>
         <p v-else-if="composerLockMessage" class="stream-hint" role="status">{{ composerLockMessage }}</p>
         <div class="chat-composer-footer">
           <div class="chat-secondary-actions">
@@ -2302,7 +2384,7 @@ onMounted(async () => {
             <span class="composer-helper">{{ canUseDeepReasoning ? '复杂题可开启，等待更久' : '当前模型不支持' }}</span>
           </label>
           <div class="chat-primary-actions">
-            <button v-if="sending" type="button" class="ghost-button" @click="stopStreaming()">停止生成</button>
+            <button v-if="sending" type="button" class="ghost-button" :disabled="stopping" @click="stopStreaming">停止生成</button>
             <button v-else type="button" class="primary-button send-question-button" :disabled="!canSend" @click="sendMessage">
               发送问题
             </button>
@@ -2523,6 +2605,27 @@ onMounted(async () => {
         </div>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="editQuestionOpen"
+      title="编辑问题"
+      width="min(92vw, 560px)"
+      @opened="editQuestionInput?.focus()"
+    >
+      <el-input
+        ref="editQuestionInput"
+        v-model="editedQuestionText"
+        type="textarea"
+        :rows="4"
+        maxlength="6000"
+        aria-label="修改问题内容"
+      />
+      <p v-if="stoppedQuestion?.bubble.attachment" class="composer-helper">重新发送时会保留原题图。</p>
+      <template #footer>
+        <button type="button" class="ghost-button" @click="editQuestionOpen = false">取消</button>
+        <button type="button" class="primary-button" :disabled="!canResendEditedQuestion" @click="resendEditedQuestion">重新发送</button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="resolveDialogVisible"

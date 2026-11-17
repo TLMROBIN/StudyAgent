@@ -1595,8 +1595,9 @@ def _persist_user_turn(
     content: str,
     turn_index: int,
     stored_attachment: StoredChatAttachment | None,
+    edited_message: Message | None = None,
 ) -> tuple[Message, ChatMessageAttachment | None]:
-    user_message = Message(
+    user_message = edited_message or Message(
         conversation_id=conversation.id,
         role=MessageRole.USER,
         content=content,
@@ -1604,7 +1605,12 @@ def _persist_user_turn(
         turn_index=turn_index,
         guidance_stage=conversation.guidance_stage,
     )
-    attachment_record: ChatMessageAttachment | None = None
+    if edited_message is not None:
+        user_message.content = content
+        user_message.delivery_status = "pending"
+        user_message.failure_reason = None
+        user_message.guidance_stage = conversation.guidance_stage
+    attachment_record = edited_message.attachment if edited_message else None
     try:
         db.add(user_message)
         db.flush()
@@ -1671,6 +1677,7 @@ async def _parse_stream_request_payload(request: Request) -> tuple[ChatRequest, 
                     "subject": str(form.get("subject") or "").strip(),
                     "message": str(form.get("message") or ""),
                     "conversation_id": conversation_id_raw or None,
+                    "edit_message_id": str(form.get("edit_message_id") or "").strip() or None,
                     "request_id": request_id_raw or None,
                     "llm_model": str(form.get("llm_model") or "").strip() or None,
                     "deep_reasoning": str(form.get("deep_reasoning") or "false"),
@@ -2037,6 +2044,7 @@ async def stream_chat_endpoint(request: Request, db: DbSession, current_user: Cu
     fingerprint = sha256((payload.model_dump_json() + (sha256(image_bytes).hexdigest() if image_bytes is not None else "")).encode()).hexdigest()
     bind = db.get_bind()
     user_id = current_user.id
+    background_request = _BackgroundRequest({**request.scope, "state": {}})
 
     async def produce():
         # Neither the request dependency session nor UploadFile may outlive HTTP.
@@ -2049,7 +2057,7 @@ async def stream_chat_endpoint(request: Request, db: DbSession, current_user: Cu
             if user is None:
                 raise HTTPException(401, "用户不存在")
             response = await stream_chat(
-                payload, task_db, user, _BackgroundRequest(request.scope), image_upload=task_image,
+                payload, task_db, user, background_request, image_upload=task_image,
             )
         except BaseException:
             task_db.close()
@@ -2072,6 +2080,8 @@ async def stream_chat_endpoint(request: Request, db: DbSession, current_user: Cu
         return response
 
     job = background_chat_service.start(user_id, payload.request_id, fingerprint, produce)
+    if job.request_state is None:
+        job.request_state = background_request.state
     await asyncio.shield(job.ready)
     return StreamingResponse(job.subscribe(), media_type="text/event-stream")
 
@@ -2109,12 +2119,27 @@ async def resume_chat_request(request_id: str, request: Request, db: DbSession, 
 
 
 @router.delete("/requests/{request_id}")
-async def stop_chat_request(request_id: str, current_user: CurrentUser):
-    job = background_chat_service.get(current_user.id, request_id)
-    if job.task and not job.task.done():
-        job.task.cancel()
-        await asyncio.shield(job.task)
-    return {"stopped": True}
+async def stop_chat_request(request_id: str, db: DbSession, current_user: CurrentUser):
+    if len(request_id) > 64:
+        raise HTTPException(422, "Invalid chat request id")
+    job = await background_chat_service.stop(current_user.id, request_id)
+    message_id = getattr(job.request_state, "chat_user_message_id", None) if job else None
+    message = db.get(Message, message_id) if message_id else None
+    if message is None:
+        replay = request_replay_service.load(user_id=current_user.id, request_id=request_id)
+        return {"stopped": True, "editable": replay is None, "message_id": None, "conversation_id": None}
+    editable = (
+        message.delivery_status == "cancelled"
+        and _assistant_message_for_turn(db, message.conversation_id, message.turn_index) is None
+    )
+    if editable:
+        request_replay_service.forget(user_id=current_user.id, request_id=request_id)
+    return {
+        "stopped": True,
+        "editable": editable,
+        "message_id": message.id,
+        "conversation_id": message.conversation_id,
+    }
 
 
 async def _await_image_understanding(request: Request, **kwargs) -> ImageUnderstandingResult:
@@ -2179,6 +2204,21 @@ async def _stream_chat(
     except QueueFullError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前排队人数较多，请稍后重试") from exc
 
+    edited_message: Message | None = None
+    conversation: Conversation | None = None
+    if payload.edit_message_id:
+        if not payload.conversation_id or image_upload is not None:
+            raise HTTPException(422, "编辑已发送的问题时会保留原图")
+        conversation = _ensure_conversation(db, current_user.id, payload)
+        edited_message = db.get(Message, payload.edit_message_id)
+        if (
+            edited_message is None
+            or edited_message.conversation_id != conversation.id
+            or edited_message.role != MessageRole.USER
+        ):
+            raise HTTPException(409, "只能编辑当前对话中最后一条已停止且未收到回复的问题")
+        has_image_turn = edited_message.attachment is not None
+
     image_content: bytes | None = None
     stored_attachment: StoredChatAttachment | None = None
     attachment_record: ChatMessageAttachment | None = None
@@ -2187,7 +2227,10 @@ async def _stream_chat(
     user_message_content = _normalize_chat_message_content(payload.message, has_attachment=has_image_turn)
     image_sha256: str | None = None
 
-    if has_image_turn:
+    if edited_message is not None and edited_message.attachment is not None:
+        image_content = chat_attachment_service.resolve_path(edited_message.attachment.storage_key).read_bytes()
+        image_sha256 = edited_message.attachment.sha256
+    elif image_upload is not None:
         image_content = await image_upload.read()
         image_sha256 = sha256(image_content or b"").hexdigest()
     request_fingerprint = request_replay_service.fingerprint(
@@ -2198,13 +2241,13 @@ async def _stream_chat(
         llm_model=selected_model_key,
         requested_role_id=payload.role_id,
         deep_reasoning=payload.deep_reasoning,
+        edit_message_id=payload.edit_message_id,
     )
 
     replay_state = request_replay_service.load(user_id=current_user.id, request_id=payload.request_id)
     if replay_state and replay_state.question_hash != request_fingerprint:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Request id already used with different payload")
 
-    conversation: Conversation | None = None
     if replay_state:
         conversation = db.scalar(
             select(Conversation)
@@ -2237,6 +2280,14 @@ async def _stream_chat(
     if conversation is None and payload.conversation_id:
         conversation = _ensure_conversation(db, current_user.id, payload)
         payload.subject = conversation.subject
+
+    if edited_message is not None and not replay_state and (
+        edited_message.delivery_status != "cancelled"
+        or not conversation.messages
+        or conversation.messages[-1].id != edited_message.id
+        or _assistant_message_for_turn(db, conversation.id, edited_message.turn_index) is not None
+    ):
+        raise HTTPException(409, "只能编辑当前对话中最后一条已停止且未收到回复的问题")
 
     _ensure_subject_enabled(db, conversation.subject if conversation is not None else payload.subject)
     role_snapshot = snapshot_from_replay(replay_state.role_snapshot, payload.role_id) if replay_state else None
@@ -2299,7 +2350,7 @@ async def _stream_chat(
             message for message in conversation.messages
             if message.role == MessageRole.USER and message.delivery_status == "completed"
         ]) + 1 if conversation is not None else 1
-        if has_image_turn:
+        if image_upload is not None:
             stored_attachment = chat_attachment_service.save_bytes(
                 content=image_content or b"",
                 filename=image_upload.filename or "chat-image.png",
@@ -2318,7 +2369,9 @@ async def _stream_chat(
                 content=user_message_content,
                 turn_index=user_turn_index,
                 stored_attachment=stored_attachment,
+                edited_message=edited_message,
             )
+            request.state.chat_user_message_id = persisted_user_message.id
             if payload.request_id:
                 request_replay_service.remember_request(
                     user_id=current_user.id,
@@ -2331,6 +2384,8 @@ async def _stream_chat(
                 )
 
     request.state.chat_user_turn_index = user_turn_index
+    if replay_state and replayed_user_message is not None:
+        request.state.chat_user_message_id = replayed_user_message.id
     if has_image_turn and image_content and (stored_attachment or attachment_record):
         image_storage_key = stored_attachment.storage_key if stored_attachment else attachment_record.storage_key
         image_mime_type = stored_attachment.mime_type if stored_attachment else attachment_record.mime_type
@@ -2519,6 +2574,7 @@ async def _stream_chat(
             turn_index=user_turn_index,
             stored_attachment=stored_attachment,
         )
+        request.state.chat_user_message_id = persisted_user_message.id
         if attachment_record and image_understanding:
             attachment_record.ocr_status = {
                 "paddleocr": "paddleocr",

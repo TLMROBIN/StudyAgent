@@ -10,6 +10,7 @@ from time import monotonic
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
+from starlette.datastructures import State
 from backend.services.metrics_service import chat_stream_disconnect_total, sse_active_connections
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class BackgroundChat:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
     finished_at: float | None = None
+    request_state: State | None = None
 
     async def subscribe(self) -> AsyncIterator[str | bytes]:
         # Cancelling a subscriber must never cancel the producer or its ready future.
@@ -53,10 +55,14 @@ class BackgroundChatService:
 
     def __init__(self) -> None:
         self.jobs: dict[tuple[int, str], BackgroundChat] = {}
+        self.stopped_before_start: dict[tuple[int, str], float] = {}
 
     def _prune(self) -> None:
         now = monotonic()
         loop = asyncio.get_running_loop()
+        for key, stopped_at in list(self.stopped_before_start.items()):
+            if now - stopped_at > self.retention_seconds:
+                del self.stopped_before_start[key]
         for key, job in list(self.jobs.items()):
             if job.ready.get_loop() is not loop or (
                 job.finished_at is not None and now - job.finished_at > self.retention_seconds
@@ -68,6 +74,26 @@ class BackgroundChatService:
         job = self.jobs.get((user_id, request_id))
         if job is None:
             raise HTTPException(404, "后台请求已结束或服务已重启，请到学习记录查看已保存的回复。")
+        return job
+
+    async def stop(self, user_id: int, request_id: str) -> BackgroundChat | None:
+        self._prune()
+        key = (user_id, request_id)
+        job = self.jobs.get(key)
+        if job is None:
+            # A stop can reach the server before the multipart POST is parsed.
+            if len(self.stopped_before_start) >= self.max_jobs:
+                self.stopped_before_start.pop(next(iter(self.stopped_before_start)))
+            self.stopped_before_start[key] = monotonic()
+            return None
+        if job.task and not job.task.done() and not job.task.cancelling():
+            job.task.cancel()
+        if job.task:
+            await asyncio.shield(asyncio.gather(job.task, return_exceptions=True))
+        if not job.ready.done():  # Cancelled before the producer first ran.
+            job.ready.set_exception(HTTPException(409, "本次生成已停止"))
+            job.finished_at = monotonic()
+            job.changed.set()
         return job
 
     async def shutdown(self) -> None:
@@ -82,6 +108,8 @@ class BackgroundChatService:
     ) -> BackgroundChat:
         self._prune()
         key = (user_id, request_id)
+        if key in self.stopped_before_start:
+            raise HTTPException(409, "本次生成已停止")
         existing = self.jobs.get(key)
         if existing is not None:
             if existing.fingerprint != fingerprint:
