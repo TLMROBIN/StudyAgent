@@ -607,7 +607,11 @@ async def _check_chat_question(
         subject,
         allow_contextual_short_followup=not has_image_turn and _has_academic_history(history_pairs, subject),
     )
-    if decision.allowed and decision.reason.endswith("_candidate"):
+    image_needs_review = (
+        has_image_turn and latest_topic_turn is not None
+        and decision.reason == "subject_not_recognized" and is_valid_subject(subject)
+    )
+    if image_needs_review or (decision.allowed and decision.reason.endswith("_candidate")):
         topic = await intent_classify_service.classify_topic(
             question=question, subject=subject, model_key=model_key,
             context=next((text for role, text in reversed(history_pairs) if role == MessageRole.USER.value), None),
@@ -615,6 +619,8 @@ async def _check_chat_question(
         )
         if topic != "academic":
             return FilterDecision(False, "topic_classifier_rejected" if topic == "off_topic" else "topic_classifier_unavailable")
+        if image_needs_review:
+            return FilterDecision(True, "topic_verified", subject)
     return decision
 
 
@@ -661,9 +667,10 @@ async def _check_contextual_topic(
     normalized = filter_service.normalize_text(question)
     if after_block:
         # Only a real prior exercise can make a context-dependent turn eligible after a refusal.
-        previous_prompt = _previous_assistant_prompt(history_pairs)
+        if history_pairs and history_pairs[-1][0] == MessageRole.ASSISTANT.value:
+            previous_prompt = history_pairs[-1][1]
     contextual = bool(previous_prompt) and filter_service.is_contextual_followup(normalized)
-    if not (decision.allowed or contextual):
+    if not (decision.allowed or contextual or (decision.reason == "subject_not_recognized" and is_valid_subject(subject))):
         return decision
 
     previous_source = None
@@ -682,16 +689,16 @@ async def _check_contextual_topic(
         return FilterDecision(True, reason, subject)
 
     # A Laya-only pass does not renew itself across successive candidate turns.
-    must_review = contextual or after_block or (latest_user is not None and previous_source != "llm")
+    must_review = latest_user is not None
     previous_question = latest_user.content if latest_user and not after_block else None
-    if after_block and contextual:
+    if after_block and previous_prompt:
         # A block disables the shortcut, but the student can return to the prior exercise.
         previous_question = next((text for role, text in reversed(history_pairs) if role == MessageRole.USER.value), None)
     topic = await intent_classify_service.classify_topic_with_source(
         question=question, subject=subject, model_key=model_key,
         context=previous_question,
         followup_prompt=previous_prompt if must_review else None,
-        contextual_model_eligible=contextual and not after_block and previous_source == "llm",
+        contextual_model_eligible=bool(previous_prompt) and not after_block and previous_source == "llm",
     )
     if topic.label != "academic":
         return FilterDecision(False, "topic_classifier_rejected" if topic.label == "off_topic" else "topic_classifier_unavailable")

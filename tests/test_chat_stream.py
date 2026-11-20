@@ -4287,3 +4287,28 @@ def test_ordinal_short_reply_matches_requested_item_only():
     assert not matches("第二个选项", prompt)
     assert not matches("第二个名词，给我推荐网剧", prompt)
     assert not matches("第二个名词", "上一题问的是哪个名词？接下来你想讨论什么？")
+
+
+def test_unrecognized_long_question_and_followup_reach_topic_review(monkeypatch):
+    from backend.services.intent_classify_service import TopicVerdict
+
+    calls = []
+
+    async def classify(**kwargs):
+        calls.append(kwargs)
+        return TopicVerdict("academic", verified_by_llm=True)
+
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic_with_source", classify)
+    topic_store = MemoryStore()
+    monkeypatch.setattr(chat_router, "store", topic_store)
+    question = "上极板带正电，下极板带负电"
+    user = Message(id=1, conversation_id=1, role=MessageRole.USER, content=question, delivery_status="completed")
+    tutor = Message(id=2, role=MessageRole.ASSISTANT, content="想一想下一刻极板上的电荷变化。")
+    topic_store.set(chat_router._topic_verification_key(user), "llm")
+    for turn in [(None, None), (user, tutor)]:
+        assert asyncio.run(chat_router._check_chat_question(
+            question, "物理", history_pairs=[], latest_topic_turn=turn,
+        )).allowed
+    assert calls[0]["followup_prompt"] is None
+    assert calls[1]["contextual_model_eligible"]
+    assert calls[1]["followup_prompt"] == tutor.content

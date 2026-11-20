@@ -255,7 +255,7 @@ class SuggestedReplyService:
             return False
         if not filter_service.validate_answer(reply, subject=subject).allowed:
             return False
-        return not filter_service.is_question_blocked(reply)
+        return not filter_service.is_question_blocked(reply, subject)
 
 
 suggested_reply_service = SuggestedReplyService()

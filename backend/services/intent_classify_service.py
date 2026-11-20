@@ -51,9 +51,11 @@ def _topic_followup_excerpt(prompt: str) -> str:
 
 def _contextual_model_input(previous_question: str | None, tutor_reply: str) -> str | None:
     questions = list(TUTOR_QUESTION_RE.finditer(tutor_reply))
-    if not previous_question or not questions:
+    if not previous_question or not tutor_reply.strip():
         return None
     # Stay within the existing Laya wire limit. Use the same input format as offline evaluation.
+    if not questions:
+        return f"学生上一问：{previous_question[:145]}\n导师回复：{tutor_reply.strip()[-130:]}"
     tutor_question = questions[-1].group().strip()[-130:]
     return f"学生上一问：{previous_question[:145]}\n导师问句：{tutor_question}"
 
@@ -219,7 +221,8 @@ class IntentClassifyService:
 
     def _topic_cache_key(self, kind: str, subject: str, normalized: str) -> str:
         digest = hashlib.sha256(f"{subject}|{normalized}".encode()).hexdigest()
-        return f"{self.CACHE_PREFIX}topic:{kind}:{digest}"
+        namespace = "input-v2" if kind == "input" else kind
+        return f"{self.CACHE_PREFIX}topic:{namespace}:{digest}"
 
     def _cached_topic(self, cache_key: str) -> str | None:
         try:
@@ -249,7 +252,7 @@ class IntentClassifyService:
             context = (context or "")[:300]
             followup_prompt = _topic_followup_excerpt(followup_prompt)
             fingerprint = json.dumps([subject, question[:1200], context, followup_prompt], ensure_ascii=False)
-            cache_key = self.CACHE_PREFIX + "topic:followup:" + hashlib.sha256(fingerprint.encode()).hexdigest()
+            cache_key = self.CACHE_PREFIX + "topic:followup-v2:" + hashlib.sha256(fingerprint.encode()).hexdigest()
         cached = self._cached_topic(cache_key)
         if cached is not None:
             return cached

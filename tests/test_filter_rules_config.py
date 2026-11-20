@@ -276,3 +276,17 @@ def test_admin_filter_rules_endpoints():
     assert payload["source"] == SOURCE_CONFIG_FILE
     assert payload["error"] is None
     assert payload["enabled_rules"] >= 25
+
+
+def test_scoped_input_rule_matches_same_subject_at_both_checks(tmp_path):
+    config = json.loads(DEFAULT_CONFIG_PATH.read_text())
+    config["rules"].append(dict(id="input.test.scoped", layer="question_blocklist",
+                                type="keyword", pattern="模拟情境", subjects=["数学"]))
+    path = tmp_path / "rules.json"
+    _write_config(path, config)
+    service = _service_for(path)
+    for subject, blocked in [("数学", True), ("物理", False)]:
+        text = "模拟情境中的计算"
+        assert service.check_question(text, subject).allowed != blocked
+        assert service.is_question_blocked(text, subject) == blocked
+        assert service.validate_answer("先画图。", question=text, subject=subject).allowed != blocked

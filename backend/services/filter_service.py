@@ -92,9 +92,8 @@ class FilterService:
         normalized = self.normalize_text(question)
         if not normalized:
             return FilterDecision(False, "empty_question")
-        for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST):
-            if rule.pattern.search(normalized):
-                return FilterDecision(False, "blocked_non_subject")
+        if self.is_question_blocked(question, declared_subject):
+            return FilterDecision(False, "blocked_non_subject")
 
         # 规则只做初筛；*_candidate 必须由调用方再通过实际话题分类。
         selected_subject = declared_subject if declared_subject in snapshot.subjects else None
@@ -115,10 +114,15 @@ class FilterService:
 
         return FilterDecision(False, "subject_not_recognized")
 
-    def is_question_blocked(self, text: str) -> bool:
+    def is_question_blocked(self, text: str, subject: str | None = None) -> bool:
         snapshot = self._engine.snapshot()
-        normalized = self.normalize_text(text)
-        return any(rule.pattern.search(normalized) for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST))
+        spaced = unicodedata.normalize("NFKC", text or "").casefold()
+        compact = re.sub(r"\s+", "", spaced)
+        return any(
+            (not rule.subjects or subject in rule.subjects)
+            and (rule.pattern.search(compact) or rule.pattern.search(spaced))
+            for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST)
+        )
 
     # ---- LLM 输出校验 ----
 
@@ -138,7 +142,7 @@ class FilterService:
         """
         snapshot = self._engine.snapshot()
         issues: list[str] = []
-        if question and self.is_question_blocked(question):
+        if question and self.is_question_blocked(question, subject):
             issues.append("blocked_non_subject_request")
         if not skip_direct_answer:
             for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER):
