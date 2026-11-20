@@ -12,6 +12,7 @@ import json
 import httpx
 
 from backend.services import intent_classify_service as intent_module
+from backend.services.first_refusal_audit import trace_first_question
 from backend.services.intent_classify_service import IntentClassifyService
 from backend.services.store_service import MemoryStore
 from backend.services.topic_model_service import TopicModelService
@@ -283,7 +284,10 @@ def test_accept_only_uses_existing_remote_verdict_before_local_inference():
         original = await service.classify_topic(question=question, subject="数学")
         assert original == "off_topic"
         model.mode = "accept_only"
-        cached = await service.classify_topic_with_source(question=question, subject="数学")
+        with trace_first_question(True) as trace:
+            cached = await service.classify_topic_with_source(question=question, subject="数学")
+        assert trace["source"] == "cache"
+        assert trace["classifier_model_key"]
         assert cached.label == "off_topic"
         assert cached.verified_by_llm
         fresh = await service.classify_topic_with_source(question="怎么求概率？", subject="数学")

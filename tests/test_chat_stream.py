@@ -477,7 +477,7 @@ def test_first_filter_refusal_bypasses_role_without_creating_conversation(monkey
 
         response = asyncio.run(
             chat_router.stream_chat(
-                ChatRequest(subject="数学", message="你好，今天天气怎么样", role_id=role.id),
+                ChatRequest(subject="数学", message=f"{current_user.full_name} 13800138000，今天天气怎么样", role_id=role.id),
                 session,
                 current_user,
                 FakeRequest(),
@@ -490,6 +490,15 @@ def test_first_filter_refusal_bypasses_role_without_creating_conversation(monkey
         assert meta["role_status"] == "bypassed"
         assert meta["role_applied"] is False
         assert meta["conversation_id"] is None
+        audit = session.scalars(select(AuditLog).where(AuditLog.action == "first_question_refused")).one()
+        assert audit.actor_id is None and audit.ip_address is None
+        assert audit.detail["subject"] == "数学"
+        assert audit.detail["rule_id"] == "input.offtopic.daily_life"
+        assert audit.detail["reason"] == "blocked_non_subject"
+        assert audit.detail["models"] == {}
+        assert "天气" in audit.detail["question"]
+        assert current_user.full_name not in audit.detail["question"]
+        assert "13800138000" not in audit.detail["question"]
         assert stored is None
         assert session.scalar(select(Conversation)) is None
     finally:
@@ -1919,6 +1928,10 @@ def test_chat_stream_routes_image_only_off_topic_without_llm(monkeypatch):
 
     session = session_factory()
     try:
+        audit = session.scalars(select(AuditLog).where(AuditLog.action == "first_question_refused")).one()
+        assert audit.detail["reason"] == "image_off_topic"
+        assert audit.detail["has_image"]
+        assert audit.detail["question"] == "[图片提问]"
         assert events[0][1]["conversation_id"] is None
         assert session.scalar(select(ChatMessageAttachment)) is None
         assert session.scalar(select(Message)) is None

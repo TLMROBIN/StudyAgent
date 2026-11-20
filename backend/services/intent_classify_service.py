@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from backend.config import get_settings
 
+from backend.services.first_refusal_audit import classifier_provenance, record_model
 from backend.services.llm_service import LLMService, llm_service
 from backend.services.metrics_service import (
     chat_intent_classify_total,
@@ -158,10 +159,14 @@ class IntentClassifyService:
             if self.topic_model.mode == "accept_only":
                 cached = self._cached_topic(self._topic_cache_key(kind, subject, normalized))
                 if cached is not None:
+                    record_model(source="cache")
                     return TopicVerdict(cached, verified_by_llm=True)
             result = await self.topic_model.predict(text=question, subject=subject, context=context, kind=kind)
+            if result is not None:
+                record_model(laya_version=result.model_version)
             if result is not None and self.topic_model.can_decide(result.band):
                 chat_topic_classify_total.labels(result=f"model_{result.band}").inc()
+                record_model(source="laya")
                 return TopicVerdict(result.band)
         elif (
             self.topic_model.mode == "shadow" and (followup_prompt is None or shadow_context is not None)
@@ -229,6 +234,16 @@ class IntentClassifyService:
             cached = self.store_backend.get(cache_key)
         except Exception:
             return None
+        if cached and cached.startswith("{"):
+            try:
+                entry = json.loads(cached)
+            except ValueError:
+                return None
+            if not isinstance(entry, dict) or entry.get("label") != "off_topic":
+                return None
+            record_model(**{key: entry[key] for key in ("classifier_model_key", "classifier_model")
+                            if isinstance(entry.get(key), str)})
+            cached = "off_topic"
         if cached in {"academic", "off_topic"}:
             chat_topic_classify_total.labels(result="hit_cache").inc()
             return cached
@@ -255,6 +270,7 @@ class IntentClassifyService:
             cache_key = self.CACHE_PREFIX + "topic:followup-v3:" + hashlib.sha256(fingerprint.encode()).hexdigest()
         cached = self._cached_topic(cache_key)
         if cached is not None:
+            record_model(source="cache")
             return cached
         messages = [
             {
@@ -311,6 +327,7 @@ class IntentClassifyService:
                 continue
             verdict = (raw or "").strip().strip('`"\'。.，, ').lower()
             if verdict in {"academic", "off_topic"}:
+                record_model(source="classifier", classifier_model_key=key or "default")
                 if index:
                     chat_topic_classify_total.labels(result="llm_backup_ok").inc()
                 break
@@ -320,7 +337,10 @@ class IntentClassifyService:
             return None
 
         try:
-            self.store_backend.set(cache_key, verdict, ttl_seconds=self.CACHE_TTL_SECONDS)
+            value = verdict
+            if kind == "input" and verdict == "off_topic":
+                value = json.dumps({"label": verdict, **classifier_provenance(key)})
+            self.store_backend.set(cache_key, value, ttl_seconds=self.CACHE_TTL_SECONDS)
         except Exception:
             pass
         chat_topic_classify_total.labels(result="llm_ok").inc()

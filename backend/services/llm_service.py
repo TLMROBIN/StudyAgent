@@ -13,6 +13,7 @@ from typing import AsyncIterator, Literal
 import httpx
 from anyio import CancelScope
 
+from backend.services.first_refusal_audit import record_model
 from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.services.metrics_service import (
@@ -619,6 +620,7 @@ class LLMService:
                 )
                 if text.strip():
                     self._reset_provider(provider)
+                    record_model(classifier_model=provider.model)
                     return text.strip()
                 self._mark_provider_failure(provider)
             except Exception as exc:
@@ -979,6 +981,7 @@ class LLMService:
                 text = await self._complete_openai_compatible(provider, messages)
                 if text and not self._looks_like_no_image_received(text):
                     self._reset_provider(provider)
+                    record_model(image_model=provider.model)
                     return text.strip()
             except Exception as exc:
                 duration_seconds = monotonic() - started_at

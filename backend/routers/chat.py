@@ -58,6 +58,7 @@ from backend.services.agent_role_service import (
 )
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
+from backend.services.first_refusal_audit import log_first_refusal, trace_first_question
 from backend.services.filter_service import FilterDecision, OutputValidation, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
 from backend.services.llm_service import LLMCallError, MODEL_CALL_FAILED_MESSAGE, LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
@@ -2393,21 +2394,23 @@ async def _stream_chat(
     request.state.chat_user_turn_index = user_turn_index
     if replay_state and replayed_user_message is not None:
         request.state.chat_user_message_id = replayed_user_message.id
+    image_models = None
     if has_image_turn and image_content and (stored_attachment or attachment_record):
         image_storage_key = stored_attachment.storage_key if stored_attachment else attachment_record.storage_key
         image_mime_type = stored_attachment.mime_type if stored_attachment else attachment_record.mime_type
         image_understanding_started = perf_counter()
         try:
-            image_understanding = await _await_image_understanding(
-                request,
-                image_bytes=image_content,
-                mime_type=image_mime_type,
-                subject=payload.subject,
-                user_text=payload.message,
-                model_key=selected_model_key,
-                image_path=str(chat_attachment_service.resolve_path(image_storage_key)),
-                attachment_id=attachment_record.id if attachment_record else None,
-            )
+            with trace_first_question(conversation is None) as image_models:
+                image_understanding = await _await_image_understanding(
+                    request,
+                    image_bytes=image_content,
+                    mime_type=image_mime_type,
+                    subject=payload.subject,
+                    user_text=payload.message,
+                    model_key=selected_model_key,
+                    image_path=str(chat_attachment_service.resolve_path(image_storage_key)),
+                    attachment_id=attachment_record.id if attachment_record else None,
+                )
         finally:
             chat_image_understanding_seconds.observe(perf_counter() - image_understanding_started)
         if image_understanding.source == "failed":
@@ -2441,6 +2444,13 @@ async def _stream_chat(
         blocked_turn = not (image_understanding and image_understanding.is_academic)
         turn_blocked_status = BLOCKED_DELIVERY_STATUS if blocked_turn else "completed"
         turn_guidance_stage = conversation.guidance_stage if conversation is not None else GuidanceStage.INITIAL
+        if blocked_turn and conversation is None:
+            log_first_refusal(
+                db, student=current_user, subject=payload.subject,
+                question=filter_question or image_understanding.prompt_summary or IMAGE_ONLY_MESSAGE_PLACEHOLDER,
+                reason="image_off_topic", has_image=True,
+                models={"source": "image", **(image_models or {})},
+            )
         if blocked_turn and persisted_user_message is not None:
             _mark_turn_blocked(db, persisted_user_message, block_reason="image_off_topic")
         if conversation is not None:
@@ -2491,14 +2501,15 @@ async def _stream_chat(
         _latest_topic_turn(conversation.messages, before_turn=user_turn_index)
         if contextual_gate and conversation is not None else (None, None)
     )
-    decision = await _check_chat_question(
-        filter_question,
-        payload.subject,
-        history_pairs=history_pairs,
-        has_image_turn=has_image_turn,
-        model_key=selected_model_key,
-        latest_topic_turn=latest_topic_turn if contextual_gate else None,
-    )
+    with trace_first_question(conversation is None) as audit_models:
+        decision = await _check_chat_question(
+            filter_question,
+            payload.subject,
+            history_pairs=history_pairs,
+            has_image_turn=has_image_turn,
+            model_key=selected_model_key,
+            latest_topic_turn=latest_topic_turn if contextual_gate else None,
+        )
     if (
         not decision.allowed
         and decision.reason == "subject_not_recognized"
@@ -2517,6 +2528,12 @@ async def _stream_chat(
         filter_blocked_total.inc()
         refusal = filter_service.refusal_text
         # 拒绝不是答疑回合：这一问一答对学生历史隐藏（数据库与审计仍保留）。
+        if conversation is None:
+            log_first_refusal(
+                db, student=current_user, subject=payload.subject, question=filter_question,
+                reason=decision.reason, has_image=has_image_turn, rule_id=decision.rule_id,
+                models={**(image_models or {}), **(audit_models or {})},
+            )
         if persisted_user_message is not None:
             _mark_turn_blocked(db, persisted_user_message, block_reason=decision.reason or "topic_blocked")
         turn_guidance_stage = conversation.guidance_stage if conversation is not None else GuidanceStage.INITIAL

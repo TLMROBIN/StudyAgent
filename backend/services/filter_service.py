@@ -26,6 +26,7 @@ class FilterDecision:
     allowed: bool
     reason: str
     subject: str | None = None
+    rule_id: str | None = None
 
 
 @dataclass
@@ -92,8 +93,9 @@ class FilterService:
         normalized = self.normalize_text(question)
         if not normalized:
             return FilterDecision(False, "empty_question")
-        if self.is_question_blocked(question, declared_subject):
-            return FilterDecision(False, "blocked_non_subject")
+        rule_id = self._blocking_rule(question, declared_subject, snapshot)
+        if rule_id:
+            return FilterDecision(False, "blocked_non_subject", rule_id=rule_id)
 
         # 规则只做初筛；*_candidate 必须由调用方再通过实际话题分类。
         selected_subject = declared_subject if declared_subject in snapshot.subjects else None
@@ -115,14 +117,18 @@ class FilterService:
         return FilterDecision(False, "subject_not_recognized")
 
     def is_question_blocked(self, text: str, subject: str | None = None) -> bool:
-        snapshot = self._engine.snapshot()
+        return self._blocking_rule(text, subject, self._engine.snapshot()) is not None
+
+    @staticmethod
+    def _blocking_rule(text: str, subject: str | None, snapshot: RuleSnapshot) -> str | None:
         spaced = unicodedata.normalize("NFKC", text or "").casefold()
         compact = re.sub(r"\s+", "", spaced)
-        return any(
-            (not rule.subjects or subject in rule.subjects)
-            and (rule.pattern.search(compact) or rule.pattern.search(spaced))
-            for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST)
-        )
+        for rule in snapshot.layer_rules(LAYER_QUESTION_BLOCKLIST):
+            if rule.subjects and subject not in rule.subjects:
+                continue
+            if rule.pattern.search(compact) or rule.pattern.search(spaced):
+                return rule.id
+        return None
 
     # ---- LLM 输出校验 ----
 
