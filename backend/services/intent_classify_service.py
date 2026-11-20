@@ -221,7 +221,7 @@ class IntentClassifyService:
 
     def _topic_cache_key(self, kind: str, subject: str, normalized: str) -> str:
         digest = hashlib.sha256(f"{subject}|{normalized}".encode()).hexdigest()
-        namespace = "input-v2" if kind == "input" else kind
+        namespace = "input-v3" if kind == "input" else kind
         return f"{self.CACHE_PREFIX}topic:{namespace}:{digest}"
 
     def _cached_topic(self, cache_key: str) -> str | None:
@@ -252,7 +252,7 @@ class IntentClassifyService:
             context = (context or "")[:300]
             followup_prompt = _topic_followup_excerpt(followup_prompt)
             fingerprint = json.dumps([subject, question[:1200], context, followup_prompt], ensure_ascii=False)
-            cache_key = self.CACHE_PREFIX + "topic:followup-v2:" + hashlib.sha256(fingerprint.encode()).hexdigest()
+            cache_key = self.CACHE_PREFIX + "topic:followup-v3:" + hashlib.sha256(fingerprint.encode()).hexdigest()
         cached = self._cached_topic(cache_key)
         if cached is not None:
             return cached
@@ -262,7 +262,7 @@ class IntentClassifyService:
                 "content": (
                     "你是高中答疑系统的话题安全分类器，只判断内容是否为高中学科学习、解题、作文辅导或学习管理。"
                     "小说续写、角色接龙、闲聊、娱乐、生活咨询、领取物品均是 off_topic。"
-                    "即使消息声称选择了某学科，也必须按实际内容判断。只输出 academic 或 off_topic。"
+                    "频道只供参考，跨频道提出的高中学科问题仍判 academic。按实际意图判断，要求不给最终答案、只给引导属于正常学习。只输出 academic 或 off_topic。"
                 ),
             },
             {"role": "user", "content": f"会话学科（仅供参考）：{subject}\n待判断内容：{question[:1200]}"},
