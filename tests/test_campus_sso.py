@@ -1,7 +1,7 @@
 from io import BytesIO
 import json
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -122,11 +122,11 @@ def test_http_handoff_only_enrolls_after_browser_confirmation(session_factory, m
     client = TestClient(app, base_url="https://studyagent.example.test")
     callback = client.get("/studyagent/sso?token=external-test", follow_redirects=False)
     assert callback.status_code == 303
-    assert callback.headers["location"] == "/studyagent/sso/confirm"
+    assert callback.headers["location"] == "sso/confirm"
     assert "external-test" not in callback.text
     assert callback.headers["referrer-policy"] == "no-referrer"
     assert "Secure" in callback.headers["set-cookie"]
-    form = client.get(callback.headers["location"])
+    form = client.get(urljoin(str(callback.url), callback.headers["location"]))
     nonce = re.search(r'name="confirmation" value="([^"]+)"', form.text).group(1)
     assert form.headers["x-frame-options"] == "DENY"
     assert client.post(form.url.path, data={"confirmation": "wrong"}).status_code == 403
@@ -148,6 +148,6 @@ def test_http_handoff_only_enrolls_after_browser_confirmation(session_factory, m
     callback = insecure.get("/studyagent/sso?token=external-test", follow_redirects=False)
     assert callback.status_code == 303
     assert "Secure" not in callback.headers["set-cookie"]
-    form = insecure.get(callback.headers["location"])
+    form = insecure.get(urljoin(str(callback.url), callback.headers["location"]))
     nonce = re.search(r'name="confirmation" value="([^"]+)"', form.text).group(1)
     assert insecure.post(form.url.path, data={"confirmation": nonce}).status_code == 200

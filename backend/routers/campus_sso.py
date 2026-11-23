@@ -72,13 +72,13 @@ def campus_callback(request: Request) -> HTMLResponse | RedirectResponse:
         profile = verify_campus_token(token, settings)
     except CampusSsoError as exc:
         error = "unavailable" if isinstance(exc, CampusSsoUnavailable) else "invalid"
-        response = RedirectResponse(f"{_confirm_path()}?error={error}", status_code=303, headers=_HEADERS)
+        response = RedirectResponse(f"sso/confirm?error={error}", status_code=303, headers=_HEADERS)
         response.delete_cookie(_COOKIE, path=_confirm_path(), secure=secure, httponly=True, samesite="lax")
         return response
 
     ticket = secrets.token_urlsafe(32)
     store.set(f"campus-sso:pending:{ticket}", json.dumps(asdict(profile)), ttl_seconds=_PENDING_SECONDS)
-    response = RedirectResponse(_confirm_path(), status_code=303, headers=_HEADERS)
+    response = RedirectResponse("sso/confirm", status_code=303, headers=_HEADERS)
     response.set_cookie(
         _COOKIE, ticket, max_age=_PENDING_SECONDS, path=_confirm_path(),
         secure=secure, httponly=True, samesite="lax",
