@@ -118,6 +118,7 @@ localStorage.setItem("studyagent-access-token", {tokens["access_token"]!r});
 localStorage.setItem("studyagent-refresh-token", {tokens["refresh_token"]!r});
 localStorage.setItem("studyagent-id-token-hint", {id_token_hint!r});
 localStorage.setItem("studyagent-sso-session", "1");
+localStorage.removeItem("studyagent-campus-sso-session");
 location.replace({target!r});
 </script>
 </body>

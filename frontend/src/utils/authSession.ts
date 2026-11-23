@@ -4,6 +4,7 @@ export const ACCESS_TOKEN_STORAGE_KEY = 'studyagent-access-token'
 export const REFRESH_TOKEN_STORAGE_KEY = 'studyagent-refresh-token'
 export const ID_TOKEN_HINT_STORAGE_KEY = 'studyagent-id-token-hint'
 export const SSO_SESSION_STORAGE_KEY = 'studyagent-sso-session'
+export const CAMPUS_SSO_SESSION_STORAGE_KEY = 'studyagent-campus-sso-session'
 export const SESSION_EXPIRED_EVENT = 'studyagent:session-expired'
 
 function buildSsoLogoutUrl(idTokenHint = ''): string {
@@ -47,6 +48,10 @@ export function getStoredIdTokenHint(): string {
   return window.localStorage.getItem(ID_TOKEN_HINT_STORAGE_KEY) || ''
 }
 
+export function isCampusSsoSession(): boolean {
+  return storageAvailable() && window.localStorage.getItem(CAMPUS_SSO_SESSION_STORAGE_KEY) === '1'
+}
+
 export function storeAuthTokens(accessToken: string, refreshToken: string) {
   if (!storageAvailable()) {
     return
@@ -64,6 +69,7 @@ export function clearStoredAuthTokens() {
   window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY)
   window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY)
   window.localStorage.removeItem(ID_TOKEN_HINT_STORAGE_KEY)
+  window.localStorage.removeItem(CAMPUS_SSO_SESSION_STORAGE_KEY)
 }
 
 export function resetSessionExpiredState() {

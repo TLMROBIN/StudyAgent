@@ -134,6 +134,8 @@ def test_http_handoff_only_enrolls_after_browser_confirmation(session_factory, m
         assert db.scalar(select(User)) is None
     success = client.post(form.url.path, data={"confirmation": nonce})
     assert success.status_code == 200
+    assert 'localStorage.setItem("studyagent-campus-sso-session", "1")' in success.text
+    assert 'localStorage.removeItem("studyagent-sso-session")' in success.text
     token = json.loads(re.search(r'setItem\("studyagent-access-token", ([^;]+)\);', success.text).group(1))
     with session_factory() as db:
         user = db.scalar(select(User))

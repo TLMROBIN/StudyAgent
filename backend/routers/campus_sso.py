@@ -135,6 +135,7 @@ def campus_complete(request: Request, db: DbSession, confirmation: Annotated[str
             f'localStorage.setItem("studyagent-refresh-token", {json.dumps(tokens["refresh_token"])});'
             'localStorage.removeItem("studyagent-id-token-hint");'
             'localStorage.removeItem("studyagent-sso-session");'
+            'localStorage.setItem("studyagent-campus-sso-session", "1");'
             f'location.replace({json.dumps(target)});</script>',
             nonce=nonce,
         )
