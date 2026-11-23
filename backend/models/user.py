@@ -62,6 +62,7 @@ class User(TimestampMixin, Base):
 
     classroom: Mapped[Classroom | None] = relationship(back_populates="students")
     teacher_classrooms: Mapped[list[Classroom]] = relationship(secondary=teacher_classes, back_populates="teachers")
+    campus_identities: Mapped[list["CampusIdentity"]] = relationship(cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="student", cascade="all, delete-orphan")
     uploaded_documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="creator")
     created_agent_configs: Mapped[list["AgentConfig"]] = relationship(back_populates="creator")
@@ -111,6 +112,21 @@ class User(TimestampMixin, Base):
                 return f"{grade_label}{self.classroom.name}"
             return self.classroom.name
         return grade_label
+
+
+class CampusIdentity(Base):
+    __tablename__ = "campus_identities"
+    __table_args__ = (
+        UniqueConstraint("school_id", "external_id"),
+        UniqueConstraint("school_id", "number"),
+        UniqueConstraint("school_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_id: Mapped[str] = mapped_column(String(128))
+    external_id: Mapped[str | None] = mapped_column(String(128))
+    number: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
 
 if TYPE_CHECKING:
