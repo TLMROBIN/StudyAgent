@@ -4,16 +4,17 @@ from dataclasses import dataclass
 import hashlib
 import json
 import secrets
+from unicodedata import normalize
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.config import Settings
-from backend.models.user import CampusIdentity, User, UserRole
+from backend.models.user import CampusIdentity, CampusRosterStudent, User, UserRole
 
 
 class CampusSsoError(Exception):
@@ -127,13 +128,18 @@ def resolve_campus_user(db: Session, profile: CampusProfile, *, auto_create_stud
         else:
             if not auto_create_students or profile.role != UserRole.STUDENT:
                 raise CampusSsoError("账号尚未完成绑定，请联系管理员")
-            if db.scalar(select(User.id).where(User.student_no == profile.number)) is not None:
+            roster_student = db.get(CampusRosterStudent, (profile.school_id, profile.number))
+            if roster_student is None or roster_student.full_name != normalize("NFKC", profile.name).strip():
+                raise CampusSsoError("当前学生身份未匹配开通名册，请联系管理员")
+            if db.scalar(select(User.id).where(
+                or_(User.student_no == profile.number, User.username == profile.number)
+            ).limit(1)) is not None:
                 raise CampusSsoError("已有账号需要核对身份，请联系管理员")
             identifier = json.dumps([profile.school_id, profile.external_id], ensure_ascii=False)
             username = "campus-" + hashlib.sha256(identifier.encode()).hexdigest()[:48]
             user = User(
                 username=username,
-                full_name=profile.name,
+                full_name=roster_student.full_name,
                 role=UserRole.STUDENT,
                 password_hash="!campus-sso:" + secrets.token_urlsafe(32),
             )

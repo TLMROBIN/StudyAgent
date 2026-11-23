@@ -129,6 +129,14 @@ class CampusIdentity(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
 
+class CampusRosterStudent(Base):
+    __tablename__ = "campus_roster_students"
+
+    school_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    number: Mapped[str] = mapped_column(String(64), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(64))
+
+
 if TYPE_CHECKING:
     from backend.models.agent_config import AgentConfig
     from backend.models.conversation import Conversation

@@ -12,12 +12,12 @@ from sqlalchemy.pool import StaticPool
 
 from backend.config import Settings
 from backend.database import Base, get_db
-from backend.models.user import CampusIdentity, User, UserRole
+from backend.models.user import CampusIdentity, CampusRosterStudent, User, UserRole
 from backend.routers import campus_sso as campus_router
 from backend.security import decode_token
 from backend.services import campus_sso
 from backend.services.store_service import MemoryStore
-from scripts.import_campus_bindings import import_bindings
+from scripts.import_campus_bindings import import_bindings, load_roster
 
 
 @pytest.fixture
@@ -111,6 +111,9 @@ def test_http_handoff_only_enrolls_after_browser_confirmation(session_factory, m
     monkeypatch.setattr(campus_router, "get_settings", lambda: settings)
     monkeypatch.setattr(campus_router, "store", MemoryStore())
     monkeypatch.setattr(campus_router, "verify_campus_token", lambda token, cfg: student_profile())
+    with session_factory() as db:
+        db.add(CampusRosterStudent(school_id="school-1", number="S01", full_name="学生甲"))
+        db.commit()
     app = FastAPI()
     app.include_router(campus_router.router, prefix="/studyagent")
 
@@ -153,3 +156,27 @@ def test_http_handoff_only_enrolls_after_browser_confirmation(session_factory, m
     form = insecure.get(urljoin(str(callback.url), callback.headers["location"]))
     nonce = re.search(r'name="confirmation" value="([^"]+)"', form.text).group(1)
     assert insecure.post(form.url.path, data={"confirmation": nonce}).status_code == 200
+
+
+def test_auto_create_requires_matching_roster_number_name_and_school(session_factory, tmp_path):
+    roster_csv = tmp_path / "roster.csv"
+    roster_csv.write_text("number,full_name\nS01,学生甲\n", encoding="utf-8")
+    bindings = tmp_path / "bindings.csv"
+    bindings.write_text("StudyAgent用户ID,StudyAgent账号,确认的中台学号\n", encoding="utf-8")
+    roster = load_roster(roster_csv)
+    with session_factory() as db:
+        assert import_bindings(db, bindings, "school-1", apply=False, roster=roster) == (0, 0)
+        assert db.scalar(select(CampusRosterStudent)) is None
+        assert import_bindings(db, bindings, "school-1", apply=True, roster=roster) == (0, 0)
+        for profile in (
+            student_profile(number="not-listed"),
+            campus_sso.CampusProfile("school-1", "student-id", "S01", "别的学生", UserRole.STUDENT),
+            campus_sso.CampusProfile("school-2", "student-id", "S01", "学生甲", UserRole.STUDENT),
+            campus_sso.CampusProfile("school-1", "teacher-id", "S01", "学生甲", UserRole.TEACHER),
+        ):
+            with pytest.raises(campus_sso.CampusSsoError):
+                campus_sso.resolve_campus_user(db, profile, auto_create_students=True)
+        assert db.scalar(select(User)) is None
+        user = campus_sso.resolve_campus_user(db, student_profile(), auto_create_students=True)
+        assert campus_sso.resolve_campus_user(db, student_profile(), auto_create_students=True).id == user.id
+        assert db.scalars(select(User)).all() == [user]
