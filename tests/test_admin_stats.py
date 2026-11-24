@@ -75,6 +75,48 @@ def test_teacher_cannot_manage_school_notifications():
         assert client.post("/api/admin/notifications/1/archive").status_code == 403
 
 
+def test_teacher_schoolwide_stats_do_not_grant_conversation_access():
+    from openpyxl import load_workbook
+    from backend.routers import chat as chat_router
+
+    SessionLocal = build_session()
+    with SessionLocal() as session:
+        classroom = Classroom(grade=1, name="1班")
+        teacher = User(username="teacher-scope", full_name="教师", role=UserRole.TEACHER, password_hash="hash")
+        student = User(username="student-scope", full_name="学生", role=UserRole.STUDENT, classroom=classroom, password_hash="hash")
+        session.add_all([teacher, student])
+        session.flush()
+        item = Conversation(student_id=student.id, subject="物理")
+        session.add(item)
+        session.flush()
+        marker = "仅用于测试的完整对话消息"
+        session.add(Message(conversation_id=item.id, role=MessageRole.USER, content=marker))
+        identity = item.id
+        session.commit()
+
+    client = build_admin_client(SessionLocal, teacher)
+    client.app.include_router(chat_router.router)
+    client.app.include_router(stats_router.router)
+    with client:
+        totals = client.get("/api/stats/overview")
+        assert totals.status_code == 200 and totals.json()["total_questions"] == 1
+        assert marker not in totals.text
+        assert client.get("/api/stats/portraits").json() == []
+        assert client.get(f"/api/stats/students/{student.id}").status_code == 403
+        export = client.get("/api/stats/export?format=xlsx")
+        assert export.status_code == 200
+        workbook = load_workbook(io.BytesIO(export.content), read_only=True, data_only=True)
+        try:
+            assert list(workbook["班级统计"].values)[1][4] == 1
+            assert len(list(workbook["学生画像"].values)) == 1
+            assert not any(marker == cell for sheet in workbook for row in sheet.values for cell in row)
+        finally:
+            workbook.close()
+        assert client.get("/api/admin/conversation-archive").status_code == 403
+        assert client.get("/api/admin/conversation-archive/export").status_code == 403
+        assert client.get(f"/api/chat/history/{identity}").status_code == 404
+
+
 def test_stats_service_returns_classroom_breakdown_and_portraits():
     SessionLocal = build_session()
     session = SessionLocal()
@@ -870,7 +912,7 @@ def test_student_portrait_serializes_naive_utc_to_beijing():
 
 
 def test_dashboard_aggregates_preserve_scope_empty_students_and_message_roles():
-    """Counting must retain archived/inactive history without exposing another class."""
+    """Retain historical totals and keep identified student rows within their authorized scope."""
     from sqlalchemy import event
 
     SessionLocal = build_session()
@@ -946,6 +988,12 @@ def test_dashboard_aggregates_preserve_scope_empty_students_and_message_roles():
             assert stats_router.overview(db, viewers['none']).has_assigned_classrooms is False
             assert stats_router.overview(db, viewers['teacher']).has_assigned_classrooms is True
             assert stats_router.overview(db, viewers['admin']).has_assigned_classrooms is None
+            assert stats_router.overview(db, viewers['none']).total_questions == 6
+            assert stats_router.overview(db, viewers['teacher']).total_questions == 6
+            assert stats_router.overview(db, viewers['first']).total_questions == 4
+            assert stats_router.classroom_breakdown(db, viewers['none']) == stats_router.classroom_breakdown(db, viewers['admin'])
+            assert stats_router.usage_trend(db, viewers['none'], subjects=[]) == stats_router.usage_trend(db, viewers['admin'], subjects=[])
+            assert stats_router.student_portraits(db=db, current_user=viewers['none']) == []
             portraits = stats_service.student_portraits(db, viewers['teacher'], limit=1)
             assert len(portraits) == 1
             assert portraits[0]['student_id'] == ids['first']

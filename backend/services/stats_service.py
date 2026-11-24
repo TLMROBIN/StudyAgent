@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.models.conversation import Conversation, GuidanceStage, Message, MessageRole
@@ -13,8 +13,8 @@ from backend.services.physics_error_profile_service import physics_error_profile
 
 
 class StatsService:
-    def overview(self, db: Session, viewer: User) -> dict:
-        scope = self._student_scope(viewer)
+    def overview(self, db: Session, viewer: User, *, school_wide: bool = False) -> dict:
+        scope = self._student_scope(viewer, school_wide=school_wide)
         total_questions, resolved = db.execute(
             select(func.count(Conversation.id), func.sum(case((Conversation.resolved.is_(True), 1), else_=0)))
             .where(Conversation.student_id.in_(scope))
@@ -54,8 +54,9 @@ class StatsService:
         start_date: str | date | None = None,
         end_date: str | date | None = None,
         subjects: list[str] | None = None,
+        school_wide: bool = False,
     ) -> dict:
-        scope = self._student_scope(viewer)
+        scope = self._student_scope(viewer, school_wide=school_wide)
         requested_subjects = [subject.strip() for subject in (subjects or []) if subject.strip()]
         available_subjects = list(db.scalars(
             select(Conversation.subject).distinct()
@@ -126,7 +127,7 @@ class StatsService:
         student = db.scalar(
             select(User)
             .where(User.id == student_id)
-            .options(selectinload(User.conversations).selectinload(Conversation.messages))
+            .options(selectinload(User.conversations))
         )
         conversations = list(student.conversations) if student else []
         total = len(conversations)
@@ -151,14 +152,15 @@ class StatsService:
             "physics_error_profile": physics_error_profile_service.profile_summary(db, student_id=student_id, subject="物理"),
         }
 
-    def classroom_breakdown(self, db: Session, viewer: User) -> list[dict]:
-        students = self._scoped_students(db, viewer)
-        totals = self._student_totals(db, viewer)
+    def classroom_breakdown(self, db: Session, viewer: User, *, school_wide: bool = False) -> list[dict]:
+        scope = self._student_scope(viewer, school_wide=school_wide)
+        students = self._scoped_students(db, scope)
+        totals = self._student_totals(db, scope)
         turns = dict(db.execute(
             select(Conversation.student_id, func.count(Message.id))
             .join(Message, Message.conversation_id == Conversation.id)
             .where(
-                Conversation.student_id.in_(self._student_scope(viewer)),
+                Conversation.student_id.in_(scope),
                 Message.role == MessageRole.USER,
                 Message.delivery_status == "completed",
             )
@@ -209,9 +211,10 @@ class StatsService:
         return sorted(rows, key=lambda item: (-item["total_conversations"], item["classroom_label"]))
 
     def student_portraits(self, db: Session, viewer: User, limit: int = 12) -> list[dict]:
-        totals = self._student_totals(db, viewer)
+        scope = self._student_scope(viewer)
+        totals = self._student_totals(db, scope)
         portraits = []
-        for student in self._scoped_students(db, viewer):
+        for student in self._scoped_students(db, scope):
             summary = totals.get(student.id)
             if summary is None:
                 continue
@@ -248,9 +251,9 @@ class StatsService:
         return portraits
 
     @staticmethod
-    def _student_scope(viewer: User):
+    def _student_scope(viewer: User, *, school_wide: bool = False) -> Select[tuple[int]]:
         statement = select(User.id).where(User.role == UserRole.STUDENT)
-        if viewer.role == UserRole.TEACHER:
+        if viewer.role == UserRole.TEACHER and not school_wide:
             statement = statement.where(User.classroom_id.in_(
                 select(teacher_classes.c.classroom_id).where(teacher_classes.c.teacher_id == viewer.id)
             ))
@@ -258,7 +261,7 @@ class StatsService:
             statement = statement.where(User.id == viewer.id)
         return statement
 
-    def _student_totals(self, db: Session, viewer: User) -> dict:
+    def _student_totals(self, db: Session, scope: Select[tuple[int]]) -> dict:
         rows = db.execute(
             select(
                 Conversation.student_id,
@@ -267,16 +270,16 @@ class StatsService:
                 func.sum(case((Conversation.guidance_stage == GuidanceStage.FALLBACK, 1), else_=0)).label("fallback"),
                 func.max(Conversation.updated_at).label("last_active_at"),
             )
-            .where(Conversation.student_id.in_(self._student_scope(viewer)))
+            .where(Conversation.student_id.in_(scope))
             .group_by(Conversation.student_id)
         ).all()
         return {row.student_id: row for row in rows}
 
-    def _scoped_students(self, db: Session, viewer: User) -> list[User]:
+    def _scoped_students(self, db: Session, scope: Select[tuple[int]]) -> list[User]:
         # Metadata only. Loading conversation/message relationships here causes
         # every dashboard request to materialize the school's full chat history.
         return list(db.scalars(
-            select(User).where(User.id.in_(self._student_scope(viewer)))
+            select(User).where(User.id.in_(scope))
             .options(selectinload(User.classroom))
             .order_by(User.full_name.asc())
         ))

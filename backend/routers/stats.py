@@ -23,7 +23,7 @@ def overview(db: DbSession, current_user: CurrentUser) -> StatsOverview:
             teacher_classes.c.teacher_id == current_user.id
         ))))
     return StatsOverview(
-        **stats_service.overview(db, current_user),
+        **stats_service.overview(db, current_user, school_wide=True),
         has_assigned_classrooms=has_assigned_classrooms,
     )
 
@@ -51,7 +51,7 @@ def student_profile(student_id: int, db: DbSession, current_user: CurrentUser) -
 def classroom_breakdown(db: DbSession, current_user: CurrentUser) -> list[ClassroomStat]:
     if current_user.role == UserRole.STUDENT:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
-    rows = stats_service.classroom_breakdown(db, current_user)
+    rows = stats_service.classroom_breakdown(db, current_user, school_wide=True)
     return [ClassroomStat(**row) for row in rows]
 
 
@@ -74,6 +74,7 @@ def usage_trend(
             start_date=start_date,
             end_date=end_date,
             subjects=subjects,
+            school_wide=True,
         )
     )
 
@@ -159,9 +160,9 @@ def export_stats(
     current_user: CurrentUser,
     format: Literal["csv", "xlsx"] = "csv",
 ) -> Response:
-    overview = stats_service.overview(db, current_user)
+    overview = stats_service.overview(db, current_user, school_wide=True)
     if format == "xlsx":
-        class_rows = stats_service.classroom_breakdown(db, current_user)
+        class_rows = stats_service.classroom_breakdown(db, current_user, school_wide=True)
         portrait_rows = stats_service.student_portraits(db, current_user, limit=100)
         return _build_xlsx_export(overview, class_rows, portrait_rows)
     return _build_csv_export(overview)
