@@ -25,6 +25,7 @@ interface OverviewData {
   resolved_rate: number
   average_turns: number
   by_subject: Array<{ subject: string; count: number }>
+  has_assigned_classrooms?: boolean | null
 }
 
 interface UsageTrendSeries {
@@ -63,6 +64,8 @@ interface StudentPortrait {
 }
 
 const authStore = useAuthStore()
+const isAdmin = computed(() => authStore.user?.role === 'admin')
+const isTeacher = computed(() => authStore.user?.role === 'teacher')
 const overview = ref<OverviewData>({
   total_questions: 0,
   resolved_rate: 0,
@@ -81,6 +84,8 @@ const sectionStates = reactive<Record<DashboardSection, { loading: boolean; load
   incentives: { loading: true, loaded: false, error: '' },
 })
 const loading = computed(() => Object.values(sectionStates).some((state) => state.loading))
+const teacherHasNoClassrooms = computed(() => isTeacher.value && overview.value.has_assigned_classrooms === false)
+const showStats = computed(() => !isTeacher.value || (sectionStates.overview.loaded && !teacherHasNoClassrooms.value))
 const sectionControllers = new Map<DashboardSection, AbortController>()
 const trendLoading = ref(true)
 const trendLoaded = ref(false)
@@ -406,6 +411,11 @@ async function exportStats() {
   }
 }
 
+function refreshDashboard() {
+  void loadDashboard()
+  void loadTrend()
+}
+
 watch([trendGranularity, selectedSubjects, trendDateRange], () => {
   ++trendRequest
   trendController?.abort()
@@ -422,9 +432,8 @@ onBeforeUnmount(() => {
 })
 
 onMounted(() => {
-  void loadDashboard()
-  void loadTrend()
-  void loadNotifications()
+  refreshDashboard()
+  if (isAdmin.value) void loadNotifications()
 })
 </script>
 
@@ -433,15 +442,15 @@ onMounted(() => {
     <div class="panel-header">
       <div>
         <p class="eyebrow">Admin Metrics</p>
-        <h2>全校答疑概览</h2>
+        <h2>{{ isTeacher ? '任教班级答疑概览' : '全校答疑概览' }}</h2>
       </div>
       <div class="toolbar">
-        <button class="ghost-button" :disabled="loading" @click="loadDashboard">刷新</button>
-        <button class="primary-button" @click="exportStats">导出统计</button>
+        <button class="ghost-button" :disabled="loading" @click="refreshDashboard">刷新</button>
+        <button v-if="showStats" class="primary-button" @click="exportStats">导出统计</button>
       </div>
     </div>
-    <SubjectAvailabilityPanel v-if="authStore.user?.role === 'admin'" />
-    <section class="panel notification-admin-panel">
+    <SubjectAvailabilityPanel v-if="isAdmin" />
+    <section v-if="isAdmin" class="panel notification-admin-panel">
       <div class="panel-header panel-header--wrap">
         <div>
           <p class="eyebrow">School Notice</p>
@@ -510,8 +519,13 @@ onMounted(() => {
       <button class="ghost-button" :disabled="sectionStates.overview.loading" @click="loadOverview">重试</button>
     </p>
     <p v-else-if="!sectionStates.overview.loaded" class="panel-subcopy" role="status">概览加载中…</p>
+    <section v-else-if="teacherHasNoClassrooms" class="panel" role="status">
+      <h2>尚未分配任教班级</h2>
+      <p class="panel-subcopy">管理员分配任教班级后，这里会显示对应班级的学生答疑统计。</p>
+    </section>
+    <template v-if="showStats">
     <div v-if="sectionStates.overview.loaded" class="metric-grid">
-      <MetricTile label="累计提问" :value="overview.total_questions" hint="学生所有会话累计" />
+      <MetricTile label="累计提问" :value="overview.total_questions" :hint="isTeacher ? '任教班级学生会话累计' : '学生所有会话累计'" />
       <MetricTile label="已解决率" :value="`${(overview.resolved_rate * 100).toFixed(1)}%`" hint="学生主动标记完成" />
       <MetricTile label="平均轮次" :value="overview.average_turns" hint="反映引导深度" />
     </div>
@@ -729,5 +743,6 @@ onMounted(() => {
         <p v-if="sectionStates.portraits.loaded && !sectionStates.portraits.loading && !sectionStates.portraits.error && !portraits.length" class="panel-subcopy">暂无学生画像数据。</p>
       </div>
     </section>
+    </template>
   </section>
 </template>

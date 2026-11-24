@@ -1010,6 +1010,7 @@ class StatsOverview(BaseModel):
     resolved_rate: float
     average_turns: float
     by_subject: list[SubjectStat]
+    has_assigned_classrooms: bool | None = None
 
 
 class StudentProfile(BaseModel):
