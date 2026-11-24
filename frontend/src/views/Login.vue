@@ -21,11 +21,11 @@ function loginWithSso() {
       <p class="eyebrow">LAN Classroom AI</p>
       <h1>让答疑更像一场耐心的推理训练</h1>
       <p>
-        StudyAgent 你的专属苏格拉底式导师，结合知识库与多轮引导，帮助你一步步形成思路，锻炼思维能力，建立完整的知识体系。
+        StudyAgent 结合校本知识库与多轮引导，陪你从已知条件出发，一步步形成自己的解题思路。
       </p>
       <ul class="feature-list">
-        <li>不限量问答，可在对话中请求类似练习，优先匹配知识点、年级与难易度。</li>
-        <li>面向平板设备设计，适配局域网部署，不依赖外部网络。</li>
+        <li>支持多轮追问与类似练习，可按知识点、年级和难度匹配题目。</li>
+        <li>面向平板设备设计，支持校内局域网部署。</li>
       </ul>
       <p class="login-note login-note--hero">目前仅具备物理知识库与题库，其他学科等待完善中</p>
     </div>

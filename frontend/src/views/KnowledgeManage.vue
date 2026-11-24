@@ -1732,12 +1732,12 @@ onBeforeUnmount(() => {
           {{ uploading ? '上传中...' : `上传已选资料${selectedUploadFiles.length ? `（${selectedUploadFiles.length}）` : ''}` }}
         </button>
       </div>
-      <div class="detail-chip-group">
-        <span class="detail-chip">任务总数 {{ taskSummary.total }}</span>
-        <span class="detail-chip">进行中 {{ taskSummary.active }}</span>
-        <span class="detail-chip">已完成 {{ taskSummary.completed }}</span>
-        <span class="detail-chip">失败 {{ taskSummary.failed }}</span>
-        <span class="detail-chip">已取消 {{ taskSummary.cancelled }}</span>
+      <div class="meta-text-group">
+        <span class="meta-text">任务总数 {{ taskSummary.total }}</span>
+        <span class="meta-text">进行中 {{ taskSummary.active }}</span>
+        <span class="meta-text">已完成 {{ taskSummary.completed }}</span>
+        <span class="meta-text">失败 {{ taskSummary.failed }}</span>
+        <span class="meta-text">已取消 {{ taskSummary.cancelled }}</span>
       </div>
       <div v-if="latestTask" class="task-card">
         <div class="task-card-head">
@@ -1746,21 +1746,21 @@ onBeforeUnmount(() => {
         </div>
         <el-progress :percentage="latestTask.progress" :status="progressStatus(latestTask.status)" />
         <p>{{ taskStatusDisplay(latestTask) }}</p>
-        <div v-if="latestTaskChunkSummary" class="detail-chip-group">
-          <span class="detail-chip">{{ latestTaskChunkSummary.splitMode }}</span>
-          <span class="detail-chip">片段 {{ latestTaskChunkSummary.totalChunks }}</span>
-          <span v-if="latestTaskChunkSummary.questionChunks" class="detail-chip">题目 {{ latestTaskChunkSummary.questionChunks }}</span>
-          <span v-if="latestTaskChunkSummary.answerCount" class="detail-chip">答案 {{ latestTaskChunkSummary.answerCount }}</span>
-          <span v-if="latestTaskChunkSummary.explanationCount" class="detail-chip">解析 {{ latestTaskChunkSummary.explanationCount }}</span>
-          <span v-if="latestTaskChunkSummary.chapterCount" class="detail-chip">章节 {{ latestTaskChunkSummary.chapterCount }}</span>
-          <span v-if="latestTaskChunkSummary.sectionCount" class="detail-chip">小节 {{ latestTaskChunkSummary.sectionCount }}</span>
-          <span v-if="latestTaskChunkSummary.imageCount" class="detail-chip">图片 {{ latestTaskChunkSummary.imageCount }} 张</span>
+        <div v-if="latestTaskChunkSummary" class="meta-text-group">
+          <span class="meta-text">{{ latestTaskChunkSummary.splitMode }}</span>
+          <span class="meta-text">片段 {{ latestTaskChunkSummary.totalChunks }}</span>
+          <span v-if="latestTaskChunkSummary.questionChunks" class="meta-text">题目 {{ latestTaskChunkSummary.questionChunks }}</span>
+          <span v-if="latestTaskChunkSummary.answerCount" class="meta-text">答案 {{ latestTaskChunkSummary.answerCount }}</span>
+          <span v-if="latestTaskChunkSummary.explanationCount" class="meta-text">解析 {{ latestTaskChunkSummary.explanationCount }}</span>
+          <span v-if="latestTaskChunkSummary.chapterCount" class="meta-text">章节 {{ latestTaskChunkSummary.chapterCount }}</span>
+          <span v-if="latestTaskChunkSummary.sectionCount" class="meta-text">小节 {{ latestTaskChunkSummary.sectionCount }}</span>
+          <span v-if="latestTaskChunkSummary.imageCount" class="meta-text">图片 {{ latestTaskChunkSummary.imageCount }} 张</span>
         </div>
         <div class="toolbar toolbar-wrap">
-          <div class="detail-chip-group">
-            <span class="detail-chip">{{ latestTask.document_subject || '-' }}</span>
+          <div class="meta-text-group">
+            <span class="meta-text">{{ latestTask.document_subject || '-' }}</span>
             <span class="detail-chip">{{ statusLabel(latestTask.status) }}</span>
-            <span class="detail-chip">{{ formatDateTime(latestTask.updated_at) }}</span>
+            <span class="meta-text">{{ formatDateTime(latestTask.updated_at) }}</span>
           </div>
           <div class="row-actions">
             <button
@@ -1917,18 +1917,18 @@ onBeforeUnmount(() => {
           />
         </div>
       </div>
-      <div class="detail-chip-group">
-        <span class="detail-chip">资料总数 {{ documentSummary.total }}</span>
-        <span class="detail-chip">进行中 {{ documentSummary.active }}</span>
-        <span class="detail-chip">已完成 {{ documentSummary.completed }}</span>
-        <span class="detail-chip">失败 {{ documentSummary.failed }}</span>
-        <span class="detail-chip">已取消 {{ documentSummary.cancelled }}</span>
+      <div class="meta-text-group">
+        <span class="meta-text">资料总数 {{ documentSummary.total }}</span>
+        <span class="meta-text">进行中 {{ documentSummary.active }}</span>
+        <span class="meta-text">已完成 {{ documentSummary.completed }}</span>
+        <span class="meta-text">失败 {{ documentSummary.failed }}</span>
+        <span class="meta-text">已取消 {{ documentSummary.cancelled }}</span>
       </div>
       <div class="selection-toolbar">
-        <div class="detail-chip-group">
-          <span class="detail-chip">跨页已选 {{ selectedEditableDocumentCount }} 份资料</span>
-          <span class="detail-chip">当前页可选 {{ currentPageSelectableDocuments.length }} 份</span>
-          <span class="detail-chip">导入中的资料需先取消任务后再编辑</span>
+        <div class="meta-text-group">
+          <span class="meta-text">跨页已选 {{ selectedEditableDocumentCount }} 份资料</span>
+          <span class="meta-text">当前页可选 {{ currentPageSelectableDocuments.length }} 份</span>
+          <span class="meta-text">导入中的资料需先取消任务后再编辑</span>
         </div>
         <div class="row-actions">
           <button
@@ -1967,18 +1967,18 @@ onBeforeUnmount(() => {
             <span v-if="item.error_message">{{ friendlyImportMessage(item.error_message) }}</span>
           </div>
           <div class="row-actions row-actions--wide row-actions--grow">
-            <div class="detail-chip-group">
-              <span class="detail-chip">{{ formatFileSize(item.size_bytes) }}</span>
+            <div class="meta-text-group">
+              <span class="meta-text">{{ formatFileSize(item.size_bytes) }}</span>
               <span class="detail-chip">{{ statusLabel(item.status) }}</span>
-              <span v-if="item.chunk_total" class="detail-chip">片段 {{ item.chunk_total }}</span>
-              <span v-if="item.question_chunk_count" class="detail-chip">题目 {{ item.question_chunk_count }}</span>
-              <span v-if="item.question_chunk_count" class="detail-chip">答案 {{ item.answer_count }}</span>
-              <span v-if="item.question_chunk_count" class="detail-chip">解析 {{ item.explanation_count }}</span>
-              <span v-if="item.grade" class="detail-chip">{{ gradeLabel(item.grade) }}</span>
-              <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
-              <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
-              <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>
-              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="detail-chip">#{{ tag }}</span>
+              <span v-if="item.chunk_total" class="meta-text">片段 {{ item.chunk_total }}</span>
+              <span v-if="item.question_chunk_count" class="meta-text">题目 {{ item.question_chunk_count }}</span>
+              <span v-if="item.question_chunk_count" class="meta-text">答案 {{ item.answer_count }}</span>
+              <span v-if="item.question_chunk_count" class="meta-text">解析 {{ item.explanation_count }}</span>
+              <span v-if="item.grade" class="meta-text">{{ gradeLabel(item.grade) }}</span>
+              <span v-if="item.chapter" class="meta-text">{{ item.chapter }}</span>
+              <span v-if="item.section" class="meta-text">{{ item.section }}</span>
+              <span v-if="item.difficulty" class="meta-text">难度 {{ difficultyLabel(item.difficulty) }}</span>
+              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="meta-text">#{{ tag }}</span>
               <span v-if="item.count_mismatch" class="detail-chip detail-chip--warning">
                 {{
                   item.count_mismatch_kind === 'missing_answer_only'
@@ -2103,10 +2103,10 @@ onBeforeUnmount(() => {
           />
         </div>
       </div>
-      <div class="detail-chip-group">
-        <span class="detail-chip">题目总数 {{ questionTotal }}</span>
-        <span class="detail-chip">当前页 {{ questions.length }} 题</span>
-        <span class="detail-chip">停用题目仍对教师/管理员可见，可恢复</span>
+      <div class="meta-text-group">
+        <span class="meta-text">题目总数 {{ questionTotal }}</span>
+        <span class="meta-text">当前页 {{ questions.length }} 题</span>
+        <span class="meta-text">停用题目仍对教师/管理员可见，可恢复</span>
       </div>
       <div class="table-like">
         <article v-for="item in questions" :key="item.id" class="table-row table-row-wrap">
@@ -2117,14 +2117,14 @@ onBeforeUnmount(() => {
             <span>最后更新 {{ formatDateTime(item.updated_at) }}</span>
           </div>
           <div class="row-actions row-actions--wide row-actions--grow">
-            <div class="detail-chip-group">
+            <div class="meta-text-group">
               <span class="detail-chip">{{ item.is_disabled ? '已停用' : '已启用' }}</span>
-              <span v-if="item.grade" class="detail-chip">{{ gradeLabel(item.grade) }}</span>
-              <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
-              <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
-              <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>
-              <span v-if="item.contains_images" class="detail-chip">图片 {{ item.image_count }} 张</span>
-              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="detail-chip">#{{ tag }}</span>
+              <span v-if="item.grade" class="meta-text">{{ gradeLabel(item.grade) }}</span>
+              <span v-if="item.chapter" class="meta-text">{{ item.chapter }}</span>
+              <span v-if="item.section" class="meta-text">{{ item.section }}</span>
+              <span v-if="item.difficulty" class="meta-text">难度 {{ difficultyLabel(item.difficulty) }}</span>
+              <span v-if="item.contains_images" class="meta-text">图片 {{ item.image_count }} 张</span>
+              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="meta-text">#{{ tag }}</span>
             </div>
             <div class="row-actions">
               <button
@@ -2326,15 +2326,15 @@ onBeforeUnmount(() => {
             <strong>{{ previewDocument.filename }}</strong>
             <span>{{ previewDocument.subject }} · {{ resourceTypeLabel(previewDocument.resource_type) }}</span>
           </div>
-          <div class="detail-chip-group">
-            <span v-if="previewSummary" class="detail-chip">{{ previewSummary.splitMode }}</span>
-            <span v-if="previewSummary" class="detail-chip">片段 {{ previewSummary.totalChunks }}</span>
-            <span v-if="previewSummary?.questionChunks" class="detail-chip">题目 {{ previewSummary.questionChunks }}</span>
-            <span v-if="previewSummary?.answerCount" class="detail-chip">答案 {{ previewSummary.answerCount }}</span>
-            <span v-if="previewSummary?.explanationCount" class="detail-chip">解析 {{ previewSummary.explanationCount }}</span>
-            <span v-if="previewSummary?.chapterCount" class="detail-chip">章节 {{ previewSummary.chapterCount }}</span>
-            <span v-if="previewSummary?.sectionCount" class="detail-chip">小节 {{ previewSummary.sectionCount }}</span>
-            <span v-if="previewSummary?.imageCount" class="detail-chip">图片 {{ previewSummary.imageCount }} 张</span>
+          <div class="meta-text-group">
+            <span v-if="previewSummary" class="meta-text">{{ previewSummary.splitMode }}</span>
+            <span v-if="previewSummary" class="meta-text">片段 {{ previewSummary.totalChunks }}</span>
+            <span v-if="previewSummary?.questionChunks" class="meta-text">题目 {{ previewSummary.questionChunks }}</span>
+            <span v-if="previewSummary?.answerCount" class="meta-text">答案 {{ previewSummary.answerCount }}</span>
+            <span v-if="previewSummary?.explanationCount" class="meta-text">解析 {{ previewSummary.explanationCount }}</span>
+            <span v-if="previewSummary?.chapterCount" class="meta-text">章节 {{ previewSummary.chapterCount }}</span>
+            <span v-if="previewSummary?.sectionCount" class="meta-text">小节 {{ previewSummary.sectionCount }}</span>
+            <span v-if="previewSummary?.imageCount" class="meta-text">图片 {{ previewSummary.imageCount }} 张</span>
           </div>
           <p class="panel-subcopy">
             这里展示的是系统实际写入索引前的片段内容，可用于检查题干、答案、解析、图片和章节识别是否正确。
@@ -2342,29 +2342,29 @@ onBeforeUnmount(() => {
           <div v-if="previewSummary?.warnings.length" class="warning-banner">
             <p v-for="warning in previewSummary.warnings" :key="warning">{{ warning }}</p>
           </div>
-          <div v-if="previewSummary?.chapters.length" class="detail-chip-group">
-            <span class="detail-chip">识别章节</span>
+          <div v-if="previewSummary?.chapters.length" class="meta-text-group">
+            <span class="meta-text">识别章节</span>
             <span
               v-for="chapter in previewSummary.chapters.slice(0, 6)"
               :key="chapter"
-              class="detail-chip"
+              class="meta-text"
             >
               {{ chapter }}
             </span>
-            <span v-if="previewSummary.chapters.length > 6" class="detail-chip">
+            <span v-if="previewSummary.chapters.length > 6" class="meta-text">
               +{{ previewSummary.chapters.length - 6 }}
             </span>
           </div>
-          <div v-if="previewSummary?.sections.length" class="detail-chip-group">
-            <span class="detail-chip">识别小节</span>
+          <div v-if="previewSummary?.sections.length" class="meta-text-group">
+            <span class="meta-text">识别小节</span>
             <span
               v-for="section in previewSummary.sections.slice(0, 6)"
               :key="section"
-              class="detail-chip"
+              class="meta-text"
             >
               {{ section }}
             </span>
-            <span v-if="previewSummary.sections.length > 6" class="detail-chip">
+            <span v-if="previewSummary.sections.length > 6" class="meta-text">
               +{{ previewSummary.sections.length - 6 }}
             </span>
           </div>
@@ -2380,13 +2380,13 @@ onBeforeUnmount(() => {
               <strong>片段 {{ item.chunk_index + 1 }}</strong>
               <span>{{ chunkKindLabel(item.chunk_kind) }}</span>
             </div>
-            <div class="detail-chip-group">
-              <span v-if="item.question_number" class="detail-chip">第 {{ item.question_number }} 题</span>
-              <span v-if="item.chapter" class="detail-chip">{{ item.chapter }}</span>
-              <span v-if="item.section" class="detail-chip">{{ item.section }}</span>
-              <span v-if="item.difficulty" class="detail-chip">难度 {{ difficultyLabel(item.difficulty) }}</span>
-              <span v-if="item.contains_images" class="detail-chip">图片 {{ item.image_count }} 张</span>
-              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="detail-chip">#{{ tag }}</span>
+            <div class="meta-text-group">
+              <span v-if="item.question_number" class="meta-text">第 {{ item.question_number }} 题</span>
+              <span v-if="item.chapter" class="meta-text">{{ item.chapter }}</span>
+              <span v-if="item.section" class="meta-text">{{ item.section }}</span>
+              <span v-if="item.difficulty" class="meta-text">难度 {{ difficultyLabel(item.difficulty) }}</span>
+              <span v-if="item.contains_images" class="meta-text">图片 {{ item.image_count }} 张</span>
+              <span v-for="tag in item.tags.slice(0, 4)" :key="`${item.id}-${tag}`" class="meta-text">#{{ tag }}</span>
             </div>
 
             <div v-if="item.question_text" class="preview-field">

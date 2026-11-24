@@ -195,8 +195,8 @@ function toggleSidebar() {
             :title="item.label"
             :aria-label="item.label"
           >
-            <span class="nav-link__short">{{ item.shortLabel }}</span>
-            <span v-if="!sidebarIsCollapsed" class="nav-link__label">{{ item.label }}</span>
+            <span v-if="sidebarIsCollapsed" class="nav-link__short">{{ item.shortLabel }}</span>
+            <span v-else class="nav-link__label">{{ item.label }}</span>
             <span v-if="item.showUnreadDot" class="nav-unread-dot" aria-label="有未读内容"></span>
           </RouterLink>
 

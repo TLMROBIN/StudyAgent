@@ -22,7 +22,7 @@
   --app-viewport-height: 100vh;
   --shell-main-block-padding: 56px;
   --student-panel-height: calc(var(--app-viewport-height, 100vh) - var(--shell-main-block-padding));
-  --sidebar-expanded-width: 288px;
+  --sidebar-expanded-width: 256px;
   --sidebar-collapsed-width: 92px;
 }
 
@@ -2316,8 +2316,24 @@ textarea {
 
   .login-page {
     grid-template-columns: 1fr;
+    gap: 24px;
     max-width: 780px;
+    padding: 32px;
     align-items: start;
+    align-content: start;
+  }
+
+  .login-hero,
+  .login-card {
+    padding: 28px;
+  }
+
+  .login-hero {
+    gap: 16px;
+  }
+
+  .login-hero .feature-list {
+    line-height: 1.7;
   }
 
   .login-card {
@@ -2894,12 +2910,12 @@ summary,
 }
 
 .nav-list {
-  gap: 6px;
+  gap: 4px;
 }
 
 .nav-list a {
-  min-height: 46px;
-  padding: 12px 14px;
+  min-height: 40px;
+  padding: 8px 12px;
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
@@ -3126,6 +3142,26 @@ summary,
 .detail-chip--success {
   border-color: #c9dfd2;
   background: #eaf4ed;
+}
+
+.meta-text-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.meta-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.meta-text-group .detail-chip {
+  flex: 0 0 auto;
 }
 
 .selection-toolbar,
@@ -3444,9 +3480,18 @@ summary,
 }
 
 .login-hero > .toolbox-link {
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.06);
+  justify-self: start;
+  padding-inline: 0;
+  border-color: transparent;
+  background: transparent;
+  color: #d1dcd7;
+}
+
+.login-hero > .toolbox-link:hover {
+  background: transparent;
   color: #ffffff;
+  text-decoration: underline;
+  text-underline-offset: 4px;
 }
 
 .login-note,
