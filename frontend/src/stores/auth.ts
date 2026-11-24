@@ -20,6 +20,10 @@ export interface UserInfo {
   chat_banned_until?: string | null
   chat_ban_reason?: string | null
   chat_ban_message?: string | null
+  user_notice_accepted_version?: string | null
+  user_notice_accepted_at?: string | null
+  current_user_notice_version?: string
+  must_accept_user_notice?: boolean
 }
 
 let sessionReadyPromise: Promise<boolean> | null = null
@@ -82,6 +86,11 @@ export const useAuthStore = defineStore('auth', {
       })
       this.clearSession()
       resetSessionExpiredState()
+    },
+    async acceptUserNotice(version: string) {
+      const { data } = await api.post<UserInfo>('/auth/user-notice/accept', { version })
+      this.user = data
+      return data
     },
     async logout(): Promise<boolean> {
       const idTokenHint = getStoredIdTokenHint()

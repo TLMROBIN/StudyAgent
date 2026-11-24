@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import { ElMessage } from 'element-plus'
 import { computed, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import UserNoticeModal from './components/UserNoticeModal.vue'
 import { useAuthStore } from './stores/auth'
 import { fetchFeedbackUnreadSummary, fetchIncentiveSummary, type FeedbackUnreadSummary } from './utils/api'
+import { isCampusSsoSession } from './utils/authSession'
 import { forceLoginRedirect } from './utils/navigation'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'studyagent-sidebar-collapsed'
@@ -37,10 +40,13 @@ const hasUnreadPraise = ref(false)
 const requiresAuth = computed(() => route.matched.some((record) => record.meta.requiresAuth))
 const showShell = computed(() => route.path !== '/login')
 const shellActive = computed(() => showShell.value && !!auth.user)
+const campusSsoSession = computed(() => !!auth.user && isCampusSsoSession())
 const studentChatActive = computed(() => route.path === '/student')
 const sidebarIsCollapsed = computed(() => sidebarCollapsed.value)
 const chatView = ref<{ openHistory: () => void; newQuestion: () => void; openNotices: () => void } | null>(null)
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
+const userNoticeVisible = computed(() => shellActive.value && Boolean(auth.user?.must_accept_user_notice))
+const userNoticeVersion = computed(() => auth.user?.current_user_notice_version || '2026-11-v1')
 const navigationItems = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = []
 
@@ -150,6 +156,17 @@ function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
   window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, sidebarCollapsed.value ? '1' : '0')
 }
+
+function showToolboxUnavailable() {
+  ElMessage.warning('当前入口不支持此跳转方式')
+}
+
+async function handleDeclineUserNotice() {
+  const redirectedToSso = await auth.logout()
+  if (!redirectedToSso) {
+    router.push('/login')
+  }
+}
 </script>
 
 <template>
@@ -170,7 +187,8 @@ function toggleSidebar() {
       <div class="sidebar-body">
         <div class="sidebar-head">
           <div class="sidebar-brand">
-            <a class="toolbox-link" href="http://10.50.159.62/platform/" aria-label="于博的工具箱，返回功能选择目录页"><span>于博的</span><span>工具箱</span></a>
+            <button v-if="campusSsoSession" class="toolbox-link" type="button" aria-label="于博的工具箱" @click="showToolboxUnavailable"><span>于博的</span><span>工具箱</span></button>
+            <a v-else class="toolbox-link" href="http://10.50.159.62/platform/" aria-label="于博的工具箱，返回功能选择目录页"><span>于博的</span><span>工具箱</span></a>
             <p class="eyebrow" role="img" aria-label="StudyAgent">
               <span class="sidebar-brand-name" aria-hidden="true">StudyAgent</span>
               <span class="sidebar-brand-mark" aria-hidden="true">SA</span>
@@ -226,5 +244,10 @@ function toggleSidebar() {
       </div>
       <RouterView v-else v-slot="{ Component }"><component :is="Component" ref="chatView" /></RouterView>
     </main>
+    <UserNoticeModal
+      :visible="userNoticeVisible"
+      :version="userNoticeVersion"
+      @decline="handleDeclineUserNotice"
+    />
   </div>
 </template>

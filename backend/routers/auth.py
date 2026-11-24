@@ -13,12 +13,15 @@ from backend.models.schemas import (
     StaffLoginRequest,
     StudentLoginRequest,
     TokenResponse,
+    UserNoticeAcceptRequest,
     UserRead,
 )
 from backend.security import decode_token
+from backend.services.audit_service import audit_service
 from backend.services.auth_service import auth_service
 from backend.services.oidc_service import OidcAuthError, oidc_service
 from backend.config import get_settings
+from backend.user_notice import CURRENT_USER_NOTICE_VERSION
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 OIDC_DISABLED_MESSAGE = "统一平台登录暂未启用，请联系管理员。"
@@ -118,6 +121,7 @@ localStorage.setItem("studyagent-access-token", {tokens["access_token"]!r});
 localStorage.setItem("studyagent-refresh-token", {tokens["refresh_token"]!r});
 localStorage.setItem("studyagent-id-token-hint", {id_token_hint!r});
 localStorage.setItem("studyagent-sso-session", "1");
+localStorage.removeItem("studyagent-campus-sso-session");
 location.replace({target!r});
 </script>
 </body>
@@ -169,6 +173,36 @@ def logout(
 
 @router.get("/me", response_model=UserRead)
 def read_me(current_user: CurrentUser) -> UserRead:
+    return UserRead.model_validate(current_user)
+
+
+@router.post("/user-notice/accept", response_model=UserRead)
+def accept_user_notice(
+    payload: UserNoticeAcceptRequest,
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> UserRead:
+    if payload.version.strip() != CURRENT_USER_NOTICE_VERSION:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="用户须知版本已更新，请刷新页面重新阅读并确认",
+        )
+    current_user.user_notice_accepted_version = CURRENT_USER_NOTICE_VERSION
+    current_user.user_notice_accepted_at = datetime.now(UTC)
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    audit_service.log(
+        db,
+        actor=current_user,
+        action="user_notice_accepted",
+        target_type="user",
+        target_id=str(current_user.id),
+        result="success",
+        ip_address=_client_ip(request),
+        detail={"version": CURRENT_USER_NOTICE_VERSION},
+    )
     return UserRead.model_validate(current_user)
 
 

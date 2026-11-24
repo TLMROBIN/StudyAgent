@@ -11,6 +11,7 @@ from backend.models.user import UserRole
 from backend.subjects import SUBJECT_SET
 from backend.time_utils import serialize_datetime_for_api
 from backend.services.chat_permission_service import format_chat_ban_message
+from backend.user_notice import CURRENT_USER_NOTICE_VERSION, needs_user_notice_acceptance
 
 
 class BaseModel(PydanticBaseModel):
@@ -64,6 +65,10 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
 
 
+class UserNoticeAcceptRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=32)
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -82,6 +87,18 @@ class UserRead(BaseModel):
     chat_banned: bool = False
     chat_banned_until: datetime | None = None
     chat_ban_reason: str | None = None
+    user_notice_accepted_version: str | None = None
+    user_notice_accepted_at: datetime | None = None
+
+    @computed_field
+    @property
+    def current_user_notice_version(self) -> str:
+        return CURRENT_USER_NOTICE_VERSION
+
+    @computed_field
+    @property
+    def must_accept_user_notice(self) -> bool:
+        return needs_user_notice_acceptance(self.user_notice_accepted_version)
 
     @computed_field
     @property
@@ -993,6 +1010,7 @@ class StatsOverview(BaseModel):
     resolved_rate: float
     average_turns: float
     by_subject: list[SubjectStat]
+    has_assigned_classrooms: bool | None = None
 
 
 class StudentProfile(BaseModel):

@@ -59,9 +59,12 @@ class User(TimestampMixin, Base):
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    user_notice_accepted_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    user_notice_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     classroom: Mapped[Classroom | None] = relationship(back_populates="students")
     teacher_classrooms: Mapped[list[Classroom]] = relationship(secondary=teacher_classes, back_populates="teachers")
+    campus_identities: Mapped[list["CampusIdentity"]] = relationship(cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="student", cascade="all, delete-orphan")
     uploaded_documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="creator")
     created_agent_configs: Mapped[list["AgentConfig"]] = relationship(back_populates="creator")
@@ -111,6 +114,39 @@ class User(TimestampMixin, Base):
                 return f"{grade_label}{self.classroom.name}"
             return self.classroom.name
         return grade_label
+
+
+class CampusIdentity(Base):
+    __tablename__ = "campus_identities"
+    __table_args__ = (
+        UniqueConstraint("school_id", "external_id"),
+        UniqueConstraint("school_id", "number"),
+        UniqueConstraint("school_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_id: Mapped[str] = mapped_column(String(128))
+    external_id: Mapped[str | None] = mapped_column(String(128))
+    number: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+
+class CampusRosterStudent(Base):
+    __tablename__ = "campus_roster_students"
+
+    school_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    number: Mapped[str] = mapped_column(String(64), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(64))
+
+
+class CampusRosterTeacher(Base):
+    __tablename__ = "campus_roster_teachers"
+    __table_args__ = (UniqueConstraint("school_id", "username"),)
+
+    school_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    number: Mapped[str] = mapped_column(String(64), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(64))
+    username: Mapped[str] = mapped_column(String(64))
 
 
 if TYPE_CHECKING:

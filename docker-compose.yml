@@ -110,6 +110,8 @@ services:
       - backend
     ports:
       - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
 
   prometheus:
     image: prom/prometheus:v3.5.0

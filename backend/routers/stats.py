@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse, Response
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
 from backend.dependencies import CurrentUser, DbSession
 from backend.models.schemas import ClassroomStat, StatsOverview, StudentPortrait, StudentProfile, UsageTrend
@@ -17,7 +17,15 @@ router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 @router.get("/overview", response_model=StatsOverview)
 def overview(db: DbSession, current_user: CurrentUser) -> StatsOverview:
-    return StatsOverview(**stats_service.overview(db, current_user))
+    has_assigned_classrooms = None
+    if current_user.role == UserRole.TEACHER:
+        has_assigned_classrooms = bool(db.scalar(select(exists().where(
+            teacher_classes.c.teacher_id == current_user.id
+        ))))
+    return StatsOverview(
+        **stats_service.overview(db, current_user),
+        has_assigned_classrooms=has_assigned_classrooms,
+    )
 
 
 @router.get("/students/{student_id}", response_model=StudentProfile)

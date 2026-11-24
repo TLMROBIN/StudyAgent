@@ -61,6 +61,20 @@ class FakeUploadFile:
         return self._payload
 
 
+def test_teacher_cannot_manage_school_notifications():
+    SessionLocal = build_session()
+    with SessionLocal() as session:
+        teacher = User(username="notice-teacher", full_name="教师", role=UserRole.TEACHER, password_hash="hash")
+        session.add(teacher)
+        session.commit()
+    with build_admin_client(SessionLocal, teacher) as client:
+        assert client.get("/api/admin/notifications").status_code == 403
+        payload = {"title": "测试通知", "content": "仅供回归测试"}
+        assert client.post("/api/admin/notifications", json=payload).status_code == 403
+        assert client.put("/api/admin/notifications/1", json=payload).status_code == 403
+        assert client.post("/api/admin/notifications/1/archive").status_code == 403
+
+
 def test_stats_service_returns_classroom_breakdown_and_portraits():
     SessionLocal = build_session()
     session = SessionLocal()
@@ -929,6 +943,9 @@ def test_dashboard_aggregates_preserve_scope_empty_students_and_message_roles():
                 'total_conversations': 5, 'resolved_rate': 0.4, 'average_turns': 0.6,
             }]
             assert stats_service.classroom_breakdown(db, viewers['none']) == []
+            assert stats_router.overview(db, viewers['none']).has_assigned_classrooms is False
+            assert stats_router.overview(db, viewers['teacher']).has_assigned_classrooms is True
+            assert stats_router.overview(db, viewers['admin']).has_assigned_classrooms is None
             portraits = stats_service.student_portraits(db, viewers['teacher'], limit=1)
             assert len(portraits) == 1
             assert portraits[0]['student_id'] == ids['first']

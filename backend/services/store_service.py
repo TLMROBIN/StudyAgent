@@ -66,6 +66,9 @@ class BaseStore(ABC):
     def get(self, key: str) -> str | None: ...
 
     @abstractmethod
+    def take(self, key: str) -> str | None: ...
+
+    @abstractmethod
     def delete(self, key: str) -> None: ...
 
     @abstractmethod
@@ -134,6 +137,12 @@ class MemoryStore(BaseStore):
         with self._lock:
             self._cleanup_if_expired(key)
             stored = self._values.get(key)
+            return stored.value if stored else None
+
+    def take(self, key: str) -> str | None:
+        with self._lock:
+            self._cleanup_if_expired(key)
+            stored = self._values.pop(key, None)
             return stored.value if stored else None
 
     def delete(self, key: str) -> None:
@@ -350,6 +359,10 @@ class RedisStore(BaseStore):
 
     def get(self, key: str) -> str | None:
         value = self.client.get(self._key(key))
+        return str(value) if value is not None else None
+
+    def take(self, key: str) -> str | None:
+        value = self.client.getdel(self._key(key))
         return str(value) if value is not None else None
 
     def delete(self, key: str) -> None:
