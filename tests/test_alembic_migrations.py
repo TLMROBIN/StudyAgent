@@ -311,6 +311,8 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
     assert "active_practice" in _column_names(db_path, "conversations")
     assert "agent_role_revision_id" in _column_names(db_path, "messages")
+    assert "user_notice_accepted_version" in _column_names(db_path, "users")
+    assert "user_notice_accepted_at" in _column_names(db_path, "users")
 
     from backend.secret_storage import encrypt_secret, decrypt_secret, PREFIX
     engine = create_engine(f"sqlite:///{db_path}")
@@ -320,7 +322,9 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
 
     command.downgrade(cfg, "-1")
     assert _current_revision(db_path) == prev
-    assert "campus_roster_students" not in _table_names(db_path)
+    assert "user_notice_accepted_version" not in _column_names(db_path, "users")
+    assert "user_notice_accepted_at" not in _column_names(db_path, "users")
+    assert "campus_roster_students" in _table_names(db_path)
     assert "campus_identities" in _table_names(db_path)
     assert "delivery_status" in _column_names(db_path, "messages")
     assert "understanding_json" in _column_names(db_path, "chat_message_attachments")
@@ -341,6 +345,8 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
+    assert "user_notice_accepted_version" in _column_names(db_path, "users")
+    assert "user_notice_accepted_at" in _column_names(db_path, "users")
     assert "campus_identities" in _table_names(db_path)
     assert "campus_roster_students" in _table_names(db_path)
     assert "is_pinned" in _column_names(db_path, "conversations")

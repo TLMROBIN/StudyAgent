@@ -3,6 +3,7 @@ import { ElMessage } from 'element-plus'
 import { computed, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import UserNoticeModal from './components/UserNoticeModal.vue'
 import { useAuthStore } from './stores/auth'
 import { fetchFeedbackUnreadSummary, fetchIncentiveSummary, type FeedbackUnreadSummary } from './utils/api'
 import { isCampusSsoSession } from './utils/authSession'
@@ -44,6 +45,8 @@ const studentChatActive = computed(() => route.path === '/student')
 const sidebarIsCollapsed = computed(() => sidebarCollapsed.value)
 const chatView = ref<{ openHistory: () => void; newQuestion: () => void; openNotices: () => void } | null>(null)
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
+const userNoticeVisible = computed(() => shellActive.value && Boolean(auth.user?.must_accept_user_notice))
+const userNoticeVersion = computed(() => auth.user?.current_user_notice_version || '2026-11-v1')
 const navigationItems = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = []
 
@@ -157,6 +160,13 @@ function toggleSidebar() {
 function showToolboxUnavailable() {
   ElMessage.warning('当前入口不支持此跳转方式')
 }
+
+async function handleDeclineUserNotice() {
+  const redirectedToSso = await auth.logout()
+  if (!redirectedToSso) {
+    router.push('/login')
+  }
+}
 </script>
 
 <template>
@@ -234,5 +244,10 @@ function showToolboxUnavailable() {
       </div>
       <RouterView v-else v-slot="{ Component }"><component :is="Component" ref="chatView" /></RouterView>
     </main>
+    <UserNoticeModal
+      :visible="userNoticeVisible"
+      :version="userNoticeVersion"
+      @decline="handleDeclineUserNotice"
+    />
   </div>
 </template>

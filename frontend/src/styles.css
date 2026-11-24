@@ -3553,3 +3553,100 @@ summary,
 .chat-image-dialog .chat-image-preview { max-height: 50vh; }
 .chat-image-dialog .primary-button { min-height: 48px; }
 .study-session-title-row h1 { overflow-wrap: anywhere; }
+
+.user-notice-dialog.el-dialog {
+  max-height: calc(var(--app-viewport-height, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+}
+
+.user-notice-dialog .el-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding-top: 4px;
+}
+
+.user-notice-dialog__subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.user-notice-dialog__body {
+  display: grid;
+  gap: 12px;
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.user-notice-section {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+}
+
+.user-notice-section h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.user-notice-section p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.user-notice-section--warning {
+  border-color: rgba(183, 93, 45, 0.28);
+  border-left: 4px solid var(--brand-2);
+  background: rgba(183, 93, 45, 0.06);
+}
+
+.user-notice-section--caution {
+  border-color: rgba(183, 93, 45, 0.24);
+  border-left: 4px solid var(--brand-2);
+  background: rgba(247, 249, 246, 0.96);
+}
+
+.user-notice-citation {
+  color: var(--muted) !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+}
+
+.user-notice-dialog__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.user-notice-dialog__footer .ghost-button,
+.user-notice-dialog__footer .primary-button {
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 10px;
+}
+
+.user-notice-dialog__footer .primary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .user-notice-dialog__footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+}
