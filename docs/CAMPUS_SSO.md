@@ -6,7 +6,7 @@
 
 ## 账号对照
 
-学校和 `_id` 确定已绑定的中台身份。老账号首次从中台进入时，通过预先确认的学校和 `number` 找到原 StudyAgent 用户 ID，再保存中台 `_id`。自动开通启用后，新学生的学校、学号和姓名须与导入的开通名册一致，新账号从答疑页开始使用，班级归属另行确认。教师需要预先绑定已授权的本地教师账号。
+学校和 `_id` 确定已绑定的中台身份。老账号首次从中台进入时，通过预先确认的学校和 `number` 找到原 StudyAgent 用户 ID，再保存中台 `_id`。自动开通启用后，新学生的学校、学号和姓名须与导入的开通名册一致，新账号从答疑页开始使用，班级归属另行确认。启用教师自动开通后，教师按同样规则核验教师名册，并使用统一目录的用户名。新教师账号暂不配置年级或任教班级。
 
 复核身份对照表后，只填写已确认的「确认的中台学号」列。同步账户状态或班级信息时，保留绑定的原用户 ID。导入命令默认预览，输出条数：
 
@@ -15,7 +15,7 @@ python -m scripts.import_campus_bindings /path/to/reviewed.csv
 ```
 
 确认预览后在受控环境中加 `--apply` 写入。保持表格在受控位置。回调所用配置见 `.env.example`。
-使用 `--roster-csv /path/to/approved-roster.csv` 同时预览或替换同一学校的开通名册。该文件列名为 `number,full_name`。
+使用 `--roster-csv /path/to/approved-roster.csv` 同时预览或替换同一学校的开通名册。该文件列名为 `number,full_name`。教师名册使用 `--teacher-roster-csv`，列名是 `number,full_name,username`。
 
 ## 试点和上线
 

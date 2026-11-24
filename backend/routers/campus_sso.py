@@ -121,7 +121,11 @@ def campus_complete(request: Request, db: DbSession, confirmation: Annotated[str
     record = json.loads(pending)
     profile = CampusProfile(**{**record, "role": UserRole(record["role"])})
     try:
-        user = resolve_campus_user(db, profile, auto_create_students=settings.campus_sso_auto_create_students)
+        user = resolve_campus_user(
+            db, profile,
+            auto_create_students=settings.campus_sso_auto_create_students,
+            auto_create_teachers=settings.campus_sso_auto_create_teachers,
+        )
     except CampusSsoError as exc:
         response = _page(f"<p>{escape(str(exc))}</p>", status_code=403)
     else:

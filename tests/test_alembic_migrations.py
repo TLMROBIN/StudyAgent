@@ -322,6 +322,8 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
 
     command.downgrade(cfg, "-1")
     assert _current_revision(db_path) == prev
+    assert "campus_roster_teachers" not in _table_names(db_path)
+    command.downgrade(cfg, "20261123_0027")
     assert "user_notice_accepted_version" not in _column_names(db_path, "users")
     assert "user_notice_accepted_at" not in _column_names(db_path, "users")
     assert "campus_roster_students" in _table_names(db_path)
@@ -345,6 +347,7 @@ def test_upgrade_downgrade_upgrade(alembic_ctx) -> None:
 
     command.upgrade(cfg, "head")
     assert _current_revision(db_path) == head
+    assert "campus_roster_teachers" in _table_names(db_path)
     assert "user_notice_accepted_version" in _column_names(db_path, "users")
     assert "user_notice_accepted_at" in _column_names(db_path, "users")
     assert "campus_identities" in _table_names(db_path)

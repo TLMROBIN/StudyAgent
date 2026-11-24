@@ -9,28 +9,44 @@ from sqlalchemy.orm import Session
 
 from backend.config import get_settings
 from backend.database import SessionLocal
-from backend.models.user import CampusIdentity, CampusRosterStudent, User, UserRole
+from backend.models.user import CampusIdentity, CampusRosterStudent, CampusRosterTeacher, User, UserRole
 
 
-def load_roster(csv_path: Path) -> dict[str, str]:
-    roster: dict[str, str] = {}
+def _read_roster(csv_path: Path, *, teacher: bool = False) -> list[dict[str, str]]:
+    roster = []
+    seen_numbers = set()
+    seen_usernames = set()
     with csv_path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        if not {"number", "full_name"}.issubset(reader.fieldnames or []):
-            raise ValueError("开通名册缺少学号或姓名列")
+        required = {"number", "full_name", "username"} if teacher else {"number", "full_name"}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError("开通名册缺少必要列")
         for row in reader:
             number = (row["number"] or "").strip()
             name = normalize("NFKC", row["full_name"] or "").strip()
-            if not number or not name or len(number) > 64 or len(name) > 64 or number in roster:
-                raise ValueError(f"开通名册第 {reader.line_num} 行学号或姓名无效")
-            roster[number] = name
+            if not number or not name or len(number) > 64 or len(name) > 64 or number in seen_numbers:
+                raise ValueError(f"开通名册第 {reader.line_num} 行编号或姓名无效")
+            seen_numbers.add(number)
+            entry = {"number": number, "full_name": name}
+            if teacher:
+                username = (row["username"] or "").strip()
+                if not username or len(username) > 64 or username.casefold() in seen_usernames:
+                    raise ValueError(f"开通名册第 {reader.line_num} 行教师账号无效")
+                seen_usernames.add(username.casefold())
+                entry["username"] = username
+            roster.append(entry)
     if not roster:
         raise ValueError("开通名册为空")
     return roster
 
 
+def load_roster(csv_path: Path) -> dict[str, str]:
+    return {row["number"]: row["full_name"] for row in _read_roster(csv_path)}
+
+
 def import_bindings(
-    db: Session, csv_path: Path, school_id: str, *, apply: bool, roster: dict[str, str] | None = None
+    db: Session, csv_path: Path, school_id: str, *, apply: bool,
+    roster: dict[str, str] | None = None, teacher_roster: list[dict[str, str]] | None = None,
 ) -> tuple[int, int]:
     planned = existing = 0
     seen_ids: set[int] = set()
@@ -82,6 +98,12 @@ def import_bindings(
                         insert(CampusRosterStudent),
                         [{"school_id": school_id, "number": number, "full_name": name} for number, name in roster.items()],
                     )
+                if teacher_roster is not None:
+                    db.execute(delete(CampusRosterTeacher).where(CampusRosterTeacher.school_id == school_id))
+                    db.execute(
+                        insert(CampusRosterTeacher),
+                        [{"school_id": school_id, **row} for row in teacher_roster],
+                    )
                 db.commit()
             else:
                 db.rollback()
@@ -95,6 +117,7 @@ def main() -> None:
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("csv_file", type=Path)
     parser.add_argument("--roster-csv", type=Path)
+    parser.add_argument("--teacher-roster-csv", type=Path)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     school_id = get_settings().campus_sso_school_id
@@ -102,13 +125,18 @@ def main() -> None:
         parser.exit(2, "请先配置 CAMPUS_SSO_SCHOOL_ID\n")
     try:
         roster = load_roster(args.roster_csv) if args.roster_csv else None
+        teacher_roster = _read_roster(args.teacher_roster_csv, teacher=True) if args.teacher_roster_csv else None
         with SessionLocal() as session:
-            planned, existing = import_bindings(session, args.csv_file, school_id, apply=args.apply, roster=roster)
+            planned, existing = import_bindings(
+                session, args.csv_file, school_id, apply=args.apply, roster=roster, teacher_roster=teacher_roster,
+            )
     except (OSError, ValueError) as exc:
         parser.exit(2, f"{exc}\n")
     print(f"{'已导入' if args.apply else '拟导入'} {planned} 条，已有 {existing} 条相同绑定。")
     if roster is not None:
         print(f"{'已设置' if args.apply else '拟设置'} {len(roster)} 条名册。")
+    if teacher_roster is not None:
+        print(f"{'已设置' if args.apply else '拟设置'} {len(teacher_roster)} 条教师名册。")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.config import Settings
 from backend.database import Base, get_db
-from backend.models.user import CampusIdentity, CampusRosterStudent, User, UserRole
+from backend.models.user import CampusIdentity, CampusRosterStudent, CampusRosterTeacher, User, UserRole
 from backend.routers import campus_sso as campus_router
 from backend.security import decode_token
 from backend.services import campus_sso
@@ -180,3 +180,32 @@ def test_auto_create_requires_matching_roster_number_name_and_school(session_fac
         user = campus_sso.resolve_campus_user(db, student_profile(), auto_create_students=True)
         assert campus_sso.resolve_campus_user(db, student_profile(), auto_create_students=True).id == user.id
         assert db.scalars(select(User)).all() == [user]
+
+
+
+def test_teacher_provisioning_reuses_directory_username_and_checks_role(session_factory):
+    with session_factory() as db:
+        db.add_all([
+            CampusRosterTeacher(school_id="school-1", number="T01", username="teach-one", full_name="教师甲"),
+            CampusRosterTeacher(school_id="school-1", number="T02", username="teach-two", full_name="教师乙"),
+            CampusRosterTeacher(school_id="school-1", number="T03", username="existing-student", full_name="学生丙"),
+        ])
+        prior = User(username="teach-two", full_name="教师乙", role=UserRole.TEACHER, password_hash="old")
+        student = User(username="existing-student", full_name="学生丙", role=UserRole.STUDENT, password_hash="old")
+        db.add_all([prior, student])
+        db.commit()
+        first = campus_sso.CampusProfile("school-1", "teacher-1", "T01", "教师甲", UserRole.TEACHER)
+        with pytest.raises(campus_sso.CampusSsoError):
+            campus_sso.resolve_campus_user(db, first, auto_create_students=True)
+        for number, name in (("T99", "教师甲"), ("T01", "其他姓名"), ("T03", "学生丙")):
+            invalid = campus_sso.CampusProfile("school-1", "wrong", number, name, UserRole.TEACHER)
+            with pytest.raises(campus_sso.CampusSsoError):
+                campus_sso.resolve_campus_user(db, invalid, auto_create_students=True, auto_create_teachers=True)
+        new = campus_sso.resolve_campus_user(db, first, auto_create_students=False, auto_create_teachers=True)
+        assert new.username == "teach-one" and new.role == UserRole.TEACHER
+        assert new.teacher_classrooms == [] and new.grade is None
+        assert campus_sso.resolve_campus_user(db, first, auto_create_students=False, auto_create_teachers=True).id == new.id
+        existing = campus_sso.CampusProfile("school-1", "teacher-2", "T02", "教师乙", UserRole.TEACHER)
+        bound = campus_sso.resolve_campus_user(db, existing, auto_create_students=False, auto_create_teachers=True)
+        assert bound.id == prior.id and bound.password_hash == "old"
+        assert student.role == UserRole.STUDENT

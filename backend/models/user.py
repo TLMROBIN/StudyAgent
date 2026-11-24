@@ -139,6 +139,16 @@ class CampusRosterStudent(Base):
     full_name: Mapped[str] = mapped_column(String(64))
 
 
+class CampusRosterTeacher(Base):
+    __tablename__ = "campus_roster_teachers"
+    __table_args__ = (UniqueConstraint("school_id", "username"),)
+
+    school_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    number: Mapped[str] = mapped_column(String(64), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(64))
+    username: Mapped[str] = mapped_column(String(64))
+
+
 if TYPE_CHECKING:
     from backend.models.agent_config import AgentConfig
     from backend.models.conversation import Conversation

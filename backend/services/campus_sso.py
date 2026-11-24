@@ -9,12 +9,12 @@ from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.config import Settings
-from backend.models.user import CampusIdentity, CampusRosterStudent, User, UserRole
+from backend.models.user import CampusIdentity, CampusRosterStudent, CampusRosterTeacher, User, UserRole
 
 
 class CampusSsoError(Exception):
@@ -105,7 +105,60 @@ def _bound_user(db: Session, identity: CampusIdentity, profile: CampusProfile) -
     return user
 
 
-def resolve_campus_user(db: Session, profile: CampusProfile, *, auto_create_students: bool) -> User:
+def _provision_roster_user(
+    db: Session, profile: CampusProfile, *, auto_create_students: bool, auto_create_teachers: bool
+) -> User:
+    name = normalize("NFKC", profile.name).strip()
+    key = (profile.school_id, profile.number)
+    if auto_create_students and profile.role == UserRole.STUDENT:
+        roster_student = db.get(CampusRosterStudent, key)
+        if roster_student is None or roster_student.full_name != name:
+            raise CampusSsoError("当前学生身份未匹配开通名册，请联系管理员")
+        if db.scalar(select(User.id).where(
+            or_(User.student_no == profile.number, User.username == profile.number)
+        ).limit(1)) is not None:
+            raise CampusSsoError("已有账号需要核对身份，请联系管理员")
+        identifier = json.dumps([profile.school_id, profile.external_id], ensure_ascii=False)
+        username = "campus-" + hashlib.sha256(identifier.encode()).hexdigest()[:48]
+    elif auto_create_teachers and profile.role == UserRole.TEACHER:
+        roster_teacher = db.get(CampusRosterTeacher, key)
+        if roster_teacher is None or roster_teacher.full_name != name:
+            raise CampusSsoError("当前教师身份未匹配开通名册，请联系管理员")
+        username = roster_teacher.username
+        existing_accounts = db.scalars(
+            select(User).where(func.lower(User.username) == username.lower()).limit(2)
+        ).all()
+        if existing_accounts:
+            user = existing_accounts[0]
+            if (
+                len(existing_accounts) != 1
+                or user.username != username
+                or user.role != UserRole.TEACHER
+                or not user.is_active
+                or user.graduated_at is not None
+                or normalize("NFKC", user.full_name).strip() != name
+                or db.scalar(select(CampusIdentity.id).where(
+                    CampusIdentity.school_id == profile.school_id, CampusIdentity.user_id == user.id
+                )) is not None
+            ):
+                raise CampusSsoError("已有账号需要核对身份，请联系管理员")
+            return user
+    else:
+        raise CampusSsoError("账号尚未完成绑定，请联系管理员")
+    user = User(
+        username=username,
+        full_name=name,
+        role=profile.role,
+        password_hash="!campus-sso:" + secrets.token_urlsafe(32),
+    )
+    db.add(user)
+    db.flush()
+    return user
+
+
+def resolve_campus_user(
+    db: Session, profile: CampusProfile, *, auto_create_students: bool, auto_create_teachers: bool = False
+) -> User:
     school = CampusIdentity.school_id == profile.school_id
     identity = db.scalar(select(CampusIdentity).where(school, CampusIdentity.external_id == profile.external_id))
     if identity is not None:
@@ -126,25 +179,9 @@ def resolve_campus_user(db: Session, profile: CampusProfile, *, auto_create_stud
             if result.rowcount != 1:
                 raise CampusSsoError("中台身份已绑定，请重新从中台打开")
         else:
-            if not auto_create_students or profile.role != UserRole.STUDENT:
-                raise CampusSsoError("账号尚未完成绑定，请联系管理员")
-            roster_student = db.get(CampusRosterStudent, (profile.school_id, profile.number))
-            if roster_student is None or roster_student.full_name != normalize("NFKC", profile.name).strip():
-                raise CampusSsoError("当前学生身份未匹配开通名册，请联系管理员")
-            if db.scalar(select(User.id).where(
-                or_(User.student_no == profile.number, User.username == profile.number)
-            ).limit(1)) is not None:
-                raise CampusSsoError("已有账号需要核对身份，请联系管理员")
-            identifier = json.dumps([profile.school_id, profile.external_id], ensure_ascii=False)
-            username = "campus-" + hashlib.sha256(identifier.encode()).hexdigest()[:48]
-            user = User(
-                username=username,
-                full_name=roster_student.full_name,
-                role=UserRole.STUDENT,
-                password_hash="!campus-sso:" + secrets.token_urlsafe(32),
+            user = _provision_roster_user(
+                db, profile, auto_create_students=auto_create_students, auto_create_teachers=auto_create_teachers,
             )
-            db.add(user)
-            db.flush()
             db.add(CampusIdentity(
                 school_id=profile.school_id,
                 external_id=profile.external_id,
