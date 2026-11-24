@@ -12,6 +12,34 @@ const textarea = ref<HTMLTextAreaElement | null>(null)
 const selection = ref({ start: 0, end: 0 })
 const composing = ref(false)
 const preview = computed(() => renderRichText(props.modelValue))
+const structures = [
+  { label: '分式', fields: ['分子', '分母'], source: ([top, bottom]: string[]) => `\\frac{${top}}{${bottom}}` },
+  { label: '根号', fields: ['根号内的内容'], source: ([value]: string[]) => `\\sqrt{${value}}` },
+  { label: '上标', fields: ['底数', '上标'], source: ([base, exponent]: string[]) => `{${base}}^{${exponent}}` },
+  { label: '下标', fields: ['主体', '下标'], source: ([base, subscript]: string[]) => `{${base}}_{${subscript}}` },
+]
+const structure = ref<(typeof structures)[number] | null>(null)
+const structureFields = ref<string[]>([])
+const structureSource = computed(() => {
+  if (!structure.value) return ''
+  const values = structureFields.value.map((value) => value.trim())
+  if (values.some((value) => !value || /[\\${}&#^_%~`]/.test(value))) return ''
+  return `$${structure.value.source(values)}$`
+})
+
+function openStructure(item: (typeof structures)[number]) {
+  rememberSelection()
+  mobileTab.value = 'edit'
+  structure.value = item
+  structureFields.value = item.fields.map(() => '')
+}
+
+async function insertStructure() {
+  if (props.disabled || composing.value || !structure.value || !structureSource.value) return
+  const template = { label: structure.value.label, source: structureSource.value }
+  structure.value = null
+  await insert(template)
+}
 
 function rememberSelection() {
   if (textarea.value) {
@@ -60,6 +88,23 @@ function updateText(event: Event) {
     </div>
     <div class="formula-editor-columns" :data-active-tab="mobileTab">
       <section id="formula-source-panel" class="formula-editor-source" aria-labelledby="formula-source-label">
+        <div class="formula-structure">
+          <div class="formula-editor-toolbar" aria-label="按结构填写公式">
+            <button v-for="item in structures" :key="item.label" type="button" class="ghost-button" :disabled="disabled || composing" @mousedown.prevent @click="openStructure(item)">填写{{ item.label }}</button>
+          </div>
+          <div v-if="structure" class="formula-structure-form">
+            <label v-for="(field, index) in structure.fields" :key="field">
+              {{ field }}
+              <input v-model="structureFields[index]" :disabled="disabled" type="text" maxlength="80" />
+            </label>
+            <p v-if="structureSource" class="message-body" v-html="renderRichText(structureSource)"></p>
+            <p v-else>填写各部分，可用字母、数字和运算符。</p>
+            <div class="formula-editor-toolbar">
+              <button type="button" class="primary-button" :disabled="disabled || !structureSource" @click="insertStructure">插入公式</button>
+              <button type="button" class="ghost-button" @click="structure = null">取消</button>
+            </div>
+          </div>
+        </div>
         <label id="formula-source-label" for="formula-source">Markdown 源码</label>
         <textarea id="formula-source" ref="textarea" :value="modelValue" :disabled="disabled" spellcheck="false" placeholder="输入文字和公式，例如：我认为 $F = ma$，但不知道如何确定加速度。" @input="updateText" @select="rememberSelection" @click="rememberSelection" @keyup="rememberSelection" @blur="rememberSelection" @compositionstart="composing = true" @compositionend="composing = false; updateText($event)" />
       </section>
@@ -88,3 +133,29 @@ function updateText(event: Event) {
     <template #footer><button type="button" class="primary-button" @click="helpOpen = false">知道了</button></template>
   </el-dialog>
 </template>
+
+<style scoped>
+.formula-structure-form {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block: 8px;
+}
+
+.formula-structure-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.formula-structure-form input {
+  width: 9rem;
+  max-width: 100%;
+  padding: 6px;
+}
+
+.formula-structure-form p {
+  flex-basis: 100%;
+  margin: 0;
+}
+</style>

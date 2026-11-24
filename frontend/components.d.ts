@@ -40,6 +40,8 @@ declare module 'vue' {
     MetricTile: typeof import('./src/components/MetricTile.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SubjectAvailabilityPanel: typeof import('./src/components/SubjectAvailabilityPanel.vue')['default']
+    UserNoticeModal: typeof import('./src/components/UserNoticeModal.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

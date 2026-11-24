@@ -39,6 +39,7 @@ const cameraInputRef = ref<HTMLInputElement | null>(null)
 const galleryInputRef = ref<HTMLInputElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const preparingImages = ref(false)
+const draftImagePreview = ref<PendingFeedbackImage | null>(null)
 const selectedImages = ref<PendingFeedbackImage[]>(draft.files.map((file, index) => ({
   id: `restored-${index}`, file, url: URL.createObjectURL(file),
 })))
@@ -235,8 +236,10 @@ async function addSelectedImages(event: Event) {
 }
 
 function removeSelectedImage(id: string) {
+  if (saving.value || preparingImages.value) return
   const target = selectedImages.value.find((item) => item.id === id)
   if (target) {
+    if (draftImagePreview.value?.id === id) draftImagePreview.value = null
     URL.revokeObjectURL(target.url)
   }
   selectedImages.value = selectedImages.value.filter((item) => item.id !== id)
@@ -244,6 +247,7 @@ function removeSelectedImage(id: string) {
 }
 
 function clearSelectedImages() {
+  draftImagePreview.value = null
   selectedImages.value.forEach((item) => URL.revokeObjectURL(item.url))
   selectedImages.value = []
   resetImageInputs()
@@ -343,17 +347,22 @@ onMounted(() => {
           <span class="panel-subcopy">已选 {{ selectedImages.length }} / {{ MAX_FEEDBACK_IMAGES }} 张</span>
         </div>
         <div v-if="selectedImages.length" class="feedback-image-grid">
-          <button
-            v-for="image in selectedImages"
-            :key="image.id"
-            class="feedback-image-thumb feedback-image-thumb--pending"
-            type="button"
-            @click="removeSelectedImage(image.id)"
-          >
-            <img :src="image.url" :alt="image.file.name" />
-            <span>移除</span>
-          </button>
+          <div v-for="(image, index) in selectedImages" :key="image.id" class="feedback-image-item">
+            <button class="feedback-image-thumb" type="button" :aria-label="`预览第 ${index + 1} 张图片`" @click="draftImagePreview = image">
+              <img :src="image.url" alt="" />
+            </button>
+            <button
+              class="feedback-image-remove"
+              type="button"
+              :aria-label="`移除第 ${index + 1} 张图片`"
+              :disabled="saving || preparingImages"
+              @click="removeSelectedImage(image.id)"
+            >×</button>
+          </div>
         </div>
+        <el-dialog :model-value="draftImagePreview !== null" title="反馈图片预览" width="min(90vw, 720px)" append-to-body @update:model-value="draftImagePreview = null">
+          <img v-if="draftImagePreview" class="feedback-draft-preview" :src="draftImagePreview.url" :alt="draftImagePreview.file.name" />
+        </el-dialog>
         <div class="row-actions">
           <span class="panel-subcopy">{{ content.trim().length }}/1000</span>
           <button
@@ -377,7 +386,7 @@ onMounted(() => {
       <div v-loading="loading" class="table-like feedback-list">
         <article v-for="item in items" :key="item.id" class="table-row table-row-wrap feedback-row" @click="markFeedbackItemRead(item)">
           <div class="table-main table-main--grow">
-            <strong>
+            <strong class="feedback-history-content">
               <span v-if="item.student_unread" class="unread-dot unread-feedback-dot"></span>
               {{ item.content }}
             </strong>
@@ -478,8 +487,34 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.feedback-image-thumb--pending {
-  font: inherit;
+.feedback-image-item {
+  position: relative;
+  min-width: 0;
+}
+
+.feedback-image-item .feedback-image-thumb {
+  width: 100%;
+}
+
+.feedback-image-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #fff;
+  color: #334155;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.feedback-draft-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: auto;
 }
 
 .feedback-list {
@@ -489,6 +524,11 @@ onMounted(() => {
 
 .feedback-row {
   align-items: start;
+}
+
+.feedback-history-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .feedback-reply {
