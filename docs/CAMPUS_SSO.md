@@ -17,6 +17,8 @@ python -m scripts.import_campus_bindings /path/to/reviewed.csv
 确认预览后在受控环境中加 `--apply` 写入。保持表格在受控位置。回调所用配置见 `.env.example`。
 使用 `--roster-csv /path/to/approved-roster.csv` 同时预览或替换同一学校的开通名册。该文件列名为 `number,full_name`。教师名册使用 `--teacher-roster-csv`，列名是 `number,full_name,username`。
 
+配置 `CAMPUS_SSO_ALLOW_UNLISTED_STUDENTS=true` 后，验票通过的学生可以在名册缺项时自动开通。匹配原学号和姓名的学生直接绑定原账号；同名但编号不同、已有绑定冲突或明确排除的编号需管理员核对。
+
 ## 试点和上线
 
 1. 核实验票返回的 `scid` 和 `projectID`。校园入口直接使用 StudyAgent 的回调路由，该路由关闭访问日志并在验票后跳转到不含查询串的页面。

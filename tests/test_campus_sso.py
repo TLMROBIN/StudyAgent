@@ -209,3 +209,31 @@ def test_teacher_provisioning_reuses_directory_username_and_checks_role(session_
         bound = campus_sso.resolve_campus_user(db, existing, auto_create_students=False, auto_create_teachers=True)
         assert bound.id == prior.id and bound.password_hash == "old"
         assert student.role == UserRole.STUDENT
+
+
+def test_open_auto_provisioning_reuses_existing_students_and_rejects_conflicts(session_factory):
+    def profile(external_id, number, name):
+        return campus_sso.CampusProfile("school-1", external_id, number, name, UserRole.STUDENT)
+
+    with session_factory() as db:
+        old = User(username="S14", student_no="S14", full_name="已有学生", role=UserRole.STUDENT, password_hash="old", grade=3)
+        db.add(old)
+        db.commit()
+        options = dict(auto_create_students=True, allow_unlisted_students=True, blocked_student_numbers=frozenset({"removed"}))
+        for conflicting in (
+            profile("case-1", "S14", "其他姓名"),
+            profile("case-2", "new-number", "已有学生"),
+            profile("case-3", "removed", "已排除学生"),
+        ):
+            with pytest.raises(campus_sso.CampusSsoError):
+                campus_sso.resolve_campus_user(db, conflicting, **options)
+        assert db.scalars(select(User)).all() == [old]
+
+        resumed = campus_sso.resolve_campus_user(db, profile("existing", "S14", "已有学生"), **options)
+        assert resumed.id == old.id and resumed.grade == 3 and resumed.password_hash == "old"
+        first_login = profile("new", "not-listed", "首次登录学生")
+        new = campus_sso.resolve_campus_user(db, first_login, **options)
+        assert campus_sso.resolve_campus_user(db, first_login, **options).id == new.id
+        assert db.scalar(select(CampusIdentity).where(CampusIdentity.user_id == new.id)).number == "not-listed"
+        with pytest.raises(campus_sso.CampusSsoError):
+            campus_sso.resolve_campus_user(db, profile("other-subject", "not-listed", "首次登录学生"), **options)

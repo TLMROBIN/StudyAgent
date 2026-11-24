@@ -106,18 +106,47 @@ def _bound_user(db: Session, identity: CampusIdentity, profile: CampusProfile) -
 
 
 def _provision_roster_user(
-    db: Session, profile: CampusProfile, *, auto_create_students: bool, auto_create_teachers: bool
+    db: Session, profile: CampusProfile, *, auto_create_students: bool, auto_create_teachers: bool,
+    allow_unlisted_students: bool, blocked_student_numbers: frozenset[str],
 ) -> User:
     name = normalize("NFKC", profile.name).strip()
     key = (profile.school_id, profile.number)
     if auto_create_students and profile.role == UserRole.STUDENT:
+        if profile.number in blocked_student_numbers:
+            raise CampusSsoError("当前学生身份未获准自动开通，请联系管理员")
         roster_student = db.get(CampusRosterStudent, key)
-        if roster_student is None or roster_student.full_name != name:
+        if (
+            (roster_student is None and not allow_unlisted_students)
+            or (roster_student is not None and roster_student.full_name != name)
+        ):
             raise CampusSsoError("当前学生身份未匹配开通名册，请联系管理员")
-        if db.scalar(select(User.id).where(
+        matches = db.scalars(select(User).where(
             or_(User.student_no == profile.number, User.username == profile.number)
-        ).limit(1)) is not None:
-            raise CampusSsoError("已有账号需要核对身份，请联系管理员")
+        ).limit(2)).all()
+        if matches:
+            user = matches[0]
+            if (
+                not allow_unlisted_students
+                or len(matches) != 1
+                or user.role != UserRole.STUDENT
+                or not user.is_active
+                or user.graduated_at is not None
+                or normalize("NFKC", user.full_name).strip() != name
+                or db.scalar(select(CampusIdentity.id).where(
+                    CampusIdentity.school_id == profile.school_id, CampusIdentity.user_id == user.id
+                )) is not None
+            ):
+                raise CampusSsoError("已有账号需要核对身份，请联系管理员")
+            return user
+        unbound_name = select(User.id).where(
+            User.role == UserRole.STUDENT,
+            User.full_name == name,
+            ~select(CampusIdentity.id).where(
+                CampusIdentity.school_id == profile.school_id, CampusIdentity.user_id == User.id
+            ).exists(),
+        ).limit(1)
+        if allow_unlisted_students and db.scalar(unbound_name) is not None:
+            raise CampusSsoError("发现同名学生的已有账号，请联系管理员核对编号")
         identifier = json.dumps([profile.school_id, profile.external_id], ensure_ascii=False)
         username = "campus-" + hashlib.sha256(identifier.encode()).hexdigest()[:48]
     elif auto_create_teachers and profile.role == UserRole.TEACHER:
@@ -157,7 +186,8 @@ def _provision_roster_user(
 
 
 def resolve_campus_user(
-    db: Session, profile: CampusProfile, *, auto_create_students: bool, auto_create_teachers: bool = False
+    db: Session, profile: CampusProfile, *, auto_create_students: bool, auto_create_teachers: bool = False,
+    allow_unlisted_students: bool = False, blocked_student_numbers: frozenset[str] = frozenset(),
 ) -> User:
     school = CampusIdentity.school_id == profile.school_id
     identity = db.scalar(select(CampusIdentity).where(school, CampusIdentity.external_id == profile.external_id))
@@ -181,6 +211,7 @@ def resolve_campus_user(
         else:
             user = _provision_roster_user(
                 db, profile, auto_create_students=auto_create_students, auto_create_teachers=auto_create_teachers,
+                allow_unlisted_students=allow_unlisted_students, blocked_student_numbers=blocked_student_numbers,
             )
             db.add(CampusIdentity(
                 school_id=profile.school_id,

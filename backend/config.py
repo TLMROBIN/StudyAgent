@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     campus_sso_project_id: str = ""
     campus_sso_allow_http: bool = False
     campus_sso_auto_create_students: bool = False
+    campus_sso_allow_unlisted_students: bool = False
+    campus_sso_blocked_student_numbers: str = ""
     campus_sso_auto_create_teachers: bool = False
 
     bootstrap_admin_username: str = Field(default="admin", alias="BOOTSTRAP_ADMIN_USERNAME")

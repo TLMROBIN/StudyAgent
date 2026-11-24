@@ -125,6 +125,10 @@ def campus_complete(request: Request, db: DbSession, confirmation: Annotated[str
             db, profile,
             auto_create_students=settings.campus_sso_auto_create_students,
             auto_create_teachers=settings.campus_sso_auto_create_teachers,
+            allow_unlisted_students=settings.campus_sso_allow_unlisted_students,
+            blocked_student_numbers=frozenset(
+                number.strip() for number in settings.campus_sso_blocked_student_numbers.split(",") if number.strip()
+            ),
         )
     except CampusSsoError as exc:
         response = _page(f"<p>{escape(str(exc))}</p>", status_code=403)
