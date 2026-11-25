@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, selectinload
 from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.dependencies import CurrentUser, DbSession
+from backend.services.math_step_check import math_step_evidence
 from backend.services.chat_permission_service import ensure_chat_allowed
 from backend.models.agent_config import AgentConfig
 from backend.models.conversation import (
@@ -560,8 +561,8 @@ async def _repair_math_followup(
     """Generate at most one replacement from the original task, history and image evidence."""
     instruction = (
         "本轮只输出给学生看的简短正文，省略模式、摘要与质量标记。"
-        "回到原题所求和学生刚说的话。学生质疑某一步时，用题里的量解释这一步怎样服务于原题；"
-        "学生提交中间结果时核对它，用具体的条件或算式指出哪里成立、哪里需要重查。"
+        "回到原题所求和学生刚说的话。学生质疑某一步时，说明算完它能够替换原题中的哪个量，换个角度解释，避免重复上次的问题。"
+        "学生提交数值时，先独立从题干或题图选对应条件，把代入后的算式列出并重新计算，再与学生的值比较。如果两者不同，指出具体差异，让学生重算。不能只顺着学生的数值判对；核对不清时只请学生核对具体算式。"
         "留下一个学生现在能做的小步骤，不写整题最后结论。"
     )
     repair_messages = [dict(item) for item in messages]
@@ -572,11 +573,12 @@ async def _repair_math_followup(
     try:
         answer = await asyncio.wait_for(llm_service.complete_response(
             repair_messages, model_key=model_key, max_completion_tokens=min(token_limit, 400),
-            use_fallback_providers=False,
-        ), timeout=12)
+        ), timeout=15)
     except (TimeoutError, LLMCallError):
         answer = ""
-    answer = answer.strip()
+    quality = QualitySignalFilter()
+    answer = quality.feed(answer) + quality.flush()
+    answer = LeadingModeTagParser.TAG_RE.sub("", answer, count=1).strip()
     if answer and not re.search(r"</?(?:think|mode|learning_summary)\b|\[\[sig:", answer, re.I):
         combined = f"{visible}\n\n{answer}" if visible else answer
         checked = await _validate_stream_answer(
@@ -3416,6 +3418,10 @@ async def _stream_chat(
             )
             subject_max_tokens = subject_llm_params.get("max_tokens")
             candidate_max_tokens = [value for value in (quota_max_tokens, subject_max_tokens) if value]
+            if math_followup:
+                evidence = await math_step_evidence(payload.message, history_pairs, historical_images, selected_model_key)
+                if evidence:
+                    prompt.messages[0]["content"] += "\n" + evidence
             llm_stream = _stream_llm_events(
                 prompt.messages,
                 fallback_text,

@@ -4404,6 +4404,8 @@ def test_math_followup_repairs_blocked_reply_in_context(monkeypatch, question, p
                 yield chunk
 
     async def repair(messages, **kwargs):
+        if len(messages) == 2 and "提取算式" in messages[0]["content"]:
+            return '{"source":"x+1","expression":"3+1"}'
         attempts.append(messages)
         return replacement
 
@@ -4421,6 +4423,8 @@ def test_math_followup_repairs_blocked_reply_in_context(monkeypatch, question, p
     assert len(attempts) == int(replacement is not None)
     if attempts:
         assert any(item["content"] == question for item in attempts[0])
+        if student_reply == "f(3)等于2":
+            assert "不一致" in attempts[0][0]["content"]
         assert previous in attempts[0][-1]["content"]
         assert "学生正在回答上一轮数学概念问题" not in attempts[0][-1]["content"]
     with factory() as db:
