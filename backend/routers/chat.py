@@ -267,19 +267,28 @@ def _short_followup_context(
     writing_followup = subject == "语文" and any(
         word in topic for word in ("作文", "写作", "议论文", "记叙文")
     )
-    task_label = f"学生正在继续上一轮{subject}作文评析与修改任务。" if writing_followup else f"学生正在回答上一轮{subject}概念问题。"
-    next_step = (
-        "先回应学生表达与作文原文、整体修改目标的联系。开放表达不要机械判为部分正确，"
-        "不要把局部句子润色改成仿写题；局部已完成时回到整篇评析。"
-        "必要时只提出 1 个关键问题，不代写正文。"
-        if writing_followup else
-        "请先判断学生回答是否完全或部分正确；如果不完整，用一句话补足关键条件；"
-        "然后继续提出 1 个聚焦的引导问题。"
-    )
+    message_label = "学生回答"
+    if writing_followup:
+        task_label = "学生正在继续上一轮语文作文评析与修改任务。"
+        next_step = (
+            "先回应学生表达与作文原文、整体修改目标的联系。开放表达不要机械判为部分正确，"
+            "不要把局部句子润色改成仿写题；局部已完成时回到整篇评析。"
+            "必要时只提出 1 个关键问题，不代写正文。"
+        )
+    elif subject == "数学":
+        task_label = "学生在继续上一轮数学讨论。"
+        message_label = "学生本轮消息"
+        next_step = "结合原题和上一轮对话回应这条消息。"
+    else:
+        task_label = f"学生正在回答上一轮{subject}概念问题。"
+        next_step = (
+            "请先判断学生回答是否完全或部分正确；如果不完整，用一句话补足关键条件；"
+            "然后继续提出 1 个聚焦的引导问题。"
+        )
     prompt_question = (
         f"{task_label}\n{topic_line}"
         f"上一轮导师问题：{clipped_prompt}\n"
-        f"学生回答：{clipped_answer}\n"
+        f"{message_label}：{clipped_answer}\n"
         f"{next_step}不要把它当成新的题目重新开始，也不要要求学生画无关图景。"
     )
     retrieval_query = " ".join(
@@ -545,10 +554,47 @@ async def _validate_stream_answer(
         chat_output_validation_seconds.observe(perf_counter() - started)
 
 
+async def _repair_math_followup(
+    messages: list[dict[str, str]], *, visible: str, question: str, model_key: str, token_limit: int,
+) -> str:
+    """Generate at most one replacement from the original task, history and image evidence."""
+    instruction = (
+        "本轮只输出给学生看的简短正文，省略模式、摘要与质量标记。"
+        "回到原题所求和学生刚说的话。学生质疑某一步时，用题里的量解释这一步怎样服务于原题；"
+        "学生提交中间结果时核对它，用具体的条件或算式指出哪里成立、哪里需要重查。"
+        "留下一个学生现在能做的小步骤，不写整题最后结论。"
+    )
+    repair_messages = [dict(item) for item in messages]
+    repair_messages[0]["content"] += "\n" + instruction
+    if visible:
+        repair_messages.append({"role": "assistant", "content": visible})
+        repair_messages[0]["content"] += "最后一条导师消息已展示，只续写缺少的引导。"
+    try:
+        answer = await asyncio.wait_for(llm_service.complete_response(
+            repair_messages, model_key=model_key, max_completion_tokens=min(token_limit, 400),
+            use_fallback_providers=False,
+        ), timeout=12)
+    except (TimeoutError, LLMCallError):
+        answer = ""
+    answer = answer.strip()
+    if answer and not re.search(r"</?(?:think|mode|learning_summary)\b|\[\[sig:", answer, re.I):
+        combined = f"{visible}\n\n{answer}" if visible else answer
+        checked = await _validate_stream_answer(
+            combined, subject="数学", question=question, model_key=model_key,
+            skip_direct_answer=False, check_topic=True,
+        )
+        if checked.allowed:
+            logger.info("math_followup_repair outcome=accepted")
+            return combined
+        _record_stream_safety_rewrite(checked, subject="数学")
+    logger.warning("math_followup_repair outcome=failed")
+    raise LLMCallError(MODEL_CALL_FAILED_MESSAGE)
+
+
 def _record_stream_safety_rewrite(validation: OutputValidation, *, subject: str) -> None:
     reason = validation.issues[0] if validation.issues else "unknown"
     chat_stream_safety_rewrite_total.labels(reason=reason).inc()
-    logger.warning("stream_safety_rewrite subject=%s issues=%s", subject, ",".join(validation.issues))
+    logger.warning("stream_safety_rewrite subject=%s issues=%s rule=%s", subject, ",".join(validation.issues), validation.rule_id)
 
 
 def _has_academic_history(history_pairs: list[tuple[str, str]], subject: str) -> bool:
@@ -3327,6 +3373,8 @@ async def _stream_chat(
         disconnected = False
         first_token_observed = False
         should_send_done = True
+        math_followup = subject == "数学" and bool(history_pairs) and not practice_review_turn and not has_image_turn
+        hold_for_validation = False
         stop_streaming = False
         provider_stream_started = False
         usage_recorded = False
@@ -3432,12 +3480,20 @@ async def _stream_chat(
                         yield _sse_event("learning_summary", {"content": summary})
                 pending_buffer += provider_chunk
                 segments: list[str] = []
-                immediate_safety_failure = not filter_service.validate_answer(
+                if hold_for_validation:
+                    continue
+                early_validation = filter_service.validate_answer(
                     pending_buffer,
                     skip_direct_answer=practice_review_turn,
                     subject=subject,
                     question=prompt_question,
-                ).allowed
+                )
+                if math_followup and early_validation.issues == ["direct_answer_detected"]:
+                    # A token ending in a number or unit can still be part of a condition.
+                    # Judge the completed sentence before replacing the tutor's response.
+                    hold_for_validation = True
+                    continue
+                immediate_safety_failure = not early_validation.allowed
                 if emitted_visible or len(pending_buffer) >= 180 or immediate_safety_failure:
                     segments, pending_buffer = _split_stream_buffer(pending_buffer, force=immediate_safety_failure)
                 for segment_index, segment in enumerate(segments):
@@ -3463,6 +3519,10 @@ async def _stream_chat(
                     )
                     if check_topic:
                         next_topic_check_at = max(len(candidate_text), 180) + 240
+                    if math_followup and validation.issues == ["direct_answer_detected"]:
+                        hold_for_validation = True
+                        pending_buffer = "".join(segments[segment_index:]) + pending_buffer
+                        break
                     if not validation.allowed:
                         _record_stream_safety_rewrite(validation, subject=subject)
                         rewritten_text = _compose_safe_rewrite(
@@ -3504,7 +3564,10 @@ async def _stream_chat(
                 pending_buffer += summary_parser.flush()
 
             if not disconnected and pending_buffer:
-                segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
+                if math_followup:
+                    segments, pending_buffer = [pending_buffer], ""
+                else:
+                    segments, pending_buffer = _split_stream_buffer(pending_buffer, force=True)
                 for segment_index, segment in enumerate(segments):
                     initial_topic_check = not emitted_visible
                     if initial_topic_check:
@@ -3513,7 +3576,7 @@ async def _stream_chat(
                             continue
                         emitted_visible = True
                     candidate_text = f"{emitted_text}{segment}"
-                    check_topic = initial_topic_check or len(candidate_text) >= next_topic_check_at
+                    check_topic = hold_for_validation or initial_topic_check or len(candidate_text) >= next_topic_check_at
                     validation_text = (
                         candidate_text + "".join(segments[segment_index + 1:]) + pending_buffer
                         if initial_topic_check else candidate_text
@@ -3530,10 +3593,16 @@ async def _stream_chat(
                         next_topic_check_at = max(len(candidate_text), 180) + 240
                     if not validation.allowed:
                         _record_stream_safety_rewrite(validation, subject=subject)
-                        rewritten_text = _compose_safe_rewrite(
-                            emitted_text,
-                            socratic_service.safe_guided_rewrite(prompt_question, subject, prompt.stage, image_related=has_image_turn),
-                        )
+                        if math_followup and validation.issues == ["direct_answer_detected"]:
+                            rewritten_text = await _repair_math_followup(
+                                prompt.messages, visible=emitted_text, question=prompt_question,
+                                model_key=selected_model_key, token_limit=min(candidate_max_tokens or [400]),
+                            )
+                        else:
+                            rewritten_text = _compose_safe_rewrite(
+                                emitted_text,
+                                socratic_service.safe_guided_rewrite(prompt_question, subject, prompt.stage, image_related=has_image_turn),
+                            )
                         delta = rewritten_text[len(emitted_text) :]
                         emitted_text = rewritten_text
                         if delta:

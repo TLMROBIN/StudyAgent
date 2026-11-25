@@ -84,7 +84,7 @@ def test_practice_exemption_covers_subject_scoped_rules():
 def test_chat_router_passes_subject_to_output_validation():
     source = Path("backend/routers/chat.py").read_text()
 
-    assert source.count("await _validate_stream_answer(") == 2
+    assert source.count("validation = await _validate_stream_answer(") == 2
     assert "len(pending_buffer) >= 180" in source
     assert "check_topic=check_topic" in source
 

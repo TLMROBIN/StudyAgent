@@ -4373,3 +4373,67 @@ def test_unrecognized_long_question_and_followup_reach_topic_review(monkeypatch)
     assert calls[0]["followup_prompt"] is None
     assert calls[1]["contextual_model_eligible"]
     assert calls[1]["followup_prompt"] == tutor.content
+
+
+@pytest.mark.parametrize(("question", "previous", "student_reply", "chunks", "replacement"), [
+    ("等差数列前几项的和怎样用中间项表示？", "把首尾两项配对，你发现什么？",
+     "这和我一开始问的有什么关系", ["最终答案是 42。"], "首尾配对是为了把整段的和与中间项联系起来。每对的平均数和中间项有什么关系？"),
+    ("已知两个除式和余式，怎样求多项式的余式？", "第二个余式是 x+1，把 3 代进去时 f(3) 是多少？",
+     "f(3)等于2", ["因此把 x=3 代入哪个余式？"], "再看第二个余式，它的常数项是正一。把 3 代进去，你写的是加法还是减法？"),
+    ("矩形的面积如何求？", "题目给出的长度是哪条边？", "长边",
+     ["已知长边 a=3 cm", "，还需要知道哪条边？"], None),
+])
+def test_math_followup_repairs_blocked_reply_in_context(monkeypatch, question, previous, student_reply, chunks, replacement):
+    factory = _build_session_factory()
+    student = _create_student(factory)
+    client = _build_chat_test_client(factory, student)
+    from backend.services.intent_classify_service import TopicVerdict
+
+    async def academic_topic(**kwargs):
+        return TopicVerdict("academic", verified_by_llm=True)
+
+    monkeypatch.setattr(chat_router.get_settings(), "topic_contextual_followup_enabled", True)
+    monkeypatch.setattr(chat_router.intent_classify_service, "classify_topic_with_source", academic_topic)
+    attempts = []
+
+    async def stream(messages, fallback_text, **kwargs):
+        if len(messages) == 2:
+            yield previous
+        else:
+            for chunk in chunks:
+                yield chunk
+
+    async def repair(messages, **kwargs):
+        attempts.append(messages)
+        return replacement
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", stream)
+    monkeypatch.setattr(chat_router.llm_service, "complete_response", repair)
+    monkeypatch.setattr(chat_router.rag_service, "retrieve", lambda *a, **kw: RetrievalResult(context="", chunks=[]))
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kw: False)
+    initial = client.post("/api/chat/stream", json={"subject": "数学", "message": question})
+    cid = _parse_sse(initial.text)[0][1]["conversation_id"]
+    response = client.post("/api/chat/stream", json={"subject": "数学", "message": student_reply, "conversation_id": cid})
+    events = _parse_sse(response.text)
+    assert "最终答案是" not in response.text
+    expected = replacement or "".join(chunks)
+    assert next(data["content"] for event, data in events if event == "done") == expected
+    assert len(attempts) == int(replacement is not None)
+    if attempts:
+        assert any(item["content"] == question for item in attempts[0])
+        assert previous in attempts[0][-1]["content"]
+        assert "学生正在回答上一轮数学概念问题" not in attempts[0][-1]["content"]
+    with factory() as db:
+        assert db.scalar(select(Message.content).where(Message.conversation_id == cid).order_by(Message.id.desc())) == expected
+
+
+def test_math_followup_rejects_second_leak(monkeypatch):
+    async def unsafe(*args, **kwargs):
+        return "最终答案是 42。"
+
+    monkeypatch.setattr(chat_router.llm_service, "complete_response", unsafe)
+    with pytest.raises(chat_router.LLMCallError):
+        asyncio.run(chat_router._repair_math_followup(
+            [{"role": "system", "content": "数学导师"}, {"role": "user", "content": "这一步是什么意思？"}],
+            visible="", question="这一步是什么意思？", model_key="test", token_limit=400,
+        ))

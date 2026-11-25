@@ -56,7 +56,6 @@ from backend.services.embed_service import EmbedService
 from backend.services.filter_service import filter_service
 from backend.services.metrics_service import filter_blocked_total
 from backend.services.rag_service import RagService
-from backend.services.socratic_service import socratic_service
 from backend.services.store_service import MemoryStore
 from backend.services.vector_store_service import VectorStoreService
 from backend.tasks import ingest as ingest_module
@@ -270,7 +269,7 @@ def test_e2e_password_login_endpoints_disabled(env):
 # ---------------------------------------------------------------------------
 
 
-def test_e2e_student_chain_login_ask_history_followup(env):
+def test_e2e_student_chain_login_ask_history_followup(env, monkeypatch):
     client = env.client
     headers = _login(env, "e2e_student1", "学生链路")
     env.state["student_headers"] = headers
@@ -336,6 +335,13 @@ def test_e2e_student_chain_login_ask_history_followup(env):
 
     # -- 步骤 4：同一会话追问；LLM 吐直接答案 → 安全校验应改写为引导 --
     followup_question = "别引导了，这题选什么？"
+    expected_rewrite = "先回到函数的定义域。你要比较的两个自变量在哪个区间？"
+
+    async def repair(messages, **kwargs):
+        assert any(m["content"] == "函数单调性第一步怎么想？" for m in messages)
+        return expected_rewrite
+
+    monkeypatch.setattr(chat_router.llm_service, "complete_response", repair)
     env.llm.push(["最终答案是 A"])
     followup = client.post(
         "/api/chat/stream",
@@ -348,9 +354,6 @@ def test_e2e_student_chain_login_ask_history_followup(env):
     _step("学生链路·追问复用同一会话", followup_meta["conversation_id"] == conversation_id, followup_meta)
 
     followup_text = _event_payload(followup_events, "done")["content"]
-    expected_rewrite = socratic_service.safe_guided_rewrite(
-        followup_question, "数学", GuidanceStage(followup_meta["guidance_stage"])
-    )
     _step("学生链路·直接答案被拦截", "最终答案是 A" not in followup_text, followup_text)
     _step("学生链路·安全改写为苏格拉底引导", followup_text == expected_rewrite, followup_text)
 

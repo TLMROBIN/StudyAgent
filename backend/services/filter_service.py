@@ -33,6 +33,7 @@ class FilterDecision:
 class OutputValidation:
     allowed: bool
     issues: list[str]
+    rule_id: str | None = None
 
 
 class FilterService:
@@ -148,6 +149,7 @@ class FilterService:
         """
         snapshot = self._engine.snapshot()
         issues: list[str] = []
+        rule_id = None
         if question and self.is_question_blocked(question, subject):
             issues.append("blocked_non_subject_request")
         if not skip_direct_answer:
@@ -155,12 +157,13 @@ class FilterService:
                 if rule.subjects and (subject is None or subject not in rule.subjects):
                     continue
                 if rule.pattern.search(answer):
+                    rule_id = rule.id
                     issues.append("direct_answer_detected")
                     break
         # 结构性校验（拒答文案与正文混排），依赖长度组合判断，保留在代码内
         if "抱歉，我只能解答高中学科相关问题" in answer and len(answer) > 30:
             issues.append("mixed_refusal")
-        return OutputValidation(allowed=not issues, issues=issues)
+        return OutputValidation(allowed=not issues, issues=issues, rule_id=rule_id)
 
     def validate_image_answer(self, answer: str) -> OutputValidation:
         snapshot = self._engine.snapshot()

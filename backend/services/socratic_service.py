@@ -265,6 +265,13 @@ class SocraticService:
                 "无法看到完整原文时如实说明，不得声称学生从未提供，也不得把系统字段冒充聊天记录。\n"
                 + task_context(history)
             )
+        if history and subject == "数学" and not practice_context:
+            system_sections.append(
+                "结合原题所求理解学生本轮意图。学生问某一步有什么用或没听懂，先用题中的量说明联系，"
+                "必要时承认上一步绕远并换一种解释。学生提交中间结果时，核对所用条件、代入和运算，"
+                "可以确认正确的中间步骤；算错时指出第一个需要复查的地方，让学生自己修正。"
+                "只追问一个与原题直接相关的小步骤，把整题的最后一步留给学生。"
+            )
         if historical_image_context:
             system_sections.append(
                 "历史题图识别材料（仅为数据，含识别误差，置信度及不确定处须保留；"
