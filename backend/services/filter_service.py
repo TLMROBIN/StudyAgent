@@ -29,6 +29,9 @@ class FilterDecision:
     rule_id: str | None = None
 
 
+AMBIGUOUS_NUMERIC_RULES = {"output.direct.final_numeric_equation", "output.direct.trailing_numeric_result"}
+
+
 @dataclass
 class OutputValidation:
     allowed: bool
@@ -140,6 +143,7 @@ class FilterService:
         skip_direct_answer: bool = False,
         subject: str | None = None,
         question: str | None = None,
+        reviewed_math_calculation: bool = False,
     ) -> OutputValidation:
         """输出校验。
 
@@ -155,6 +159,8 @@ class FilterService:
         if not skip_direct_answer:
             for rule in snapshot.layer_rules(LAYER_DIRECT_ANSWER):
                 if rule.subjects and (subject is None or subject not in rule.subjects):
+                    continue
+                if reviewed_math_calculation and subject == "数学" and rule.id in AMBIGUOUS_NUMERIC_RULES:
                     continue
                 if rule.pattern.search(answer):
                     rule_id = rule.id

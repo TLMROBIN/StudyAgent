@@ -4404,6 +4404,8 @@ def test_math_followup_repairs_blocked_reply_in_context(monkeypatch, question, p
                 yield chunk
 
     async def repair(messages, **kwargs):
+        if "你是高中数学校验员" in messages[0]["content"]:
+            return "BLOCK"
         if len(messages) == 2 and "提取算式" in messages[0]["content"]:
             return '{"source":"x+1","expression":"3+1"}'
         attempts.append(messages)
@@ -4441,3 +4443,24 @@ def test_math_followup_rejects_second_leak(monkeypatch):
             [{"role": "system", "content": "数学导师"}, {"role": "user", "content": "这一步是什么意思？"}],
             visible="", question="这一步是什么意思？", model_key="test", token_limit=400,
         ))
+
+@pytest.mark.parametrize(("candidate", "verdict", "allowed", "review_calls"), [
+    ("因此把 x=3 代入第二个余式，你会用加法还是减法？", True, True, 1),
+    ("因此余式 r=4。", False, False, 1),
+    ("因此把 x=3 代入，答案是 x=4。", True, False, 0),
+    ("最终答案是 4。", True, False, 0),
+])
+def test_complete_math_reply_reviews_only_ambiguous_numbers(monkeypatch, candidate, verdict, allowed, review_calls):
+    called = []
+
+    async def review(messages, text, model_key):
+        called.append(text)
+        return verdict
+
+    monkeypatch.setattr(chat_router, "confirms_intermediate_step", review)
+    result = asyncio.run(chat_router._validate_stream_answer(
+        candidate, subject="数学", question="求多项式的余式。", model_key="test", skip_direct_answer=False,
+        math_context=[{"role": "user", "content": "求多项式的余式。"}],
+    ))
+    assert result.allowed is allowed
+    assert len(called) == review_calls

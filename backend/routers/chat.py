@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, selectinload
 from backend.config import get_settings
 from backend.database import SessionLocal
 from backend.dependencies import CurrentUser, DbSession
-from backend.services.math_step_check import math_step_evidence
+from backend.services.math_step_check import confirms_intermediate_step, math_step_evidence
 from backend.services.chat_permission_service import ensure_chat_allowed
 from backend.models.agent_config import AgentConfig
 from backend.models.conversation import (
@@ -60,7 +60,7 @@ from backend.services.agent_role_service import (
 from backend.services.chat_attachment_service import StoredChatAttachment, chat_attachment_service
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult, chat_image_understanding_service
 from backend.services.first_refusal_audit import log_first_refusal, trace_first_question
-from backend.services.filter_service import FilterDecision, OutputValidation, filter_service
+from backend.services.filter_service import AMBIGUOUS_NUMERIC_RULES, FilterDecision, OutputValidation, filter_service
 from backend.services.llm_quota_service import QuotaDenied, QuotaReservation, llm_quota_service
 from backend.services.llm_service import LLMCallError, MODEL_CALL_FAILED_MESSAGE, LeadingModeTagParser, LLMService, LLMStreamEvent, LLMUsage, closing_llm_stream, llm_service
 from backend.services.metrics_service import (
@@ -533,10 +533,20 @@ async def _validate_stream_answer(
     question: str,
     model_key: str,
     check_topic: bool = False,
+    math_context: list[dict[str, str]] | None = None,
 ):
     started = perf_counter()
     try:
         validation = filter_service.validate_answer(text, skip_direct_answer=skip_direct_answer, subject=subject, question=question)
+        if math_context and validation.issues == ["direct_answer_detected"] and validation.rule_id in AMBIGUOUS_NUMERIC_RULES:
+            # Check every other rule on the original text before spending a review call.
+            remaining = filter_service.validate_answer(
+                text, subject=subject, question=question, reviewed_math_calculation=True,
+            )
+            if remaining.allowed and await confirms_intermediate_step(math_context, text, model_key):
+                logger.info("math_intermediate_step_verified rule=%s", validation.rule_id)
+                validation = remaining
+                check_topic = True
         if validation.allowed and check_topic:
             verdict = await intent_classify_service.classify_topic(
                 question=f"学生请求：{question}\n待输出回复：{text}",
@@ -583,7 +593,7 @@ async def _repair_math_followup(
         combined = f"{visible}\n\n{answer}" if visible else answer
         checked = await _validate_stream_answer(
             combined, subject="数学", question=question, model_key=model_key,
-            skip_direct_answer=False, check_topic=True,
+            skip_direct_answer=False, check_topic=True, math_context=messages,
         )
         if checked.allowed:
             logger.info("math_followup_repair outcome=accepted")
@@ -3594,6 +3604,7 @@ async def _stream_chat(
                         question=prompt_question,
                         model_key=selected_model_key,
                         check_topic=check_topic,
+                        math_context=prompt.messages if math_followup else None,
                     )
                     if check_topic:
                         next_topic_check_at = max(len(candidate_text), 180) + 240
