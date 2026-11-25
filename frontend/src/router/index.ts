@@ -24,9 +24,12 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: '/student' },
     { path: '/login', component: Login, meta: { public: true } },
-    { path: '/student', component: StudentChat, meta: { requiresAuth: true, roles: ['student'] } },
+    { path: '/student', component: StudentChat, meta: { requiresAuth: true, roles: ['student'], chat: true } },
     { path: '/student/feedback', component: StudentFeedback, meta: { requiresAuth: true, roles: ['student'] } },
     { path: '/student/growth', component: StudentGrowth, meta: { requiresAuth: true, roles: ['student'] } },
+    { path: '/teacher/chat', component: StudentChat, meta: { requiresAuth: true, roles: ['teacher'], chat: true } },
+    { path: '/teacher/feedback', component: StudentFeedback, meta: { requiresAuth: true, roles: ['teacher'] } },
+    { path: '/teacher/growth', component: StudentGrowth, meta: { requiresAuth: true, roles: ['teacher'] } },
     { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/knowledge', component: KnowledgeManage, meta: { requiresAuth: true, roles: ['admin', 'teacher'] } },
     { path: '/admin/feedback', component: AdminFeedback, meta: { requiresAuth: true, roles: ['admin'] } },

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
-from backend.dependencies import CurrentStudent, DbSession
+from backend.dependencies import CurrentChatParticipant, DbSession
 from backend.models.feedback import ReleaseNote, ReleaseNoteReadState
 from backend.models.schemas import ReleaseNoteListRead, ReleaseNoteRead
 from backend.routers.feedback import read_at_covers
@@ -39,7 +39,7 @@ def release_note_read(db: DbSession, note: ReleaseNote, student_id: int) -> Rele
 
 
 @router.get("", response_model=ReleaseNoteListRead)
-def list_release_notes(db: DbSession, current_user: CurrentStudent) -> ReleaseNoteListRead:
+def list_release_notes(db: DbSession, current_user: CurrentChatParticipant) -> ReleaseNoteListRead:
     notes = db.scalars(
         select(ReleaseNote)
         .where(ReleaseNote.is_published.is_(True), ReleaseNote.published_at.is_not(None))
@@ -53,7 +53,7 @@ def list_release_notes(db: DbSession, current_user: CurrentStudent) -> ReleaseNo
 
 
 @router.post("/{note_id}/read", response_model=ReleaseNoteRead)
-def mark_release_note_read(note_id: int, db: DbSession, current_user: CurrentStudent) -> ReleaseNoteRead:
+def mark_release_note_read(note_id: int, db: DbSession, current_user: CurrentChatParticipant) -> ReleaseNoteRead:
     note = db.scalar(
         select(ReleaseNote).where(
             ReleaseNote.id == note_id,

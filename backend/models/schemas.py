@@ -749,6 +749,7 @@ class AdminFeedbackRead(StudentFeedbackRead):
     student_id: int
     student_name: str
     student_username: str
+    submitter_role: UserRole | None = None
     student_grade: int | None = None
     grade_label: str | None = None
     classroom_name: str | None = None

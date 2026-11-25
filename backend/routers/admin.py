@@ -133,6 +133,7 @@ def _admin_feedback_read(db: DbSession, item: StudentFeedback) -> AdminFeedbackR
         student_id=item.student_id,
         student_name=student.full_name if student else "",
         student_username=student.username if student else "",
+        submitter_role=student.role if student else None,
         student_grade=student.grade if student else None,
         grade_label=student.grade_label if student else None,
         classroom_name=student.classroom_name if student else None,
@@ -481,8 +482,8 @@ def ban_student_feedback(
     request: Request,
 ) -> FeedbackBanRead:
     student = db.get(User, student_id)
-    if not student or student.role != UserRole.STUDENT:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    if not student or student.role not in {UserRole.STUDENT, UserRole.TEACHER}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback user not found")
     ban = db.scalar(select(StudentFeedbackBan).where(StudentFeedbackBan.student_id == student_id).limit(1))
     if not ban:
         ban = StudentFeedbackBan(student_id=student_id, banned_by=current_user.id, banned_at=datetime.now(UTC))
@@ -513,8 +514,8 @@ def unban_student_feedback(
     request: Request,
 ) -> FeedbackBanRead:
     student = db.get(User, student_id)
-    if not student or student.role != UserRole.STUDENT:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    if not student or student.role not in {UserRole.STUDENT, UserRole.TEACHER}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback user not found")
     ban = db.scalar(select(StudentFeedbackBan).where(StudentFeedbackBan.student_id == student_id).limit(1))
     if ban:
         db.delete(ban)

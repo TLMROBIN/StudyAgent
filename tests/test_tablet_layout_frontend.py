@@ -43,12 +43,17 @@ def test_chat_focus_only_follows_latest_without_scrolling_the_fixed_shell():
     assert "scrollIntoView" not in focus_handler
 
 
-def test_student_chat_main_uses_resized_viewport_height():
+def test_chat_main_uses_resized_viewport_height_for_both_roles():
     app = Path("frontend/src/App.vue").read_text()
     css = Path("frontend/src/styles.css").read_text()
+    router = Path("frontend/src/router/index.ts").read_text()
 
     assert "app-main--student-chat" in app
-    assert "route.path === '/student'" in app
+    assert "route.meta.chat === true" in app
+    for path, role in (("/student", "student"), ("/teacher/chat", "teacher")):
+        route = next(line for line in router.splitlines() if f"path: '{path}'" in line)
+        assert "component: StudentChat" in route
+        assert f"roles: ['{role}'], chat: true" in route
 
     start = css.index(".app-main--student-chat")
     end = css.index("}", start)

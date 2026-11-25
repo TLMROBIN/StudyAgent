@@ -41,7 +41,7 @@ const requiresAuth = computed(() => route.matched.some((record) => record.meta.r
 const showShell = computed(() => route.path !== '/login')
 const shellActive = computed(() => showShell.value && !!auth.user)
 const campusSsoSession = computed(() => !!auth.user && isCampusSsoSession())
-const studentChatActive = computed(() => route.path === '/student')
+const chatActive = computed(() => route.meta.chat === true)
 const sidebarIsCollapsed = computed(() => sidebarCollapsed.value)
 const chatView = ref<{ openHistory: () => void; newQuestion: () => void; openNotices: () => void } | null>(null)
 const routeReady = computed(() => !requiresAuth.value || auth.initialized)
@@ -50,16 +50,19 @@ const userNoticeVersion = computed(() => auth.user?.current_user_notice_version 
 const navigationItems = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = []
 
-  if (auth.user?.role === 'student') {
-    items.push({ to: '/student', label: '学生答疑', shortLabel: '答疑' })
+  const role = auth.user?.role
+  if (role === 'student' || role === 'teacher') {
+    items.push(role === 'student'
+      ? { to: '/student', label: '学生答疑', shortLabel: '答疑' }
+      : { to: '/teacher/chat', label: '答疑会话', shortLabel: '答疑' })
     items.push({
-      to: '/student/growth',
+      to: `/${role}/growth`,
       label: '我的成长',
       shortLabel: '成长',
       showUnreadDot: hasUnreadPraise.value,
     })
     items.push({
-      to: '/student/feedback',
+      to: `/${role}/feedback`,
       label: '意见反馈',
       shortLabel: '反馈',
       showUnreadDot: unreadSummary.value.has_unread,
@@ -109,9 +112,11 @@ watch(() => auth.user?.role, (role) => {
 })
 
 watch(
-  () => [auth.initialized, auth.user?.role, route.fullPath] as const,
-  () => {
-    if (!auth.initialized || auth.user?.role !== 'student') {
+  () => [auth.initialized, auth.user?.id, auth.user?.role, route.fullPath] as const,
+  ([initialized, , role], _, onCleanup) => {
+    let active = true
+    onCleanup(() => { active = false })
+    if (!initialized || (role !== 'student' && role !== 'teacher')) {
       unreadSummary.value = {
         unread_feedback_replies: 0,
         unread_release_notes: 0,
@@ -122,9 +127,10 @@ watch(
     }
     fetchFeedbackUnreadSummary()
       .then((summary) => {
-        unreadSummary.value = summary
+        if (active) unreadSummary.value = summary
       })
       .catch(() => {
+        if (!active) return
         unreadSummary.value = {
           unread_feedback_replies: 0,
           unread_release_notes: 0,
@@ -133,10 +139,10 @@ watch(
       })
     fetchIncentiveSummary()
       .then((summary) => {
-        hasUnreadPraise.value = summary.has_unread_praise
+        if (active) hasUnreadPraise.value = summary.has_unread_praise
       })
       .catch(() => {
-        hasUnreadPraise.value = false
+        if (active) hasUnreadPraise.value = false
       })
   },
   { immediate: true },
@@ -177,7 +183,7 @@ async function handleDeclineUserNotice() {
         'app-root--shell': shellActive,
         'app-root--plain': !shellActive,
         'app-root--sidebar-collapsed': shellActive && sidebarIsCollapsed,
-        'app-root--student-chat': shellActive && studentChatActive,
+        'app-root--student-chat': shellActive && chatActive,
       },
     ]"
   >
@@ -201,7 +207,7 @@ async function handleDeclineUserNotice() {
           </button>
         </div>
         <nav class="nav-list">
-          <template v-if="studentChatActive">
+          <template v-if="chatActive">
             <button type="button" title="对话历史" aria-label="对话历史" @click="chatView?.openHistory()">{{ sidebarIsCollapsed ? '历史' : '对话历史' }}</button>
             <button type="button" title="新问题" @click="chatView?.newQuestion()">新问题</button>
             <button type="button" title="学校通知" @click="chatView?.openNotices()">{{ sidebarIsCollapsed ? '通知' : '学校通知' }}</button>
@@ -235,7 +241,7 @@ async function handleDeclineUserNotice() {
         'app-main',
         {
           'app-main--plain': !shellActive,
-          'app-main--student-chat': shellActive && studentChatActive,
+          'app-main--student-chat': shellActive && chatActive,
         },
       ]"
     >

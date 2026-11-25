@@ -190,6 +190,31 @@ def test_student_feedback_limit_admin_reply_and_student_readback():
     assert first_item["reply_content"] == "已收到，我们会排进优化清单。"
 
 
+def test_teacher_feedback_is_private_and_admin_can_manage_it():
+    session_factory = build_session()
+    teacher = create_user(session_factory, UserRole.TEACHER, full_name="王老师")
+    admin = create_user(session_factory, UserRole.ADMIN, full_name="管理员")
+    student = create_student_with_classroom(session_factory)
+    teacher_client = build_client(session_factory, teacher)
+    admin_client = build_client(session_factory, admin)
+    student_client = build_client(session_factory, student)
+
+    response = teacher_client.post("/api/feedback", json={"content": "建议优化会话历史筛选"})
+    assert response.status_code == 201
+    feedback_id = response.json()["id"]
+    assert teacher_client.get("/api/feedback").json()["items"][0]["id"] == feedback_id
+    assert student_client.get("/api/feedback").json()["items"] == []
+    assert student_client.post(f"/api/feedback/{feedback_id}/read").status_code == 404
+    assert teacher_client.get("/api/release-notes").status_code == 200
+    assert admin_client.get("/api/admin/feedback").json()[0]["submitter_role"] == "teacher"
+
+    ban_path = f"/api/admin/feedback/students/{teacher.id}/ban"
+    assert admin_client.post(ban_path, json={}).status_code == 200
+    assert teacher_client.post("/api/feedback", json={"content": "第二条建议"}).status_code == 403
+    assert admin_client.delete(ban_path).status_code == 200
+    assert teacher_client.post("/api/feedback", json={"content": "第二条建议"}).status_code == 201
+
+
 def test_student_can_upload_feedback_images_and_admin_can_view_them(tmp_path, monkeypatch):
     png_bytes = build_png_bytes()
     monkeypatch.setattr(feedback_router.feedback_attachment_service, "base_dir", tmp_path)

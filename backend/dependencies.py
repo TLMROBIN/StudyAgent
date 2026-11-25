@@ -48,5 +48,6 @@ def require_roles(*allowed_roles: UserRole):
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 CurrentStudent = Annotated[User, Depends(require_roles(UserRole.STUDENT))]
+CurrentChatParticipant = Annotated[User, Depends(require_roles(UserRole.STUDENT, UserRole.TEACHER))]
 CurrentTeacher = Annotated[User, Depends(require_roles(UserRole.TEACHER, UserRole.ADMIN))]
 CurrentAdmin = Annotated[User, Depends(require_roles(UserRole.ADMIN))]

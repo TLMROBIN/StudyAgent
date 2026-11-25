@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from backend.dependencies import CurrentStudent, CurrentUser, DbSession
+from backend.dependencies import CurrentChatParticipant, CurrentUser, DbSession
 from backend.models.feedback import (
     ReleaseNote,
     ReleaseNoteReadState,
@@ -134,7 +134,7 @@ def student_feedback_read(db: DbSession, item: StudentFeedback, student_id: int)
 
 
 @router.get("", response_model=StudentFeedbackListRead)
-def list_my_feedback(db: DbSession, current_user: CurrentStudent) -> StudentFeedbackListRead:
+def list_my_feedback(db: DbSession, current_user: CurrentChatParticipant) -> StudentFeedbackListRead:
     items = db.scalars(
         select(StudentFeedback)
         .options(selectinload(StudentFeedback.replier), selectinload(StudentFeedback.attachments))
@@ -153,7 +153,7 @@ def list_my_feedback(db: DbSession, current_user: CurrentStudent) -> StudentFeed
 
 
 @router.get("/unread-summary", response_model=FeedbackUnreadSummaryRead)
-def unread_summary(db: DbSession, current_user: CurrentStudent) -> FeedbackUnreadSummaryRead:
+def unread_summary(db: DbSession, current_user: CurrentChatParticipant) -> FeedbackUnreadSummaryRead:
     feedback_count = unread_feedback_reply_count(db, current_user.id)
     release_note_count = unread_release_note_count(db, current_user.id)
     return FeedbackUnreadSummaryRead(
@@ -164,7 +164,7 @@ def unread_summary(db: DbSession, current_user: CurrentStudent) -> FeedbackUnrea
 
 
 @router.post("/{feedback_id}/read", response_model=StudentFeedbackRead)
-def mark_feedback_read(feedback_id: int, db: DbSession, current_user: CurrentStudent) -> StudentFeedbackRead:
+def mark_feedback_read(feedback_id: int, db: DbSession, current_user: CurrentChatParticipant) -> StudentFeedbackRead:
     item = db.scalar(
         select(StudentFeedback)
         .options(selectinload(StudentFeedback.replier), selectinload(StudentFeedback.attachments))
@@ -229,7 +229,7 @@ async def _read_feedback_images(files: list[UploadFile]) -> list[tuple[UploadFil
 @router.post("", response_model=StudentFeedbackRead, status_code=status.HTTP_201_CREATED)
 async def create_feedback(
     db: DbSession,
-    current_user: CurrentStudent,
+    current_user: CurrentChatParticipant,
     request: Request,
 ) -> StudentFeedbackRead:
     payload, files = await _parse_feedback_submission(request)

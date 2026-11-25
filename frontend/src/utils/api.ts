@@ -294,6 +294,7 @@ export interface AdminFeedbackItem extends StudentFeedbackItem {
   student_id: number
   student_name: string
   student_username: string
+  submitter_role?: 'student' | 'teacher' | 'admin' | null
   student_grade?: number | null
   grade_label?: string | null
   classroom_name?: string | null

@@ -32,7 +32,9 @@ from backend.models.llm_usage import LLMUsageEvent
 from backend.models.schemas import AgentRoleCreate, ChatRequest, QuestionRecommendationRequest
 from backend.models.user import User, UserRole
 from backend.routers import admin as admin_router
+from backend.routers import agent_role as agent_role_router
 from backend.routers import chat as chat_router
+from backend.routers import incentive as incentive_router
 from backend.services.chat_image_understanding_service import ImageUnderstandingResult
 from backend.services.agent_role_service import agent_role_service
 from backend.services.embed_service import EmbedService
@@ -142,6 +144,8 @@ def _build_chat_test_client(session_factory, current_user: User):
     app = FastAPI()
     app.include_router(chat_router.router)
     app.include_router(admin_router.router)
+    app.include_router(agent_role_router.router)
+    app.include_router(incentive_router.router)
 
     def override_db():
         session = session_factory()
@@ -1496,6 +1500,50 @@ def test_chat_stream_allows_admin_user_via_http(monkeypatch):
     assert response.status_code == 200
     assert "Insufficient permissions" not in response.text
     assert "先从题干条件入手。" in response.text
+
+
+def test_teacher_chat_uses_own_history_and_student_guidance_controls(monkeypatch):
+    session_factory = _build_session_factory()
+    teacher = _create_user(session_factory, role=UserRole.TEACHER)
+    student = _create_student(session_factory)
+
+    async def fake_stream_response(messages, fallback_text) -> AsyncIterator[str]:
+        yield "先找出受力对象。"
+
+    monkeypatch.setattr(chat_router.llm_service, "stream_response", fake_stream_response)
+    monkeypatch.setattr(
+        chat_router.rag_service,
+        "retrieve",
+        lambda db, subject, question, **kwargs: RetrievalResult(context="", chunks=[]),
+    )
+    monkeypatch.setattr(chat_router.question_cache_service, "is_cacheable", lambda **kwargs: False)
+
+    with session_factory.begin() as db:
+        student_conversation = Conversation(student_id=student.id, subject="物理")
+        db.add(student_conversation)
+        db.flush()
+        student_conversation_id = student_conversation.id
+
+    client = _build_chat_test_client(session_factory, teacher)
+    assert client.get("/api/chat/history").json() == []
+    assert client.get(f"/api/chat/history/{student_conversation_id}").status_code == 404
+    assert client.get("/api/admin/conversation-archive").status_code == 403
+    assert client.get("/api/agent-roles/enabled", params={"subject": "物理"}).status_code == 200
+    assert client.get("/api/incentive/me/summary").status_code == 200
+    assert client.get("/api/incentive/me/report").status_code == 200
+
+    response = client.post("/api/chat/stream", json={"subject": "物理", "message": "怎么分析斜面上的物块受力？"})
+    assert response.status_code == 200
+    assert _parse_sse(response.text)[-1][0] == "done"
+    history = client.get("/api/chat/history").json()
+    assert len(history) == 1
+    teacher_conversation_id = history[0]["id"]
+    assert teacher_conversation_id != student_conversation_id
+    conversation = client.get(f"/api/chat/history/{teacher_conversation_id}").json()
+    assert conversation["messages"][-1]["content"] == "先找出受力对象。"
+    assert _build_chat_test_client(session_factory, student).get(
+        f"/api/chat/history/{teacher_conversation_id}",
+    ).status_code == 404
 
 
 def test_chat_stream_replays_completed_request_id(monkeypatch):

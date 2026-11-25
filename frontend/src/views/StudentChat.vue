@@ -202,6 +202,7 @@ let cropPointerStart: {
 const localAttachmentUrls = new Set<string>()
 const { assetUrl, assetFailed, markAssetFailed, openAsset, preloadAssets, ensureAssetUrl } = useAuthorizedAssets()
 const authStore = useAuthStore()
+const accountPath = computed(() => authStore.user?.role === 'teacher' ? '/teacher' : '/student')
 
 const MAX_ACTIVE_CONVERSATIONS = 10
 const CONVERSATION_LIMIT_MESSAGE = `未归档对话已达上限 ${MAX_ACTIVE_CONVERSATIONS} 个，请先归档或删除一个旧对话`
@@ -1584,7 +1585,7 @@ async function refreshChatPermissionNotice() {
 
 function openChatBanAppeal() {
   chatBanDialogVisible.value = false
-  void router.push('/student/feedback')
+  void router.push(`${accountPath.value}/feedback`)
 }
 
 function chatFailureMessage(error: unknown): string {
@@ -2564,7 +2565,7 @@ onMounted(async () => {
           <button type="button" class="ghost-button" :class="{ 'history-filter-active': !showArchived }" :aria-pressed="!showArchived" @click="showArchived = false">历史对话</button>
           <button type="button" class="ghost-button" :class="{ 'history-filter-active': showArchived }" :aria-pressed="showArchived" @click="showArchived = true">已归档</button>
         </div>
-        <RouterLink to="/student/growth" class="incentive-summary-card" @click="historyOpen = false">
+        <RouterLink :to="`${accountPath}/growth`" class="incentive-summary-card" @click="historyOpen = false">
           <div><span>成长积分</span><strong>{{ incentiveSummary.total_points }}</strong></div>
           <div><span>等级</span><strong>L{{ incentiveSummary.level }}</strong></div>
           <div><span>连续学习</span><strong>{{ incentiveSummary.current_streak_days }} 天</strong></div>

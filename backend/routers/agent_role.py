@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
-from backend.dependencies import CurrentAdmin, CurrentStudent, DbSession
+from backend.dependencies import CurrentAdmin, CurrentChatParticipant, DbSession
 from backend.models.agent_role import AgentRole, AgentRoleRevision
 from backend.models.schemas import (
     AgentRoleCreate,
@@ -114,7 +114,7 @@ def import_role_defaults(db: DbSession, current_user: CurrentAdmin, request: Req
 
 
 @router.get("/enabled", response_model=list[AgentRolePublicRead])
-def list_enabled_roles(subject: str, db: DbSession, current_user: CurrentStudent) -> list[AgentRolePublicRead]:
+def list_enabled_roles(subject: str, db: DbSession, current_user: CurrentChatParticipant) -> list[AgentRolePublicRead]:
     if not is_valid_subject(subject):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported subject")
     return [_public_read(role) for role in agent_role_service.list_enabled(db, subject)]

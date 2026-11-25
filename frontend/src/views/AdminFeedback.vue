@@ -180,7 +180,7 @@ async function banFeedback(item: AdminFeedbackItem) {
   savingId.value = item.id
   try {
     await banStudentFeedback(item.student_id, { reason: reason.trim() || null })
-    ElMessage.success('已暂停该学生的反馈权限')
+    ElMessage.success('已暂停该用户的反馈权限')
     await loadFeedback()
   } catch (error) {
     console.error(error)
@@ -194,7 +194,7 @@ async function unbanFeedback(item: AdminFeedbackItem) {
   savingId.value = item.id
   try {
     await unbanStudentFeedback(item.student_id)
-    ElMessage.success('已恢复该学生的反馈权限')
+    ElMessage.success('已恢复该用户的反馈权限')
     await loadFeedback()
   } catch (error) {
     console.error(error)
@@ -242,9 +242,9 @@ onMounted(() => {
   <section class="dashboard-stack">
     <div class="panel-header">
       <div>
-        <p class="eyebrow">Student Feedback</p>
+        <p class="eyebrow">Feedback</p>
         <h2>意见反馈管理</h2>
-        <p class="panel-subcopy">查看学生提交的意见，回复后学生可在自己的反馈页看到处理结果。</p>
+        <p class="panel-subcopy">查看师生提交的意见，回复后提交人可在自己的反馈页看到处理结果。</p>
       </div>
       <div class="toolbar">
         <span class="detail-chip">待回复 {{ unrepliedCount }}</span>
@@ -265,7 +265,7 @@ onMounted(() => {
         <div class="feedback-admin-head">
           <div>
             <strong>{{ item.student_name }}</strong>
-            <span>{{ item.classroom_label || item.grade_label || '未分班' }} · {{ item.student_username }}</span>
+            <span>{{ item.submitter_role === 'teacher' ? '教师' : item.classroom_label || item.grade_label || '未分班' }} · {{ item.student_username }}</span>
           </div>
           <div class="detail-chip-group">
             <span :class="['detail-chip', { 'detail-chip--muted': item.reply_content }]">
@@ -293,7 +293,7 @@ onMounted(() => {
             class="textarea"
             maxlength="1000"
             rows="3"
-            placeholder="给学生的回复"
+            placeholder="回复意见"
             :disabled="savingId === item.id"
           ></textarea>
           <div class="row-actions">
@@ -339,7 +339,7 @@ onMounted(() => {
         </div>
       </article>
       <p v-if="!items.length" class="panel-subcopy">
-        {{ includeArchivedFeedback ? '暂无学生反馈。' : '暂无待处理学生反馈，可切换查看已归档记录。' }}
+        {{ includeArchivedFeedback ? '暂无反馈。' : '暂无待处理反馈，可切换查看已归档记录。' }}
       </p>
     </section>
 
@@ -348,7 +348,7 @@ onMounted(() => {
         <div>
           <p class="eyebrow">Release Notes</p>
           <h2>发布更新日志</h2>
-          <p class="panel-subcopy">发布后，学生端“意见反馈”里的“更新日志”入口会显示红点提醒。</p>
+          <p class="panel-subcopy">发布后，师生会在「意见反馈」的「更新日志」看到红点提醒。</p>
         </div>
         <button v-if="releaseNoteForm.id" class="ghost-button" :disabled="releaseNoteSaving" @click="resetReleaseNoteForm">
           取消编辑
@@ -366,12 +366,12 @@ onMounted(() => {
           class="textarea"
           maxlength="5000"
           rows="6"
-          placeholder="面向学生的更新说明"
+          placeholder="面向师生的更新说明"
           :disabled="releaseNoteSaving"
         ></textarea>
         <label class="release-note-publish-toggle">
           <input v-model="releaseNoteForm.is_published" type="checkbox" />
-          立即发布给学生
+          立即发布
         </label>
         <div class="row-actions">
           <span class="panel-subcopy">{{ releaseNoteForm.content.trim().length }}/5000</span>

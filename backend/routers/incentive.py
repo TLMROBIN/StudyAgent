@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import selectinload
 
-from backend.dependencies import CurrentStudent, CurrentTeacher, DbSession
+from backend.dependencies import CurrentChatParticipant, CurrentTeacher, DbSession
 from backend.models.agent_config import AgentConfig
 from backend.models.incentive import StudentIncentiveEvent, StudentIncentiveProfile
 from backend.models.schemas import (
@@ -56,7 +56,7 @@ def _student_for_teacher(db: DbSession, current_user: User, student_id: int) -> 
 
 
 @router.get("/me/summary", response_model=IncentiveSummaryRead)
-def my_summary(db: DbSession, current_user: CurrentStudent) -> IncentiveSummaryRead:
+def my_summary(db: DbSession, current_user: CurrentChatParticipant) -> IncentiveSummaryRead:
     params = _params(db)
     data = incentive_service.get_summary(db, current_user.id, params)
     profile = db.scalar(
@@ -77,14 +77,14 @@ def my_summary(db: DbSession, current_user: CurrentStudent) -> IncentiveSummaryR
 @router.get("/me/report", response_model=IncentiveReportRead)
 def my_report(
     db: DbSession,
-    current_user: CurrentStudent,
+    current_user: CurrentChatParticipant,
     period: str = Query("week", pattern="^(week|month)$"),
 ) -> IncentiveReportRead:
     return IncentiveReportRead(**incentive_service.get_report(db, current_user.id, period))
 
 
 @router.get("/me/praises", response_model=list[IncentivePraiseRead])
-def my_praises(db: DbSession, current_user: CurrentStudent) -> list[IncentivePraiseRead]:
+def my_praises(db: DbSession, current_user: CurrentChatParticipant) -> list[IncentivePraiseRead]:
     events = db.scalars(
         select(StudentIncentiveEvent)
         .where(
@@ -111,7 +111,7 @@ def my_praises(db: DbSession, current_user: CurrentStudent) -> list[IncentivePra
 
 
 @router.post("/me/praises/read", response_model=IncentiveSummaryRead)
-def mark_praises_read(db: DbSession, current_user: CurrentStudent) -> IncentiveSummaryRead:
+def mark_praises_read(db: DbSession, current_user: CurrentChatParticipant) -> IncentiveSummaryRead:
     profile = db.scalar(
         select(StudentIncentiveProfile).where(StudentIncentiveProfile.student_id == current_user.id)
     )
